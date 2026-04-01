@@ -30,6 +30,7 @@ def evaluate(strategy_params, exit_params):
     total_return = 0.0
     worst_dd = 0.0
     total_trades = 0
+    total_fee_drag = 0.0
     for label, start_date, end_date in WINDOWS:
         result = backtest_module.backtest_macd_aggressive(
             strategy_func=strategy_module.strategy,
@@ -43,16 +44,19 @@ def evaluate(strategy_params, exit_params):
         total_return += result["return"]
         worst_dd = max(worst_dd, result["max_drawdown"])
         total_trades += result["trades"]
+        total_fee_drag += result.get("fee_drag_pct", 0.0)
         rows.append((label, result))
 
     trend_return = sum(result["return"] for label, result in rows if label.startswith("trend"))
     noise_return = sum(result["return"] for label, result in rows if label.startswith("noise"))
+    avg_fee_drag = total_fee_drag / len(rows) if rows else 0.0
     score = (
         trend_return * 1.5
         + noise_return * 0.7
         + total_return * 0.4
         - max(0.0, worst_dd - 16.0) * 2.2
         - max(0, 18 - total_trades) * 0.8
+        - avg_fee_drag * 0.6
     )
     return {
         "score": score,
@@ -61,6 +65,7 @@ def evaluate(strategy_params, exit_params):
         "noise_return": noise_return,
         "worst_dd": worst_dd,
         "total_trades": total_trades,
+        "avg_fee_drag": avg_fee_drag,
         "rows": rows,
     }
 
@@ -132,7 +137,7 @@ def main():
         print(
             f"#{rank} score={summary['score']:.2f} total={summary['total_return']:.2f}% "
             f"trend={summary['trend_return']:.2f}% noise={summary['noise_return']:.2f}% "
-            f"dd={summary['worst_dd']:.2f}% trades={summary['total_trades']}"
+            f"dd={summary['worst_dd']:.2f}% trades={summary['total_trades']} fee_drag={summary['avg_fee_drag']:.2f}%"
         )
         print(
             "  strategy "

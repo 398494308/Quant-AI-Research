@@ -10,6 +10,7 @@ import shutil
 import sys
 import time
 import traceback
+from datetime import UTC, datetime
 from pathlib import Path
 
 import requests
@@ -39,18 +40,15 @@ BACKTEST_BACKUP_FILE = BASE_DIR / "backups/backtest_macd_aggressive_backup.py"
 PROGRAM_FILE = BASE_DIR / "docs/program_macd_aggressive.md"
 LOG_FILE = str(BASE_DIR / "logs/macd_aggressive_research.log")
 MEMORY_FILE = BASE_DIR / "state/optimizer_memory_macd_aggressive.json"
+HEARTBEAT_FILE = BASE_DIR / "state/research_macd_aggressive_heartbeat.json"
 LOOP_INTERVAL_SECONDS = int(os.getenv("MACD_LOOP_INTERVAL_SECONDS", "600"))
 INTRADAY_FILE = str(BASE_DIR / "data/price/BTCUSDT_futures_15m_20240601_20260401.csv")
 HOURLY_FILE = str(BASE_DIR / "data/price/BTCUSDT_futures_1h_20240601_20260401.csv")
 WINDOWS = [
-    ("test", "测试-2025-08", "2025-08-01", "2025-08-31"),
-    ("test", "测试-2025-11", "2025-11-01", "2025-11-30"),
-    ("test", "测试-2025-07", "2025-07-01", "2025-07-31"),
-    ("test", "测试-2025-09", "2025-09-01", "2025-09-30"),
-    ("test", "测试-2025-10", "2025-10-01", "2025-10-31"),
-    ("test", "测试-2025-12", "2025-12-01", "2025-12-31"),
-    ("main", "主-2026-01", "2026-01-01", "2026-01-31"),
-    ("main", "主-2026-02", "2026-02-01", "2026-02-28"),
+    ("train", "训练-2025-12", "2025-12-01", "2025-12-31"),
+    ("train", "训练-2026-01", "2026-01-01", "2026-01-31"),
+    ("train", "训练-2026-02", "2026-02-01", "2026-02-28"),
+    ("val", "验证-2026-03", "2026-03-01", "2026-03-31"),
 ]
 best_score = -999999.0
 iteration = 0
@@ -121,6 +119,18 @@ def log_exception(message):
     logging.error("%s\n%s", message, traceback.format_exc())
 
 
+def write_heartbeat(status, **extra):
+    HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": status,
+        "pid": os.getpid(),
+        "iteration": iteration,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    payload.update(extra)
+    HEARTBEAT_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def reload_strategy():
     global strategy, backtest_macd_aggressive
     importlib.reload(backtest_module)
@@ -146,49 +156,75 @@ def run_all_tests():
 
 
 def _score_summary(results):
-    main_scores = [item["result"]["score"] for item in results if item["group"] == "main"]
-    test_scores = [item["result"]["score"] for item in results if item["group"] == "test"]
-    main_avg = sum(main_scores) / len(main_scores) if main_scores else 0.0
-    test_avg = sum(test_scores) / len(test_scores) if test_scores else 0.0
+    train_scores = [item["result"]["score"] for item in results if item["group"] == "train"]
+    val_scores = [item["result"]["score"] for item in results if item["group"] == "val"]
+
+    train_avg = sum(train_scores) / len(train_scores) if train_scores else 0.0
+    val_avg = sum(val_scores) / len(val_scores) if val_scores else 0.0
+
+    train_returns = [item["result"]["return"] for item in results if item["group"] == "train"]
+    val_returns = [item["result"]["return"] for item in results if item["group"] == "val"]
+    train_std = (sum((r - sum(train_returns)/len(train_returns))**2 for r in train_returns) / len(train_returns))**0.5 if len(train_returns) > 1 else 0.0
+
     worst_drawdown = max((item["result"]["max_drawdown"] for item in results), default=0.0)
+    avg_fee_drag = sum(item["result"].get("fee_drag_pct", 0.0) for item in results) / len(results) if results else 0.0
     liquidation_rate = (
         sum(item["result"].get("liquidations", 0) for item in results)
         / max(1, sum(item["result"]["trades"] for item in results))
     )
-    overall_avg = 0.60 * main_avg + 0.40 * test_avg - max(0.0, worst_drawdown - 18.0) * 0.10 - liquidation_rate * 4.0
-    return main_avg, test_avg, overall_avg
+
+    overfit_penalty = max(0.0, train_avg - val_avg) * 1.2
+    volatility_penalty = train_std * 0.20
+
+    overall_avg = (
+        train_avg * 0.30
+        + val_avg * 0.70
+        - overfit_penalty
+        - volatility_penalty
+        - max(0.0, worst_drawdown - 25.0) * 0.20
+        - liquidation_rate * 6.0
+        - avg_fee_drag * 0.12
+    )
+    return train_avg, val_avg, overall_avg, avg_fee_drag
 
 
-def build_summary_message(title, results, main_avg, overall_avg):
-    test_scores = [item["result"]["score"] for item in results if item["group"] == "test"]
-    test_avg = sum(test_scores) / len(test_scores) if test_scores else 0.0
+def build_summary_message(title, results, train_avg, val_avg, overall_avg):
     total_trades = sum(item["result"]["trades"] for item in results)
     worst_drawdown = max((item["result"]["max_drawdown"] for item in results), default=0.0)
     pyramid_adds = sum(item["result"].get("pyramid_add_count", 0) for item in results)
+    avg_fee_drag = sum(item["result"].get("fee_drag_pct", 0.0) for item in results) / len(results) if results else 0.0
     lines = [
-        title,
-        f"模型 {OPENAI_MODEL} / {OPENAI_REASONING_EFFORT}",
-        f"主窗口 {main_avg:.4f} | 测试窗口 {test_avg:.4f} | 综合分 {overall_avg:.4f}",
-        (
-            f"{backtest_module.EXIT_PARAMS['leverage']}x | "
-            f"并发 {backtest_module.EXIT_PARAMS['max_concurrent_positions']} | "
-            f"首止盈 {backtest_module.EXIT_PARAMS['tp1_pnl_pct']:.1f}%"
-        ),
-        f"最差回撤 {worst_drawdown:.2f}% | 总交易数 {total_trades} | 加仓次数 {pyramid_adds}",
-        "```text",
-        "窗口       类型  交易数  收益率%  回撤%",
-        "--------  ----  -----  -------  ------",
+        f"**{title}**",
+        f"",
+        f"📊 综合评分",
+        f"训练: {train_avg:.2f}",
+        f"验证: {val_avg:.2f}",
+        f"综合: {overall_avg:.2f}",
+        f"",
+        f"⚙️ 参数配置",
+        f"杠杆: {backtest_module.EXIT_PARAMS['leverage']}x",
+        f"并发: {backtest_module.EXIT_PARAMS['max_concurrent_positions']}",
+        f"首止盈: {backtest_module.EXIT_PARAMS['tp1_pnl_pct']:.0f}%",
+        f"",
+        f"⚠️ 风险指标",
+        f"最大回撤: {worst_drawdown:.1f}%",
+        f"总交易: {total_trades}",
+        f"加仓次数: {pyramid_adds}",
+        f"手续费: {avg_fee_drag:.2f}%",
+        f"",
+        f"📈 窗口明细",
     ]
     for item in results:
         result = item["result"]
+        group_label = {"train": "训", "val": "验"}.get(item["group"], item["group"])
         lines.append(
-            f"{item['name']:<8}  "
-            f"{'主' if item['group'] == 'main' else '测':<4}  "
-            f"{result['trades']:>5}  "
-            f"{result['return']:>7.2f}  "
-            f"{result['max_drawdown']:>6.2f}"
+            f"{item['name']}({group_label})"
         )
-    lines.extend(["```"])
+        lines.append(
+            f"  交易{result['trades']} | "
+            f"收益{result['return']:.1f}% | "
+            f"回撤{result['max_drawdown']:.1f}%"
+        )
     return "\n".join(lines)
 
 
@@ -317,12 +353,13 @@ def initialize_best_score():
     global best_score, latest_eval_summary, last_params_snapshot, last_exit_snapshot
     reload_strategy()
     results = run_all_tests()
-    main_avg, test_avg, overall_avg = _score_summary(results)
+    main_avg, test_avg, overall_avg, avg_fee_drag = _score_summary(results)
     best_score = overall_avg
-    latest_eval_summary = build_summary_message("基准", results, main_avg, overall_avg)
+    latest_eval_summary = build_summary_message("基准", results, main_avg, test_avg, overall_avg)
     last_params_snapshot = dict(strategy_module.PARAMS)
     last_exit_snapshot = dict(backtest_module.EXIT_PARAMS)
-    log_info(f"激进版初始基准: overall={overall_avg:.4f}, main={main_avg:.4f}, test={test_avg:.4f}")
+    log_info(f"激进版初始基准: overall={overall_avg:.4f}, train={main_avg:.4f}, val={test_avg:.4f}, fee_drag={avg_fee_drag:.4f}")
+    write_heartbeat("initialized", overall=overall_avg, train=main_avg, val=test_avg, fee_drag=avg_fee_drag)
     send_discord(latest_eval_summary)
 
 
@@ -336,7 +373,7 @@ def run_iteration(iteration_id, use_model_optimization=True):
             optimize_strategy()
         reload_strategy()
         results = run_all_tests()
-        main_avg, test_avg, overall_avg = _score_summary(results)
+        main_avg, test_avg, overall_avg, avg_fee_drag = _score_summary(results)
     except Exception as exc:
         shutil.copy(BACKUP_FILE, STRATEGY_FILE)
         shutil.copy(BACKTEST_BACKUP_FILE, BACKTEST_FILE)
@@ -344,7 +381,7 @@ def run_iteration(iteration_id, use_model_optimization=True):
         log_exception(f"❌ 激进版第 {iteration_id} 轮失败: {exc}")
         raise
 
-    latest_eval_summary = build_summary_message("最近一轮", results, main_avg, overall_avg)
+    latest_eval_summary = build_summary_message("最近一轮", results, main_avg, test_avg, overall_avg)
     current_params_snapshot = dict(strategy_module.PARAMS)
     current_exit_snapshot = dict(backtest_module.EXIT_PARAMS)
     changes = []
@@ -360,16 +397,28 @@ def run_iteration(iteration_id, use_model_optimization=True):
     total_trades = sum(item["result"]["trades"] for item in results)
     worst_drawdown = max(item["result"]["max_drawdown"] for item in results)
     liquidations = sum(item["result"].get("liquidations", 0) for item in results)
-    gate_passed = total_trades >= 45 and worst_drawdown <= 24.0 and liquidations <= 4
-    gate_reason = "通过" if gate_passed else f"trade={total_trades}, dd={worst_drawdown:.2f}, liq={liquidations}"
+    train_trades = sum(item["result"]["trades"] for item in results if item["group"] == "train")
+    val_trades = sum(item["result"]["trades"] for item in results if item["group"] == "val")
+
+    gate_passed = (
+        total_trades >= 40
+        and train_trades >= 25
+        and val_trades >= 10
+        and worst_drawdown <= 30.0
+        and liquidations <= 6
+        and main_avg - test_avg <= 10.0
+        and val_avg > -5.0
+    )
+    gate_reason = "通过" if gate_passed else f"trade={total_trades}(训{train_trades}/验{val_trades}), dd={worst_drawdown:.2f}, liq={liquidations}, 过拟={main_avg-test_avg:.2f}, 验证={val_avg:.2f}"
 
     if gate_passed and overall_avg > best_score:
         best_score = overall_avg
         last_params_snapshot = current_params_snapshot
         last_exit_snapshot = current_exit_snapshot
         _append_memory("accepted", changes, overall_avg, gate_reason)
-        msg = build_summary_message(f"🚀 新最优激进版策略 #{iteration_id}", results, main_avg, overall_avg)
+        msg = build_summary_message(f"🚀 新最优激进版策略 #{iteration_id}", results, main_avg, test_avg, overall_avg)
         log_info(msg)
+        write_heartbeat("new_best", overall=overall_avg, gate=gate_reason)
         send_discord(msg)
         return True
 
@@ -378,6 +427,7 @@ def run_iteration(iteration_id, use_model_optimization=True):
     shutil.copy(BACKTEST_BACKUP_FILE, BACKTEST_FILE)
     reload_strategy()
     log_info(f"第 {iteration_id} 轮未保留: {gate_reason}")
+    write_heartbeat("iteration_rejected", overall=overall_avg, gate=gate_reason)
     return False
 
 
@@ -389,26 +439,43 @@ def main():
     log_info("🚀 启动激进版 MACD 研究系统")
     log_info(f"日志文件: {LOG_FILE}")
     log_info(f"循环间隔: {LOOP_INTERVAL_SECONDS} 秒")
-    initialize_best_score()
+    write_heartbeat("starting", loop_interval=LOOP_INTERVAL_SECONDS)
+    while True:
+        try:
+            initialize_best_score()
+            break
+        except Exception as exc:
+            cooldown_seconds = max(LOOP_INTERVAL_SECONDS, 600)
+            log_exception(f"❌ 激进版初始化失败: {exc}")
+            write_heartbeat("init_failed", error=str(exc), cooldown_seconds=cooldown_seconds)
+            if once:
+                return
+            log_info(f"初始化失败，冷却 {cooldown_seconds} 秒后重试")
+            time.sleep(cooldown_seconds)
     if once and no_optimize:
         log_info(latest_eval_summary)
+        write_heartbeat("once_completed")
         return
 
     while True:
         iteration += 1
         log_info(f"\n=== 激进版第 {iteration} 轮 ===")
+        write_heartbeat("iteration_running", iteration=iteration)
         try:
             run_iteration(iteration, use_model_optimization=not no_optimize)
         except Exception:
             cooldown_seconds = max(LOOP_INTERVAL_SECONDS, 600)
             log_info(f"本轮失败，冷却 {cooldown_seconds} 秒后重试")
+            write_heartbeat("iteration_failed", iteration=iteration, cooldown_seconds=cooldown_seconds)
             if once:
                 break
             time.sleep(cooldown_seconds)
             continue
 
         if once:
+            write_heartbeat("once_completed", iteration=iteration)
             break
+        write_heartbeat("sleeping", iteration=iteration, sleep_seconds=LOOP_INTERVAL_SECONDS)
         time.sleep(LOOP_INTERVAL_SECONDS)
 
 

@@ -11,66 +11,74 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_INTRADAY_FILE = REPO_ROOT / "data/price/BTCUSDT_futures_15m_20240601_20260401.csv"
 DEFAULT_HOURLY_FILE = REPO_ROOT / "data/price/BTCUSDT_futures_1h_20240601_20260401.csv"
+DEFAULT_EXECUTION_FILE = REPO_ROOT / "data/price/BTCUSDT_futures_1m_20240601_20260401.csv"
 DEFAULT_SENTIMENT_FILE = REPO_ROOT / "data/index/crypto_fear_greed_daily_20240601_20260401.csv"
+DEFAULT_FUNDING_FILE = REPO_ROOT / "data/funding/OKX_BTC_USDT_SWAP_funding_20240601_20260401.csv"
 
 
 # EXIT_PARAMS_START
-EXIT_PARAMS = {
-    "break_even_activation_pct": 16.0,
-    "break_even_buffer_pct": 0.25,
-    "breakout_break_even_activation_pct": 18.0,
-    "pullback_break_even_activation_pct": 10.0,
-    "short_breakdown_break_even_activation_pct": 12.0,
-    "short_bounce_fail_break_even_activation_pct": 8.0,
-    "dynamic_hold_adx_strong_threshold": 34.0,
-    "dynamic_hold_adx_threshold": 24.0,
-    "dynamic_hold_extension_bars": 24,
-    "dynamic_hold_max_bars": 96,
-    "leverage": 18,
-    "max_concurrent_positions": 3,
-    "max_hold_bars": 72,
-    "position_fraction": 0.22,
-    "position_size_max": 32000,
-    "position_size_min": 4500,
-    "pyramid_adx_min": 30.0,
-    "pyramid_enabled": 1,
-    "pyramid_max_times": 1,
-    "pyramid_size_ratio": 0.60,
-    "pyramid_trigger_pnl": 18.0,
-    "regime_close_below_hourly_fast": 1,
-    "regime_exit_enabled": 1,
-    "regime_hist_floor": -30.0,
-    "breakout_max_hold_bars": 84,
-    "pullback_max_hold_bars": 32,
-    "short_breakdown_max_hold_bars": 56,
-    "short_bounce_fail_max_hold_bars": 24,
-    "stop_atr_mult": 2.2,
-    "breakout_stop_atr_mult": 2.2,
-    "pullback_stop_atr_mult": 1.6,
-    "short_breakdown_stop_atr_mult": 1.8,
-    "short_bounce_fail_stop_atr_mult": 1.4,
-    "breakout_tp1_close_fraction": 0.20,
-    "pullback_tp1_close_fraction": 0.45,
-    "short_breakdown_tp1_close_fraction": 0.35,
-    "short_bounce_fail_tp1_close_fraction": 0.50,
-    "breakout_tp1_pnl_pct": 20.0,
-    "pullback_tp1_pnl_pct": 10.0,
-    "short_breakdown_tp1_pnl_pct": 14.0,
-    "short_bounce_fail_tp1_pnl_pct": 8.0,
-    "breakout_trailing_activation_pct": 30.0,
-    "pullback_trailing_activation_pct": 14.0,
-    "short_breakdown_trailing_activation_pct": 20.0,
-    "short_bounce_fail_trailing_activation_pct": 10.0,
-    "breakout_trailing_giveback_pct": 12.0,
-    "pullback_trailing_giveback_pct": 6.0,
-    "short_breakdown_trailing_giveback_pct": 7.0,
-    "short_bounce_fail_trailing_giveback_pct": 5.0,
-    "stop_max_loss_pct": 40.0,
-    "tp1_close_fraction": 0.20,
-    "tp1_pnl_pct": 20.0,
-    "trailing_activation_pct": 30.0,
-    "trailing_giveback_pct": 12.0,
-}
+EXIT_PARAMS = {'break_even_activation_pct': 38.0,
+ 'break_even_buffer_pct': 1.0,
+ 'breakout_break_even_activation_pct': 56.0,
+ 'breakout_max_hold_bars': 384,
+ 'breakout_stop_atr_mult': 4.4,
+ 'breakout_tp1_close_fraction': 0.0,
+ 'breakout_tp1_pnl_pct': 82.0,
+ 'breakout_trailing_activation_pct': 138.0,
+ 'breakout_trailing_giveback_pct': 46.0,
+ 'dynamic_hold_adx_strong_threshold': 28.0,
+ 'dynamic_hold_adx_threshold': 16.0,
+ 'dynamic_hold_extension_bars': 216,
+ 'dynamic_hold_max_bars': 720,
+ 'entry_delay_minutes': 1,
+ 'execution_use_1m': 1,
+ 'funding_fee_enabled': 1,
+ 'leverage': 15,
+ 'max_concurrent_positions': 4,
+ 'max_hold_bars': 360,
+ 'okx_maker_fee_rate': 0.0002,
+ 'okx_taker_fee_rate': 0.0005,
+ 'position_fraction': 0.24,
+ 'position_size_max': 30000,
+ 'position_size_min': 5000,
+ 'pullback_break_even_activation_pct': 26.0,
+ 'pullback_max_hold_bars': 288,
+ 'pullback_stop_atr_mult': 3.0,
+ 'pullback_tp1_close_fraction': 0.0,
+ 'pullback_tp1_pnl_pct': 40.0,
+ 'pullback_trailing_activation_pct': 60.0,
+ 'pullback_trailing_giveback_pct': 24.0,
+ 'pyramid_adx_min': 13.0,
+ 'pyramid_enabled': 1,
+ 'pyramid_max_times': 3,
+ 'pyramid_size_ratio': 0.24,
+ 'pyramid_trigger_pnl': 9.0,
+ 'regime_close_below_hourly_fast': 1,
+ 'regime_exit_confirm_bars': 1,
+ 'regime_exit_enabled': 1,
+ 'regime_hist_floor': -88.0,
+ 'regime_price_confirm_buffer_pct': 0.012,
+ 'short_bounce_fail_break_even_activation_pct': 9.5,
+ 'short_bounce_fail_max_hold_bars': 30,
+ 'short_bounce_fail_stop_atr_mult': 1.25,
+ 'short_bounce_fail_tp1_close_fraction': 0.22,
+ 'short_bounce_fail_tp1_pnl_pct': 7.0,
+ 'short_bounce_fail_trailing_activation_pct': 8.5,
+ 'short_bounce_fail_trailing_giveback_pct': 4.0,
+ 'short_breakdown_break_even_activation_pct': 14.0,
+ 'short_breakdown_max_hold_bars': 72,
+ 'short_breakdown_stop_atr_mult': 1.55,
+ 'short_breakdown_tp1_close_fraction': 0.18,
+ 'short_breakdown_tp1_pnl_pct': 10.0,
+ 'short_breakdown_trailing_activation_pct': 14.0,
+ 'short_breakdown_trailing_giveback_pct': 4.5,
+ 'stop_atr_mult': 3.6,
+ 'stop_max_loss_pct': 82.0,
+ 'tp1_close_fraction': 0.0,
+ 'tp1_pnl_pct': 60.0,
+ 'trading_fee_enabled': 1,
+ 'trailing_activation_pct': 82.0,
+ 'trailing_giveback_pct': 34.0}
 # EXIT_PARAMS_END
 
 
@@ -133,6 +141,21 @@ def load_sentiment_data(filename):
     return rows
 
 
+@lru_cache(maxsize=4)
+def load_funding_data(filename):
+    rows = []
+    with open(filename, "r") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            rows.append(
+                {
+                    "timestamp": int(row["timestamp"]),
+                    "funding_rate": float(row["funding_rate"]),
+                }
+            )
+    return rows
+
+
 def _beijing_dt(timestamp_ms):
     return datetime.fromtimestamp(timestamp_ms / 1000, UTC) + timedelta(hours=8)
 
@@ -149,6 +172,19 @@ def _slice_by_beijing_window(data, start_date, end_date):
     start_idx = bisect_right(timestamps, start_ts - 1)
     end_idx = bisect_right(timestamps, end_exclusive_ts - 1)
     return data[start_idx:end_idx]
+
+
+def _slice_by_timestamp_window(data, start_ts, end_ts):
+    timestamps = [row["timestamp"] for row in data]
+    start_idx = bisect_right(timestamps, start_ts - 1)
+    end_idx = bisect_right(timestamps, end_ts)
+    return data[start_idx:end_idx]
+
+
+def _infer_interval_ms(data, default_minutes):
+    if len(data) >= 2:
+        return max(60_000, data[1]["timestamp"] - data[0]["timestamp"])
+    return default_minutes * 60_000
 
 
 def _ema_series(values, length):
@@ -336,18 +372,55 @@ def _position_pnl_pct(position, price, leverage):
     return direction * ((price - position["entry_price"]) / position["entry_price"]) * leverage * 100.0
 
 
-def _close_trade(position, price, reason, leverage):
-    pnl_pct = _position_pnl_pct(position, price, leverage)
-    pnl_amount = position["size"] * (pnl_pct / 100.0)
+def _position_pnl_amount(position, price, leverage):
+    return position["size"] * (_position_pnl_pct(position, price, leverage) / 100.0)
+
+
+def _position_notional(position, price, leverage):
+    return position["size"] * leverage * price / max(position["entry_price"], 1e-9)
+
+
+def _trading_fee_amount(notional, exit_p):
+    if int(exit_p.get("trading_fee_enabled", 1)) <= 0:
+        return 0.0
+    return max(0.0, notional) * float(exit_p["okx_taker_fee_rate"])
+
+
+def _execution_price(bar_timestamp, bar_close, execution_timestamps, execution_data, intraday_interval_ms, delay_minutes):
+    if not execution_timestamps or not execution_data:
+        return bar_close
+    target_ts = bar_timestamp + intraday_interval_ms + max(0, delay_minutes - 1) * 60_000
+    execution_idx = bisect_right(execution_timestamps, target_ts - 1)
+    if execution_idx >= len(execution_data):
+        return execution_data[-1]["close"]
+    return execution_data[execution_idx]["close"]
+
+
+def _price_before_timestamp(target_ts, execution_timestamps, execution_data, fallback_price):
+    if not execution_timestamps or not execution_data:
+        return fallback_price
+    execution_idx = bisect_right(execution_timestamps, target_ts - 1) - 1
+    if execution_idx < 0:
+        return execution_data[0]["close"]
+    return execution_data[execution_idx]["close"]
+
+
+def _close_trade(position, price, reason, leverage, allocated_entry_fee=0.0, exit_fee=0.0, funding_pnl=0.0):
+    gross_pnl_amount = _position_pnl_amount(position, price, leverage)
+    net_pnl_amount = gross_pnl_amount - allocated_entry_fee - exit_fee + funding_pnl
+    pnl_pct = net_pnl_amount / max(position["size"], 1e-9) * 100.0
     return {
         "pnl_pct": pnl_pct,
-        "pnl_amount": pnl_amount,
+        "pnl_amount": net_pnl_amount,
+        "gross_pnl_amount": gross_pnl_amount,
+        "fee_amount": allocated_entry_fee + exit_fee,
+        "funding_amount": funding_pnl,
         "hold_bars": position["hold_bars"],
         "reason": reason,
         "entry_signal": position["entry_signal"],
         "size": position["size"],
         "pyramids_done": position.get("pyramids_done", 0),
-    }, pnl_amount
+    }, gross_pnl_amount
 
 
 def _resolve_hold_limit(position, exit_params, market_state, close_pnl_pct):
@@ -406,6 +479,64 @@ def _should_pyramid(position, market_state, close_pnl_pct, exit_p):
     )
 
 
+def _confirmed_regime_break(position, exit_p, bar, prev_bar, market_state):
+    hourly = market_state.get("hourly")
+    prev_hourly = market_state.get("prev_hourly")
+    if hourly is None or prev_hourly is None:
+        return False
+
+    confirm_bars = max(1, int(exit_p.get("regime_exit_confirm_bars", 2)))
+    price_buffer = float(exit_p.get("regime_price_confirm_buffer_pct", 0.0)) / 100.0
+    hist_floor = abs(float(exit_p["regime_hist_floor"]))
+    side = _position_side(position)
+
+    if side == "short":
+        hist_broken_now = hourly["histogram"] > hist_floor
+        hist_broken_prev = prev_hourly["histogram"] > hist_floor
+        price_broken_now = (
+            bar["close"] > hourly["ema_fast"] * (1.0 + price_buffer)
+            and market_state["ema_fast"] > market_state["ema_slow"]
+        )
+        price_broken_prev = (
+            prev_bar is not None
+            and prev_bar["close"] > prev_hourly["ema_fast"] * (1.0 + price_buffer)
+            and market_state["prev_ema_fast"] > market_state["prev_ema_slow"]
+        )
+    else:
+        hist_broken_now = hourly["histogram"] < -hist_floor
+        hist_broken_prev = prev_hourly["histogram"] < -hist_floor
+        price_broken_now = (
+            bar["close"] < hourly["ema_fast"] * (1.0 - price_buffer)
+            and market_state["ema_fast"] < market_state["ema_slow"]
+        )
+        price_broken_prev = (
+            prev_bar is not None
+            and prev_bar["close"] < prev_hourly["ema_fast"] * (1.0 - price_buffer)
+            and market_state["prev_ema_fast"] < market_state["prev_ema_slow"]
+        )
+
+    if confirm_bars <= 1:
+        hist_confirmed = hist_broken_now
+        price_confirmed = price_broken_now
+    else:
+        hist_confirmed = hist_broken_now and hist_broken_prev
+        price_confirmed = price_broken_now and price_broken_prev
+
+    if int(exit_p["regime_close_below_hourly_fast"]) > 0:
+        return hist_confirmed or price_confirmed
+    return hist_confirmed
+
+
+def _apply_funding(position, funding_rate, settlement_price, leverage):
+    notional = _position_notional(position, settlement_price, leverage)
+    if _position_side(position) == "short":
+        funding_pnl = notional * funding_rate
+    else:
+        funding_pnl = -notional * funding_rate
+    position["funding_pnl"] = position.get("funding_pnl", 0.0) + funding_pnl
+    return funding_pnl
+
+
 def backtest_macd_aggressive(
     strategy_func,
     intraday_file,
@@ -415,6 +546,8 @@ def backtest_macd_aggressive(
     strategy_params,
     exit_params=None,
     sentiment_file=None,
+    execution_file=None,
+    funding_file=None,
 ):
     exit_p = dict(EXIT_PARAMS)
     if exit_params:
@@ -423,6 +556,8 @@ def backtest_macd_aggressive(
     intraday_file = str(intraday_file or DEFAULT_INTRADAY_FILE)
     hourly_file = str(hourly_file or DEFAULT_HOURLY_FILE)
     sentiment_file = str(sentiment_file or DEFAULT_SENTIMENT_FILE)
+    execution_file = str(execution_file or DEFAULT_EXECUTION_FILE)
+    funding_file = str(funding_file or DEFAULT_FUNDING_FILE)
 
     intraday_all = load_ohlcv_data(intraday_file)
     hourly_all = load_ohlcv_data(hourly_file)
@@ -434,6 +569,23 @@ def backtest_macd_aggressive(
     sentiment_rows = load_sentiment_data(sentiment_file) if Path(sentiment_file).exists() else []
     sentiment_state = _prepare_sentiment_state(sentiment_rows) if sentiment_rows else []
     sentiment_timestamps = [row["timestamp"] for row in sentiment_state]
+    intraday_interval_ms = _infer_interval_ms(intraday_data, 15)
+    start_ts = intraday_data[0]["timestamp"]
+    end_ts = intraday_data[-1]["timestamp"] + intraday_interval_ms
+
+    execution_rows = []
+    execution_timestamps = []
+    if Path(execution_file).exists() and int(exit_p.get("execution_use_1m", 1)) > 0:
+        execution_all = load_ohlcv_data(execution_file)
+        execution_rows = _slice_by_timestamp_window(execution_all, start_ts, end_ts + 60_000)
+        execution_timestamps = [row["timestamp"] for row in execution_rows]
+
+    funding_rows = []
+    funding_timestamps = []
+    if Path(funding_file).exists() and int(exit_p.get("funding_fee_enabled", 1)) > 0:
+        funding_all = load_funding_data(funding_file)
+        funding_rows = _slice_by_timestamp_window(funding_all, start_ts, end_ts)
+        funding_timestamps = [row["timestamp"] for row in funding_rows]
 
     hourly_state = _prepare_state(
         hourly_data,
@@ -481,6 +633,12 @@ def backtest_macd_aggressive(
     max_equity = capital
     max_drawdown = 0.0
     pyramid_add_count = 0
+    total_trading_fees = 0.0
+    total_funding_pnl = 0.0
+    funding_event_count = 0
+    funding_idx = 0
+    delay_minutes = int(exit_p.get("entry_delay_minutes", 1))
+    taker_fee_rate = float(exit_p["okx_taker_fee_rate"]) if int(exit_p.get("trading_fee_enabled", 1)) > 0 else 0.0
 
     def record_trade(trade):
         trades.append(trade)
@@ -491,6 +649,9 @@ def backtest_macd_aggressive(
             signal_closed_wins[signal] = signal_closed_wins.get(signal, 0) + 1
 
     for idx, bar in enumerate(intraday_data):
+        prev_bar = intraday_data[idx - 1] if idx > 0 else None
+        prev_bar_close_ts = prev_bar["timestamp"] + intraday_interval_ms if prev_bar is not None else bar["timestamp"]
+        bar_close_ts = bar["timestamp"] + intraday_interval_ms
         current_ts = bar["timestamp"]
         current_dt = _beijing_dt(current_ts)
         current_hour_open = current_dt.replace(minute=0, second=0, microsecond=0)
@@ -500,15 +661,20 @@ def backtest_macd_aggressive(
         sentiment_idx = bisect_right(sentiment_timestamps, current_ts) - 1
 
         hourly_context = hourly_state[hourly_idx] if hourly_idx >= 0 else None
+        prev_hourly_context = hourly_state[hourly_idx - 1] if hourly_idx > 0 else hourly_context
         four_hour_context = four_hour_state[four_hour_idx] if four_hour_idx >= 0 else None
         sentiment_context = sentiment_state[sentiment_idx] if sentiment_idx >= 0 else None
         intraday_context = intraday_state[idx]
+        prev_intraday_context = intraday_state[idx - 1] if idx > 0 else intraday_context
         market_state = {
             "hourly": hourly_context,
+            "prev_hourly": prev_hourly_context,
             "four_hour": four_hour_context,
             "sentiment": sentiment_context,
             "ema_fast": intraday_context["ema_fast"],
             "ema_slow": intraday_context["ema_slow"],
+            "prev_ema_fast": prev_intraday_context["ema_fast"],
+            "prev_ema_slow": prev_intraday_context["ema_slow"],
             "adx": intraday_context["adx"],
             "atr": intraday_context["atr"],
             "atr_ratio": intraday_context["atr_ratio"],
@@ -519,6 +685,36 @@ def backtest_macd_aggressive(
             "histogram": intraday_context["histogram"],
             "prev_histogram": intraday_state[idx - 1]["histogram"] if idx > 0 else intraday_context["histogram"],
         }
+        market_fill_price = _execution_price(
+            bar["timestamp"],
+            bar["close"],
+            execution_timestamps,
+            execution_rows,
+            intraday_interval_ms,
+            delay_minutes,
+        )
+
+        if funding_rows and positions:
+            while funding_idx < len(funding_rows) and funding_timestamps[funding_idx] <= bar_close_ts:
+                funding_row = funding_rows[funding_idx]
+                if funding_row["timestamp"] > prev_bar_close_ts:
+                    settlement_price = _price_before_timestamp(
+                        funding_row["timestamp"],
+                        execution_timestamps,
+                        execution_rows,
+                        bar["close"],
+                    )
+                    for position in positions:
+                        funding_pnl = _apply_funding(
+                            position,
+                            funding_row["funding_rate"],
+                            settlement_price,
+                            leverage,
+                        )
+                        capital += funding_pnl
+                        total_funding_pnl += funding_pnl
+                    funding_event_count += 1
+                funding_idx += 1
 
         remaining = []
         for position in positions:
@@ -539,7 +735,10 @@ def backtest_macd_aggressive(
                 record_trade(
                     {
                         "pnl_pct": -100.0,
-                        "pnl_amount": -position["size"],
+                        "pnl_amount": -position["size"] - position.get("entry_fee_paid", 0.0) + position.get("funding_pnl", 0.0),
+                        "gross_pnl_amount": -position["size"],
+                        "fee_amount": position.get("entry_fee_paid", 0.0),
+                        "funding_amount": position.get("funding_pnl", 0.0),
                         "hold_bars": position["hold_bars"],
                         "reason": "爆仓",
                         "entry_signal": position["entry_signal"],
@@ -551,21 +750,38 @@ def backtest_macd_aggressive(
 
             stop_hit = bar["high"] >= position["stop_price"] if side == "short" else bar["low"] <= position["stop_price"]
             if stop_hit:
-                trade, pnl_amount = _close_trade(position, position["stop_price"], "止损", leverage)
-                capital += position["size"] + pnl_amount
+                exit_notional = _position_notional(position, position["stop_price"], leverage)
+                exit_fee = _trading_fee_amount(exit_notional, exit_p)
+                allocated_entry_fee = position.get("entry_fee_paid", 0.0)
+                allocated_funding = position.get("funding_pnl", 0.0)
+                trade, pnl_amount = _close_trade(
+                    position,
+                    position["stop_price"],
+                    "止损",
+                    leverage,
+                    allocated_entry_fee=allocated_entry_fee,
+                    exit_fee=exit_fee,
+                    funding_pnl=allocated_funding,
+                )
+                capital += position["size"] + pnl_amount - exit_fee
+                total_trading_fees += exit_fee
                 record_trade(trade)
                 continue
 
             if _should_pyramid(position, market_state, close_pnl_pct, exit_p):
-                add_size = min(capital, position["size"] * float(exit_p["pyramid_size_ratio"]), position_size_max)
+                max_affordable_size = capital / (1.0 + leverage * taker_fee_rate)
+                add_size = min(max_affordable_size, position["size"] * float(exit_p["pyramid_size_ratio"]), position_size_max)
                 if add_size >= position_size_min:
+                    add_fee = _trading_fee_amount(add_size * leverage, exit_p)
                     total_size = position["size"] + add_size
                     position["entry_price"] = (
-                        position["entry_price"] * position["size"] + bar["close"] * add_size
+                        position["entry_price"] * position["size"] + market_fill_price * add_size
                     ) / total_size
                     position["size"] = total_size
                     position["pyramids_done"] = position.get("pyramids_done", 0) + 1
-                    capital -= add_size
+                    position["entry_fee_paid"] = position.get("entry_fee_paid", 0.0) + add_fee
+                    capital -= add_size + add_fee
+                    total_trading_fees += add_fee
                     pyramid_add_count += 1
 
             tp1_pnl_pct = float(_exit_value(exit_p, position, "tp1_pnl_pct"))
@@ -573,12 +789,28 @@ def backtest_macd_aggressive(
             if (not position["tp1_done"]) and best_pnl_pct >= tp1_pnl_pct:
                 close_size = position["size"] * tp1_close_fraction
                 remaining_size = position["size"] - close_size
+                close_fraction = close_size / max(position["size"], 1e-9)
+                allocated_entry_fee = position.get("entry_fee_paid", 0.0) * close_fraction
+                allocated_funding = position.get("funding_pnl", 0.0) * close_fraction
                 partial_position = dict(position)
                 partial_position["size"] = close_size
-                trade, pnl_amount = _close_trade(partial_position, bar["close"], "第一止盈", leverage)
-                capital += close_size + pnl_amount
+                exit_notional = _position_notional(partial_position, market_fill_price, leverage)
+                exit_fee = _trading_fee_amount(exit_notional, exit_p)
+                trade, pnl_amount = _close_trade(
+                    partial_position,
+                    market_fill_price,
+                    "第一止盈",
+                    leverage,
+                    allocated_entry_fee=allocated_entry_fee,
+                    exit_fee=exit_fee,
+                    funding_pnl=allocated_funding,
+                )
+                capital += close_size + pnl_amount - exit_fee
+                total_trading_fees += exit_fee
                 record_trade(trade)
                 position["size"] = remaining_size
+                position["entry_fee_paid"] = position.get("entry_fee_paid", 0.0) - allocated_entry_fee
+                position["funding_pnl"] = position.get("funding_pnl", 0.0) - allocated_funding
                 position["tp1_done"] = True
                 if position["size"] <= 1e-9:
                     continue
@@ -604,34 +836,43 @@ def backtest_macd_aggressive(
                     position["stop_price"] = max(position["stop_price"], trailing_price)
 
             if int(exit_p["regime_exit_enabled"]) > 0 and hourly_context is not None:
-                if side == "short":
-                    regime_broken = (
-                        hourly_context["histogram"] > abs(float(exit_p["regime_hist_floor"]))
-                        or (
-                            int(exit_p["regime_close_below_hourly_fast"]) > 0
-                            and bar["close"] > hourly_context["ema_fast"]
-                            and market_state["ema_fast"] > market_state["ema_slow"]
-                        )
-                    )
-                else:
-                    regime_broken = (
-                        hourly_context["histogram"] < float(exit_p["regime_hist_floor"])
-                        or (
-                            int(exit_p["regime_close_below_hourly_fast"]) > 0
-                            and bar["close"] < hourly_context["ema_fast"]
-                            and market_state["ema_fast"] < market_state["ema_slow"]
-                        )
-                    )
+                regime_broken = _confirmed_regime_break(position, exit_p, bar, prev_bar, market_state)
                 if regime_broken and close_pnl_pct < trailing_activation_pct:
-                    trade, pnl_amount = _close_trade(position, bar["close"], "趋势失效", leverage)
-                    capital += position["size"] + pnl_amount
+                    exit_notional = _position_notional(position, market_fill_price, leverage)
+                    exit_fee = _trading_fee_amount(exit_notional, exit_p)
+                    allocated_entry_fee = position.get("entry_fee_paid", 0.0)
+                    allocated_funding = position.get("funding_pnl", 0.0)
+                    trade, pnl_amount = _close_trade(
+                        position,
+                        market_fill_price,
+                        "趋势失效",
+                        leverage,
+                        allocated_entry_fee=allocated_entry_fee,
+                        exit_fee=exit_fee,
+                        funding_pnl=allocated_funding,
+                    )
+                    capital += position["size"] + pnl_amount - exit_fee
+                    total_trading_fees += exit_fee
                     record_trade(trade)
                     continue
 
             hold_limit = _resolve_hold_limit(position, exit_p, market_state, close_pnl_pct)
             if position["hold_bars"] >= hold_limit:
-                trade, pnl_amount = _close_trade(position, bar["close"], "时间退出", leverage)
-                capital += position["size"] + pnl_amount
+                exit_notional = _position_notional(position, market_fill_price, leverage)
+                exit_fee = _trading_fee_amount(exit_notional, exit_p)
+                allocated_entry_fee = position.get("entry_fee_paid", 0.0)
+                allocated_funding = position.get("funding_pnl", 0.0)
+                trade, pnl_amount = _close_trade(
+                    position,
+                    market_fill_price,
+                    "时间退出",
+                    leverage,
+                    allocated_entry_fee=allocated_entry_fee,
+                    exit_fee=exit_fee,
+                    funding_pnl=allocated_funding,
+                )
+                capital += position["size"] + pnl_amount - exit_fee
+                total_trading_fees += exit_fee
                 record_trade(trade)
                 continue
 
@@ -640,6 +881,12 @@ def backtest_macd_aggressive(
         positions = remaining
 
         signal = strategy_func(intraday_data, idx, positions, market_state)
+        if signal and positions and _signal_side(signal) != _position_side(positions[0]):
+            for position in positions:
+                trade, pnl_amount = _close_trade(position, bar["close"], "反向信号", leverage)
+                capital += position["size"] + pnl_amount
+                record_trade(trade)
+            positions = []
         target_position_size = capital * position_fraction
         target_position_size = max(position_size_min, target_position_size)
         target_position_size = min(position_size_max, target_position_size, capital)
@@ -654,15 +901,15 @@ def backtest_macd_aggressive(
             stop_mult = float(_exit_value(exit_p, {"entry_signal": signal}, "stop_atr_mult"))
             signal_side = _signal_side(signal)
             if signal_side == "short":
-                atr_stop = bar["close"] + market_state["atr"] * stop_mult
-                hard_stop = bar["close"] * (1.0 + float(exit_p["stop_max_loss_pct"]) / leverage / 100.0)
+                atr_stop = market_fill_price + market_state["atr"] * stop_mult
+                hard_stop = market_fill_price * (1.0 + float(exit_p["stop_max_loss_pct"]) / leverage / 100.0)
                 stop_price = min(atr_stop, hard_stop)
-                valid_stop = stop_price > bar["close"]
+                valid_stop = stop_price > market_fill_price
             else:
-                atr_stop = bar["close"] - market_state["atr"] * stop_mult
-                hard_stop = bar["close"] * (1.0 - float(exit_p["stop_max_loss_pct"]) / leverage / 100.0)
+                atr_stop = market_fill_price - market_state["atr"] * stop_mult
+                hard_stop = market_fill_price * (1.0 - float(exit_p["stop_max_loss_pct"]) / leverage / 100.0)
                 stop_price = max(atr_stop, hard_stop)
-                valid_stop = stop_price < bar["close"]
+                valid_stop = stop_price < market_fill_price
             if valid_stop:
                 capital -= target_position_size
                 signal_entries[signal] = signal_entries.get(signal, 0) + 1
@@ -695,6 +942,8 @@ def backtest_macd_aggressive(
         record_trade(trade)
 
     total_return = (capital - initial_capital) / initial_capital * 100.0
+    fee_drag_pct = total_trading_fees / initial_capital * 100.0
+    fee_penalty = fee_drag_pct * 0.35
     wins = sum(1 for trade in trades if trade["pnl_pct"] > 0)
     signal_stats = {}
     for signal in sorted(set(signal_entries) | set(signal_closed_pnl)):
@@ -710,13 +959,20 @@ def backtest_macd_aggressive(
         "trades": len(trades),
         "return": total_return,
         "max_drawdown": max_drawdown,
-        "score": total_return - max(0.0, max_drawdown - 28.0) * 1.5,
+        "score": total_return - max(0.0, max_drawdown - 28.0) * 1.5 - fee_penalty,
         "win_rate": wins / len(trades) * 100.0 if trades else 0.0,
         "avg_pnl_pct": sum(trade["pnl_pct"] for trade in trades) / len(trades) if trades else 0.0,
         "avg_hold_bars": sum(trade["hold_bars"] for trade in trades) / len(trades) if trades else 0.0,
+        "gross_pnl_amount": sum(trade.get("gross_pnl_amount", trade["pnl_amount"]) for trade in trades),
+        "trading_fee_amount": total_trading_fees,
+        "fee_drag_pct": fee_drag_pct,
+        "fee_score_penalty": fee_penalty,
+        "funding_pnl_amount": total_funding_pnl,
+        "funding_event_count": funding_event_count,
         "first_tp_count": sum(1 for trade in trades if trade["reason"] == "第一止盈"),
         "stop_exit_count": sum(1 for trade in trades if trade["reason"] == "止损"),
         "regime_exit_count": sum(1 for trade in trades if trade["reason"] == "趋势失效"),
+        "reverse_exit_count": sum(1 for trade in trades if trade["reason"] == "反向信号"),
         "time_exit_count": sum(1 for trade in trades if trade["reason"] == "时间退出"),
         "liquidations": sum(1 for trade in trades if trade["reason"] == "爆仓"),
         "pyramid_add_count": pyramid_add_count,

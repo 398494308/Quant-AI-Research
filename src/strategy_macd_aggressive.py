@@ -2,88 +2,86 @@
 """激进版双向趋势策略：Long Breakout/Pullback + Short Breakdown/Bounce-Fail。"""
 
 # PARAMS_START
-PARAMS = {
-    "breakout_adx_min": 16.0,
-    "breakout_body_ratio_min": 0.35,
-    "breakout_buffer_pct": 0.0,
-    "breakout_close_pos_min": 0.58,
-    "breakout_fourh_adx_min": 24.0,
-    "breakout_hist_min": -35.0,
-    "breakout_hourly_adx_min": 20.0,
-    "breakout_hourly_spread_min": 0.0045,
-    "breakout_lookback": 16,
-    "breakout_rsi_max": 82.0,
-    "breakout_rsi_min": 54.0,
-    "breakout_volume_ratio_min": 0.98,
-    "breakdown_adx_min": 16.0,
-    "breakdown_body_ratio_min": 0.35,
-    "breakdown_buffer_pct": 0.0,
-    "breakdown_close_pos_max": 0.42,
-    "breakdown_fourh_adx_min": 24.0,
-    "breakdown_hist_max": 35.0,
-    "breakdown_hour_dist_fast_max": 0.038,
-    "breakdown_hourly_adx_min": 20.0,
-    "breakdown_hourly_atr_ratio_max": 0.0090,
-    "breakdown_hourly_spread_max": -0.0045,
-    "breakdown_lookback": 16,
-    "breakdown_rsi_max": 48.0,
-    "breakdown_rsi_min": 18.0,
-    "breakdown_volume_ratio_min": 0.98,
-    "bounce_fail_adx_min": 20.0,
-    "bounce_fail_body_min": 0.0008,
-    "bounce_fail_distance_max": 0.014,
-    "bounce_fail_hist_max": 28.0,
-    "bounce_fail_rsi_max": 52.0,
-    "bounce_fail_rsi_min": 28.0,
-    "bounce_fail_volume_ratio_min": 0.75,
-    "fear_greed_breakout_min": 25,
-    "fear_greed_delta3_min": -15.0,
-    "fear_greed_enabled": 0,
-    "fear_greed_extreme_greed_max": 93,
-    "fear_greed_pullback_min": 35,
-    "fear_greed_short_delta3_max": 15.0,
-    "fear_greed_short_extreme_fear_min": 10,
-    "fear_greed_short_max": 75,
-    "fear_greed_short_min": 8,
-    "fourh_adx_min": 12.0,
-    "fourh_chop_max": 60.0,
-    "fourh_ema_fast": 18,
-    "fourh_ema_slow": 55,
-    "fourh_ema_slow_slope_min": 5e-05,
-    "fourh_trend_spread_min": 0.0015,
-    "hourly_adx_min": 15.0,
-    "hourly_atr_ratio_min": 0.0028,
-    "hourly_chop_max": 58.0,
-    "hourly_ema_anchor": 168,
-    "hourly_ema_fast": 24,
-    "hourly_ema_slow": 96,
-    "hourly_ema_slow_slope_min": 5e-05,
-    "hourly_macd_hist_min": -60.0,
-    "hourly_trend_spread_min": 0.0005,
-    "intraday_adx_min": 14.0,
-    "intraday_atr_ratio_min": 0.0015,
-    "intraday_chop_max": 55.0,
-    "intraday_ema_fast": 20,
-    "intraday_ema_slow": 55,
-    "intraday_rsi_max": 80.0,
-    "intraday_rsi_min": 52.0,
-    "macd_fast": 12,
-    "macd_signal": 9,
-    "macd_slow": 26,
-    "min_history": 260,
-    "pullback_adx_min": 20.0,
-    "pullback_bounce_body_min": 0.0008,
-    "pullback_distance_max": 0.014,
-    "pullback_ema_len": 21,
-    "pullback_enabled": 1,
-    "pullback_hist_min": -28.0,
-    "pullback_reclaim_buffer_pct": 0.0003,
-    "pullback_rsi_max": 72.0,
-    "pullback_rsi_min": 48.0,
-    "pullback_volume_ratio_min": 0.75,
-    "short_enabled": 1,
-    "volume_lookback": 20,
-}
+PARAMS = {'bounce_fail_adx_min': 23.0,
+ 'bounce_fail_body_min': 0.0011,
+ 'bounce_fail_distance_max': 0.0135,
+ 'bounce_fail_hist_max': 22.0,
+ 'bounce_fail_rsi_max': 49.0,
+ 'bounce_fail_rsi_min': 30.0,
+ 'bounce_fail_volume_ratio_min': 0.84,
+ 'breakdown_adx_min': 17.2,
+ 'breakdown_body_ratio_min': 0.34,
+ 'breakdown_buffer_pct': 0.0001,
+ 'breakdown_close_pos_max': 0.43,
+ 'breakdown_fourh_adx_min': 23.5,
+ 'breakdown_hist_max': 34.0,
+ 'breakdown_hour_dist_fast_max': 0.038,
+ 'breakdown_hourly_adx_min': 20.0,
+ 'breakdown_hourly_atr_ratio_max': 0.0091,
+ 'breakdown_hourly_spread_max': -0.0041,
+ 'breakdown_lookback': 16,
+ 'breakdown_rsi_max': 49.0,
+ 'breakdown_rsi_min': 20.0,
+ 'breakdown_volume_ratio_min': 0.98,
+ 'breakout_adx_min': 9.2,
+ 'breakout_body_ratio_min': 0.15,
+ 'breakout_buffer_pct': 0.0,
+ 'breakout_close_pos_min': 0.41,
+ 'breakout_fourh_adx_min': 11.5,
+ 'breakout_hist_min': -90.0,
+ 'breakout_hourly_adx_min': 9.0,
+ 'breakout_hourly_spread_min': 0.0001,
+ 'breakout_lookback': 6,
+ 'breakout_rsi_max': 95.0,
+ 'breakout_rsi_min': 42.0,
+ 'breakout_volume_ratio_min': 0.46,
+ 'fear_greed_breakout_min': 28,
+ 'fear_greed_delta3_min': -10.0,
+ 'fear_greed_enabled': 1,
+ 'fear_greed_extreme_greed_max': 82,
+ 'fear_greed_pullback_min': 30,
+ 'fear_greed_short_delta3_max': 8.0,
+ 'fear_greed_short_extreme_fear_min': 20,
+ 'fear_greed_short_max': 68,
+ 'fear_greed_short_min': 16,
+ 'fourh_adx_min': 6.5,
+ 'fourh_chop_max': 70.0,
+ 'fourh_ema_fast': 18,
+ 'fourh_ema_slow': 55,
+ 'fourh_ema_slow_slope_min': 2e-05,
+ 'fourh_trend_spread_min': 0.00015,
+ 'hourly_adx_min': 7.8,
+ 'hourly_atr_ratio_min': 0.0015,
+ 'hourly_chop_max': 67.0,
+ 'hourly_ema_anchor': 168,
+ 'hourly_ema_fast': 24,
+ 'hourly_ema_slow': 96,
+ 'hourly_ema_slow_slope_min': 2e-05,
+ 'hourly_macd_hist_min': -125.0,
+ 'hourly_trend_spread_min': 5e-05,
+ 'intraday_adx_min': 8.5,
+ 'intraday_atr_ratio_min': 0.0009,
+ 'intraday_chop_max': 64.0,
+ 'intraday_ema_fast': 20,
+ 'intraday_ema_slow': 55,
+ 'intraday_rsi_max': 94.0,
+ 'intraday_rsi_min': 42.0,
+ 'macd_fast': 12,
+ 'macd_signal': 9,
+ 'macd_slow': 26,
+ 'min_history': 260,
+ 'pullback_adx_min': 10.8,
+ 'pullback_bounce_body_min': 0.0002,
+ 'pullback_distance_max': 0.032,
+ 'pullback_ema_len': 21,
+ 'pullback_enabled': 1,
+ 'pullback_hist_min': -72.0,
+ 'pullback_reclaim_buffer_pct': 0.0,
+ 'pullback_rsi_max': 89.0,
+ 'pullback_rsi_min': 38.0,
+ 'pullback_volume_ratio_min': 0.32,
+ 'short_enabled': 1,
+ 'volume_lookback': 20}
 # PARAMS_END
 
 
@@ -167,25 +165,13 @@ def strategy(data, idx, positions, market_state):
     prev = data[idx - 1]
     hourly = market_state["hourly"]
     fourh = market_state["four_hour"]
-    sentiment = market_state.get("sentiment")
+    sentiment = market_state.get("sentiment") if p["fear_greed_enabled"] else None
     if hourly is None or fourh is None:
         return None
 
     for bar in (current, prev):
         if bar["open"] <= 0 or bar["close"] <= 0 or bar["volume"] <= 0 or bar["high"] < bar["low"]:
             return None
-
-    if positions:
-        active_side = _position_side(positions[0])
-        if active_side == "long":
-            short_blocked = True
-            long_blocked = False
-        else:
-            short_blocked = False
-            long_blocked = True
-    else:
-        short_blocked = False
-        long_blocked = False
 
     current_candle = _candle_metrics(current)
     prev_candle = _candle_metrics(prev)
@@ -222,7 +208,7 @@ def strategy(data, idx, positions, market_state):
         and fourh["chop"] <= p["fourh_chop_max"]
     )
 
-    if not long_blocked and intraday_bull and hourly_bull and fourh_bull:
+    if intraday_bull and hourly_bull and fourh_bull:
         if p["fear_greed_enabled"] and sentiment is not None and sentiment.get("value", 50.0) < 25:
             pass
         else:
@@ -272,7 +258,7 @@ def strategy(data, idx, positions, market_state):
                 if pullback_ready:
                     return "long_pullback"
 
-    if short_blocked or not p["short_enabled"]:
+    if not p["short_enabled"]:
         return None
 
     intraday_bear = (
@@ -294,14 +280,14 @@ def strategy(data, idx, positions, market_state):
         and hourly["atr_ratio"] >= p["hourly_atr_ratio_min"]
         and hourly["chop"] <= p["hourly_chop_max"]
     )
-    fourh_bear = (
-        fourh["close"] < fourh["ema_fast"] < fourh["ema_slow"]
-        and fourh["trend_spread_pct"] <= -p["fourh_trend_spread_min"]
-        and fourh["ema_slow_slope_pct"] <= -p["fourh_ema_slow_slope_min"]
-        and fourh["adx"] >= p["fourh_adx_min"]
-        and fourh["chop"] <= p["fourh_chop_max"]
+    fourh_bear_supportive = (
+        fourh["close"] < fourh["ema_slow"]
+        and fourh["trend_spread_pct"] <= -(p["fourh_trend_spread_min"] * 0.5)
+        and fourh["ema_slow_slope_pct"] <= 0.0
+        and fourh["adx"] >= max(10.0, p["fourh_adx_min"] - 2.0)
+        and fourh["chop"] <= p["fourh_chop_max"] + 4.0
     )
-    if not (intraday_bear and hourly_bear and fourh_bear):
+    if not (intraday_bear and hourly_bear and fourh_bear_supportive):
         return None
 
     breakdown_ready = (
