@@ -10,7 +10,7 @@ import shutil
 import sys
 import time
 import traceback
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -56,6 +56,16 @@ AGGRESSIVE_MIN_VALIDATION_SCORE = float(os.getenv("MACD_MIN_VALIDATION_SCORE", "
 AGGRESSIVE_MAX_OVERFIT_GAP = float(os.getenv("MACD_MAX_OVERFIT_GAP", "25.0"))
 AGGRESSIVE_MIN_LEVERAGE = int(os.getenv("MACD_MIN_LEVERAGE", "14"))
 AGGRESSIVE_MIN_TP1_PNL_PCT = float(os.getenv("MACD_MIN_TP1_PNL_PCT", "42.0"))
+AGGRESSIVE_MIN_SHADOW_TEST_SCORE = float(os.getenv("MACD_MIN_SHADOW_TEST_SCORE", "0.0"))
+AGGRESSIVE_MAX_VAL_SHADOW_GAP = float(os.getenv("MACD_MAX_VAL_SHADOW_GAP", "28.0"))
+AGGRESSIVE_MAX_SHADOW_REGRESSION = float(os.getenv("MACD_MAX_SHADOW_REGRESSION", "6.0"))
+AGGRESSIVE_MIN_SHADOW_TEST_TRADES = int(os.getenv("MACD_MIN_SHADOW_TEST_TRADES", "8"))
+EVAL_START_DATE = os.getenv("MACD_EVAL_START_DATE", "2025-10-01")
+EVAL_END_DATE = os.getenv("MACD_EVAL_END_DATE", "2026-03-31")
+EVAL_CHUNK_DAYS = int(os.getenv("MACD_EVAL_CHUNK_DAYS", "20"))
+TRAIN_CHUNK_COUNT = int(os.getenv("MACD_TRAIN_CHUNK_COUNT", "5"))
+VAL_CHUNK_COUNT = int(os.getenv("MACD_VAL_CHUNK_COUNT", "2"))
+TEST_CHUNK_COUNT = int(os.getenv("MACD_TEST_CHUNK_COUNT", "2"))
 CORE_STRATEGY_PARAM_KEYS = (
     "macd_fast",
     "macd_slow",
@@ -74,20 +84,69 @@ CORE_EXIT_PARAM_KEYS = (
 )
 INTRADAY_FILE = str(BASE_DIR / "data/price/BTCUSDT_futures_15m_20240601_20260401.csv")
 HOURLY_FILE = str(BASE_DIR / "data/price/BTCUSDT_futures_1h_20240601_20260401.csv")
-WINDOWS = [
-    ("train", "训练-2025-10", "2025-10-01", "2025-10-31"),
-    ("train", "训练-2025-11", "2025-11-01", "2025-11-30"),
-    ("train", "训练-2025-12", "2025-12-01", "2025-12-31"),
-    ("val", "验证-2026-01", "2026-01-01", "2026-01-31"),
-    ("val", "验证-2026-02", "2026-02-01", "2026-02-28"),
-    ("val", "验证-2026-03", "2026-03-01", "2026-03-31"),
-]
+
+
+def _generate_windows():
+    start_dt = datetime.strptime(EVAL_START_DATE, "%Y-%m-%d")
+    end_dt = datetime.strptime(EVAL_END_DATE, "%Y-%m-%d")
+    total_days = (end_dt - start_dt).days + 1
+    if total_days <= 0:
+        raise ValueError(f"invalid evaluation range: {EVAL_START_DATE}..{EVAL_END_DATE}")
+    if EVAL_CHUNK_DAYS < 5:
+        raise ValueError(f"EVAL_CHUNK_DAYS too small: {EVAL_CHUNK_DAYS}")
+
+    full_chunks, remainder = divmod(total_days, EVAL_CHUNK_DAYS)
+    if full_chunks == 0:
+        chunk_lengths = [total_days]
+    elif remainder == 0:
+        chunk_lengths = [EVAL_CHUNK_DAYS] * full_chunks
+    else:
+        chunk_lengths = [remainder + EVAL_CHUNK_DAYS] + [EVAL_CHUNK_DAYS] * (full_chunks - 1)
+
+    required_chunks = TRAIN_CHUNK_COUNT + VAL_CHUNK_COUNT + TEST_CHUNK_COUNT
+    if len(chunk_lengths) < required_chunks:
+        raise ValueError(
+            f"not enough chunks for split: have={len(chunk_lengths)}, need={required_chunks}"
+        )
+
+    boundaries = []
+    cursor = start_dt
+    for chunk_len in chunk_lengths:
+        chunk_end = cursor + timedelta(days=chunk_len - 1)
+        boundaries.append((cursor, chunk_end))
+        cursor = chunk_end + timedelta(days=1)
+
+    windows = []
+    for idx, (chunk_start, chunk_end) in enumerate(boundaries):
+        if idx < TRAIN_CHUNK_COUNT:
+            group = "train"
+            label = f"训练块{idx + 1}"
+        elif idx < TRAIN_CHUNK_COUNT + VAL_CHUNK_COUNT:
+            group = "val"
+            label = f"验证块{idx - TRAIN_CHUNK_COUNT + 1}"
+        else:
+            group = "test"
+            label = f"影测块{idx - TRAIN_CHUNK_COUNT - VAL_CHUNK_COUNT + 1}"
+        windows.append(
+            (
+                group,
+                f"{label}-{chunk_start.strftime('%Y-%m-%d')}~{chunk_end.strftime('%Y-%m-%d')}",
+                chunk_start.strftime("%Y-%m-%d"),
+                chunk_end.strftime("%Y-%m-%d"),
+            )
+        )
+    return windows
+
+
+WINDOWS = _generate_windows()
 best_score = -999999.0
+best_shadow_test_avg = -999999.0
 iteration = 0
 plateau_pass_streak = 0
 strategy = strategy_module.strategy
 backtest_macd_aggressive = backtest_module.backtest_macd_aggressive
 latest_eval_summary = ""
+latest_public_eval_summary = ""
 last_params_snapshot = None
 last_exit_snapshot = None
 _resolved_discord_channel_id = CHANNEL_ID
@@ -201,28 +260,38 @@ def run_all_tests():
 def _score_summary(results):
     train_returns = [item["result"]["return"] for item in results if item["group"] == "train"]
     val_returns = [item["result"]["return"] for item in results if item["group"] == "val"]
+    test_returns = [item["result"]["return"] for item in results if item["group"] == "test"]
     train_avg = sum(train_returns) / len(train_returns) if train_returns else 0.0
     val_avg = sum(val_returns) / len(val_returns) if val_returns else 0.0
+    test_avg = sum(test_returns) / len(test_returns) if test_returns else 0.0
     train_std = (
         sum((r - train_avg) ** 2 for r in train_returns) / len(train_returns)
     ) ** 0.5 if len(train_returns) > 1 else 0.0
     val_std = (
         sum((r - val_avg) ** 2 for r in val_returns) / len(val_returns)
     ) ** 0.5 if len(val_returns) > 1 else 0.0
+    test_std = (
+        sum((r - test_avg) ** 2 for r in test_returns) / len(test_returns)
+    ) ** 0.5 if len(test_returns) > 1 else 0.0
     worst_val_return = min(val_returns) if val_returns else 0.0
+    worst_test_return = min(test_returns) if test_returns else 0.0
 
     worst_drawdown = max((item["result"]["max_drawdown"] for item in results), default=0.0)
     avg_fee_drag = sum(item["result"].get("fee_drag_pct", 0.0) for item in results) / len(results) if results else 0.0
     liquidations = sum(item["result"].get("liquidations", 0) for item in results)
+    total_trades = sum(item["result"]["trades"] for item in results)
+    train_trades = sum(item["result"]["trades"] for item in results if item["group"] == "train")
+    val_trades = sum(item["result"]["trades"] for item in results if item["group"] == "val")
+    test_trades = sum(item["result"]["trades"] for item in results if item["group"] == "test")
 
     overfit_penalty = max(0.0, train_avg - val_avg) * 0.9
     validation_stability_penalty = val_std * 0.18
     validation_tail_penalty = max(0.0, -worst_val_return) * 0.35
     train_instability_penalty = max(0.0, train_std - max(10.0, val_std + 6.0)) * 0.05
 
-    overall_avg = (
-        train_avg * 0.20
-        + val_avg * 0.80
+    selection_score = (
+        train_avg * 0.35
+        + val_avg * 0.65
         - overfit_penalty
         - validation_stability_penalty
         - validation_tail_penalty
@@ -230,38 +299,80 @@ def _score_summary(results):
         - max(0.0, worst_drawdown - AGGRESSIVE_DRAWDOWN_SOFT_CAP) * 0.22
         - liquidations * 1.5
     )
-    return train_avg, val_avg, overall_avg, avg_fee_drag
+    shadow_gap = val_avg - test_avg
+    promotion_score = selection_score - max(0.0, shadow_gap) * 0.15 - max(0.0, -test_avg) * 0.10
+    return {
+        "train_avg": train_avg,
+        "val_avg": val_avg,
+        "test_avg": test_avg,
+        "train_std": train_std,
+        "val_std": val_std,
+        "test_std": test_std,
+        "worst_val_return": worst_val_return,
+        "worst_test_return": worst_test_return,
+        "worst_drawdown": worst_drawdown,
+        "avg_fee_drag": avg_fee_drag,
+        "liquidations": liquidations,
+        "total_trades": total_trades,
+        "train_trades": train_trades,
+        "val_trades": val_trades,
+        "test_trades": test_trades,
+        "selection_score": selection_score,
+        "promotion_score": promotion_score,
+        "shadow_gap": shadow_gap,
+    }
 
 
-def build_summary_message(title, results, train_avg, val_avg, overall_avg):
-    total_trades = sum(item["result"]["trades"] for item in results)
-    worst_drawdown = max((item["result"]["max_drawdown"] for item in results), default=0.0)
+def build_summary_message(title, results, metrics, include_shadow_test=True):
+    total_trades = metrics["total_trades"]
+    worst_drawdown = metrics["worst_drawdown"]
     pyramid_adds = sum(item["result"].get("pyramid_add_count", 0) for item in results)
-    avg_fee_drag = sum(item["result"].get("fee_drag_pct", 0.0) for item in results) / len(results) if results else 0.0
+    avg_fee_drag = metrics["avg_fee_drag"]
     lines = [
         f"**{title}**",
         f"",
         f"📊 综合评分",
-        f"训练: {train_avg:.2f}",
-        f"验证: {val_avg:.2f}",
-        f"综合: {overall_avg:.2f}",
-        f"",
-        f"⚙️ 参数配置",
-        f"杠杆: {backtest_module.EXIT_PARAMS['leverage']}x",
-        f"并发: {backtest_module.EXIT_PARAMS['max_concurrent_positions']}",
-        f"首止盈: {backtest_module.EXIT_PARAMS['tp1_pnl_pct']:.0f}%",
-        f"",
-        f"⚠️ 风险指标",
-        f"最大回撤: {worst_drawdown:.1f}%",
-        f"总交易: {total_trades}",
-        f"加仓次数: {pyramid_adds}",
-        f"手续费: {avg_fee_drag:.2f}%",
-        f"",
-        f"📈 窗口明细",
+        f"训练: {metrics['train_avg']:.2f}",
+        f"验证: {metrics['val_avg']:.2f}",
+        f"选优分: {metrics['selection_score']:.2f}",
     ]
+    if include_shadow_test:
+        lines.extend(
+            [
+            f"影子测试: {metrics['test_avg']:.2f}",
+            f"晋级分: {metrics['promotion_score']:.2f}",
+            ]
+        )
+    else:
+        lines.append("影子测试: 已隔离，不向优化模型暴露最新时间块结果")
+    lines.extend(
+        [
+            f"",
+            f"⚙️ 参数配置",
+            f"杠杆: {backtest_module.EXIT_PARAMS['leverage']}x",
+            f"并发: {backtest_module.EXIT_PARAMS['max_concurrent_positions']}",
+            f"首止盈: {backtest_module.EXIT_PARAMS['tp1_pnl_pct']:.0f}%",
+            f"",
+            f"⚠️ 风险指标",
+            f"最大回撤: {worst_drawdown:.1f}%",
+            f"总交易: {total_trades}",
+        ]
+    )
+    if include_shadow_test:
+        lines.append(f"影测差值(验证-影测): {metrics['shadow_gap']:.2f}")
+    lines.extend(
+        [
+            f"加仓次数: {pyramid_adds}",
+            f"手续费: {avg_fee_drag:.2f}%",
+            f"",
+            f"📈 窗口明细",
+        ]
+    )
     for item in results:
+        if item["group"] == "test" and not include_shadow_test:
+            continue
         result = item["result"]
-        group_label = {"train": "训", "val": "验"}.get(item["group"], item["group"])
+        group_label = {"train": "训", "val": "验", "test": "测"}.get(item["group"], item["group"])
         lines.append(
             f"{item['name']}({group_label})"
         )
@@ -271,6 +382,25 @@ def build_summary_message(title, results, train_avg, val_avg, overall_avg):
             f"回撤{result['max_drawdown']:.1f}%"
         )
     return "\n".join(lines)
+
+
+def _build_gate_reason(metrics, base_gate_passed, shadow_gate_passed, shadow_regression_passed):
+    if base_gate_passed and shadow_gate_passed and shadow_regression_passed:
+        return "通过"
+    reasons = [
+        f"trade={metrics['total_trades']}",
+        f"dd={metrics['worst_drawdown']:.2f}",
+        f"liq={metrics['liquidations']}",
+        f"过拟={metrics['train_avg'] - metrics['val_avg']:.2f}",
+        f"验证={metrics['val_avg']:.2f}",
+        f"杠杆={backtest_module.EXIT_PARAMS.get('leverage', 0)}",
+        f"TP1={backtest_module.EXIT_PARAMS.get('tp1_pnl_pct', 0)}",
+    ]
+    if not shadow_gate_passed:
+        reasons.append("影测=未过")
+    if not shadow_regression_passed:
+        reasons.append("影测=退化")
+    return ", ".join(reasons)
 
 
 def _memory_summary():
@@ -513,7 +643,7 @@ def optimize_strategy():
 {json.dumps(core_exit_params, ensure_ascii=False, indent=2, sort_keys=True)}
 
 最近一轮评估摘要：
-{latest_eval_summary}
+{latest_public_eval_summary or latest_eval_summary}
 
 历史方向记忆：
 {_memory_summary()}
@@ -632,21 +762,40 @@ def _append_memory(bucket, changes, overall, gate):
 
 
 def initialize_best_score():
-    global best_score, latest_eval_summary, last_params_snapshot, last_exit_snapshot
+    global best_score, best_shadow_test_avg, latest_eval_summary, latest_public_eval_summary, last_params_snapshot, last_exit_snapshot
     reload_strategy()
     results = run_all_tests()
-    main_avg, val_avg, overall_avg, avg_fee_drag = _score_summary(results)
-    best_score = overall_avg
-    latest_eval_summary = build_summary_message("基准", results, main_avg, val_avg, overall_avg)
+    metrics = _score_summary(results)
+    best_score = metrics["promotion_score"]
+    best_shadow_test_avg = metrics["test_avg"]
+    latest_eval_summary = build_summary_message("基准", results, metrics, include_shadow_test=True)
+    latest_public_eval_summary = build_summary_message("基准", results, metrics, include_shadow_test=False)
     last_params_snapshot = dict(strategy_module.PARAMS)
     last_exit_snapshot = dict(backtest_module.EXIT_PARAMS)
-    log_info(f"激进版初始基准: overall={overall_avg:.4f}, train={main_avg:.4f}, val={val_avg:.4f}, fee_drag={avg_fee_drag:.4f}")
-    heartbeat_for_log("initialized", "initial baseline ready", overall=overall_avg, train=main_avg, val=val_avg, fee_drag=avg_fee_drag)
+    log_info(
+        "激进版初始基准: "
+        f"promotion={metrics['promotion_score']:.4f}, "
+        f"selection={metrics['selection_score']:.4f}, "
+        f"train={metrics['train_avg']:.4f}, "
+        f"val={metrics['val_avg']:.4f}, "
+        f"test={metrics['test_avg']:.4f}, "
+        f"fee_drag={metrics['avg_fee_drag']:.4f}"
+    )
+    heartbeat_for_log(
+        "initialized",
+        "initial baseline ready",
+        promotion=metrics["promotion_score"],
+        selection=metrics["selection_score"],
+        train=metrics["train_avg"],
+        val=metrics["val_avg"],
+        test=metrics["test_avg"],
+        fee_drag=metrics["avg_fee_drag"],
+    )
     send_discord(latest_eval_summary)
 
 
 def run_iteration(iteration_id, use_model_optimization=True):
-    global best_score, latest_eval_summary, last_params_snapshot, last_exit_snapshot, plateau_pass_streak
+    global best_score, best_shadow_test_avg, latest_eval_summary, latest_public_eval_summary, last_params_snapshot, last_exit_snapshot, plateau_pass_streak
     shutil.copy(STRATEGY_FILE, BACKUP_FILE)
     shutil.copy(BACKTEST_FILE, BACKTEST_BACKUP_FILE)
 
@@ -660,7 +809,7 @@ def run_iteration(iteration_id, use_model_optimization=True):
                 return "duplicate_skipped"
         reload_strategy()
         results = run_all_tests()
-        main_avg, val_avg, overall_avg, avg_fee_drag = _score_summary(results)
+        metrics = _score_summary(results)
     except StrategyGenerationTransientError as exc:
         shutil.copy(BACKUP_FILE, STRATEGY_FILE)
         shutil.copy(BACKTEST_BACKUP_FILE, BACKTEST_FILE)
@@ -684,7 +833,8 @@ def run_iteration(iteration_id, use_model_optimization=True):
         log_exception(f"❌ 激进版第 {iteration_id} 轮失败: {exc}")
         raise
 
-    latest_eval_summary = build_summary_message("最近一轮", results, main_avg, val_avg, overall_avg)
+    latest_eval_summary = build_summary_message("最近一轮", results, metrics, include_shadow_test=True)
+    latest_public_eval_summary = build_summary_message("最近一轮", results, metrics, include_shadow_test=False)
     current_params_snapshot = dict(strategy_module.PARAMS)
     current_exit_snapshot = dict(backtest_module.EXIT_PARAMS)
     changes = _describe_param_changes(
@@ -721,44 +871,60 @@ def run_iteration(iteration_id, use_model_optimization=True):
         )
         return "duplicate_skipped"
 
-    total_trades = sum(item["result"]["trades"] for item in results)
-    worst_drawdown = max(item["result"]["max_drawdown"] for item in results)
-    liquidations = sum(item["result"].get("liquidations", 0) for item in results)
-    train_trades = sum(item["result"]["trades"] for item in results if item["group"] == "train")
-    val_trades = sum(item["result"]["trades"] for item in results if item["group"] == "val")
-
-    gate_passed = (
-        total_trades >= 30
-        and train_trades >= 15
-        and val_trades >= 8
-        and worst_drawdown <= AGGRESSIVE_DRAWDOWN_HARD_CAP
-        and liquidations <= 10
-        and main_avg - val_avg <= AGGRESSIVE_MAX_OVERFIT_GAP
-        and val_avg > AGGRESSIVE_MIN_VALIDATION_SCORE
+    base_gate_passed = (
+        metrics["total_trades"] >= 30
+        and metrics["train_trades"] >= 15
+        and metrics["val_trades"] >= 8
+        and metrics["worst_drawdown"] <= AGGRESSIVE_DRAWDOWN_HARD_CAP
+        and metrics["liquidations"] <= 10
+        and metrics["train_avg"] - metrics["val_avg"] <= AGGRESSIVE_MAX_OVERFIT_GAP
+        and metrics["val_avg"] > AGGRESSIVE_MIN_VALIDATION_SCORE
         and backtest_module.EXIT_PARAMS.get('leverage', 0) >= AGGRESSIVE_MIN_LEVERAGE
         and backtest_module.EXIT_PARAMS.get('tp1_pnl_pct', 0) >= AGGRESSIVE_MIN_TP1_PNL_PCT
     )
-    gate_reason = "通过" if gate_passed else f"trade={total_trades}, dd={worst_drawdown:.2f}, liq={liquidations}, 过拟={main_avg-val_avg:.2f}, 验证={val_avg:.2f}, 杠杆={backtest_module.EXIT_PARAMS.get('leverage', 0)}, TP1={backtest_module.EXIT_PARAMS.get('tp1_pnl_pct', 0)}"
+    shadow_gate_passed = (
+        metrics["test_trades"] >= AGGRESSIVE_MIN_SHADOW_TEST_TRADES
+        and metrics["test_avg"] >= AGGRESSIVE_MIN_SHADOW_TEST_SCORE
+        and metrics["shadow_gap"] <= AGGRESSIVE_MAX_VAL_SHADOW_GAP
+    )
+    shadow_regression_passed = metrics["test_avg"] >= (best_shadow_test_avg - AGGRESSIVE_MAX_SHADOW_REGRESSION)
+    gate_passed = base_gate_passed and shadow_gate_passed and shadow_regression_passed
+    gate_reason = _build_gate_reason(metrics, base_gate_passed, shadow_gate_passed, shadow_regression_passed)
 
-    if gate_passed and overall_avg > best_score:
-        best_score = overall_avg
+    if gate_passed and metrics["promotion_score"] > best_score:
+        best_score = metrics["promotion_score"]
+        best_shadow_test_avg = metrics["test_avg"]
         plateau_pass_streak = 0
         last_params_snapshot = current_params_snapshot
         last_exit_snapshot = current_exit_snapshot
-        _append_memory("accepted", changes, overall_avg, gate_reason)
-        msg = build_summary_message(f"🚀 新最优激进版策略 #{iteration_id}", results, main_avg, val_avg, overall_avg)
+        _append_memory("accepted", changes, metrics["promotion_score"], gate_reason)
+        msg = build_summary_message(f"🚀 新最优激进版策略 #{iteration_id}", results, metrics, include_shadow_test=True)
         log_info(msg)
-        heartbeat_for_log("new_best", f"iteration {iteration_id} accepted", overall=overall_avg, gate=gate_reason)
+        heartbeat_for_log(
+            "new_best",
+            f"iteration {iteration_id} accepted",
+            promotion=metrics["promotion_score"],
+            selection=metrics["selection_score"],
+            test=metrics["test_avg"],
+            gate=gate_reason,
+        )
         send_discord(msg)
         return "accepted"
 
-    _append_memory("rejected", changes, overall_avg, gate_reason)
+    _append_memory("rejected", changes, metrics["promotion_score"], gate_reason)
     plateau_pass_streak = plateau_pass_streak + 1 if gate_passed else 0
     shutil.copy(BACKUP_FILE, STRATEGY_FILE)
     shutil.copy(BACKTEST_BACKUP_FILE, BACKTEST_FILE)
     reload_strategy()
     log_info(f"第 {iteration_id} 轮未保留: {gate_reason}")
-    heartbeat_for_log("iteration_rejected", f"iteration {iteration_id} rejected", overall=overall_avg, gate=gate_reason)
+    heartbeat_for_log(
+        "iteration_rejected",
+        f"iteration {iteration_id} rejected",
+        promotion=metrics["promotion_score"],
+        selection=metrics["selection_score"],
+        test=metrics["test_avg"],
+        gate=gate_reason,
+    )
     return "rejected"
 
 
