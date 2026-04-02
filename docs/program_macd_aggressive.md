@@ -27,37 +27,37 @@
 
 ## 本轮可调参数范围
 
-研究循环当前只允许修改 12 个核心参数：
+研究循环当前只允许修改 13 个核心参数：
 
-- 入场 6 个：
+- 入场 7 个：
   - `macd_fast`
   - `macd_slow`
   - `macd_signal`
   - `hourly_adx_min`
   - `breakout_lookback`
   - `breakdown_lookback`
+  - `breakout_rsi_max`
 - 出场 6 个：
   - `leverage`
   - `position_fraction`
-  - `stop_atr_mult`
-  - `stop_max_loss_pct`
-  - `tp1_pnl_pct`
-  - `trailing_activation_pct`
+  - `breakout_stop_atr_mult`
+  - `breakout_trailing_activation_pct`
+  - `breakout_trailing_giveback_pct`
+  - `short_breakdown_trailing_activation_pct`
 
 其余参数默认不动。
 
 ## 验证要求
 - 评估窗口按连续 `20` 天时间块顺序切分
-- 训练看前 5 块，验证看中间 2 块，影子测试看最后 2 块
-- 优先看训练 / 验证收益
-- 验证集收益优先级高于训练集
-- 影子测试只用于外层拦截，不作为优化提示的一部分
+- 除最后 `2` 块影子测试外，其余窗口统一作为 Walk-Forward `eval` 窗口
+- 选优先看全部 `eval` 窗口的综合表现，不再拆成训练 / 验证两层
+- 影子测试只用于外层晋级拦截，不作为优化提示的一部分
 - 同时记录：
   - 最大回撤
   - 爆仓次数
-  - 月度收益分布
+  - 窗口收益分布
   - 手续费拖累
-- 不要求像保守版那样压低波动，但不能长期靠单月异常值撑分
+- 不要求像保守版那样压低波动，但不能长期靠少数异常窗口撑分
 
 ## 约束
 - 优先改参数，不要重写整体框架
@@ -66,4 +66,5 @@
 - 不要为了单月暴冲而完全牺牲后续月份
 - 保持激进风格，不要把它改成低杠杆、低波动、保守止盈版本
 - 杠杆尽量维持在 14x 以上
-- `tp1_pnl_pct` 尽量维持在 42% 以上
+- `breakout_tp1_pnl_pct` 尽量维持在 42% 以上
+- 评估窗口正收益占比需维持在合理区间，不接受大多数窗口亏损只靠少数窗口暴赚撑分

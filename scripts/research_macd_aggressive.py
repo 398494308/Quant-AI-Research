@@ -44,28 +44,29 @@ HEARTBEAT_FILE = BASE_DIR / "state/research_macd_aggressive_heartbeat.json"
 LOOP_INTERVAL_SECONDS = int(os.getenv("MACD_LOOP_INTERVAL_SECONDS", "600"))
 PROVIDER_RECOVERY_WAIT_SECONDS = int(os.getenv("MACD_PROVIDER_RECOVERY_WAIT_SECONDS", "120"))
 FAILURE_COOLDOWN_SECONDS = int(os.getenv("MACD_FAILURE_COOLDOWN_SECONDS", "60"))
-MAX_PARAM_CHANGES_PER_ITERATION = int(os.getenv("MACD_MAX_PARAM_CHANGES", "6"))
-MAX_PARAM_RELATIVE_STEP = float(os.getenv("MACD_MAX_PARAM_RELATIVE_STEP", "0.15"))
+MAX_PARAM_CHANGES_PER_ITERATION = int(os.getenv("MACD_MAX_PARAM_CHANGES", "4"))
+MAX_PARAM_RELATIVE_STEP = float(os.getenv("MACD_MAX_PARAM_RELATIVE_STEP", "0.12"))
 MAX_DUPLICATE_REPLAN_ATTEMPTS = int(os.getenv("MACD_DUPLICATE_REPLAN_ATTEMPTS", "2"))
 PLATEAU_PASS_STREAK_TO_EXPAND = int(os.getenv("MACD_PLATEAU_PASS_STREAK_TO_EXPAND", "6"))
-BOOSTED_PARAM_CHANGES_PER_ITERATION = int(os.getenv("MACD_BOOSTED_PARAM_CHANGES", "8"))
-BOOSTED_PARAM_RELATIVE_STEP = float(os.getenv("MACD_BOOSTED_PARAM_RELATIVE_STEP", "0.22"))
+BOOSTED_PARAM_CHANGES_PER_ITERATION = int(os.getenv("MACD_BOOSTED_PARAM_CHANGES", "6"))
+BOOSTED_PARAM_RELATIVE_STEP = float(os.getenv("MACD_BOOSTED_PARAM_RELATIVE_STEP", "0.18"))
 AGGRESSIVE_DRAWDOWN_SOFT_CAP = float(os.getenv("MACD_DRAWDOWN_SOFT_CAP", "55.0"))
 AGGRESSIVE_DRAWDOWN_HARD_CAP = float(os.getenv("MACD_DRAWDOWN_HARD_CAP", "65.0"))
 AGGRESSIVE_MIN_VALIDATION_SCORE = float(os.getenv("MACD_MIN_VALIDATION_SCORE", "0.0"))
+AGGRESSIVE_MIN_TRAIN_SCORE = float(os.getenv("MACD_MIN_TRAIN_SCORE", "-8.0"))
 AGGRESSIVE_MAX_OVERFIT_GAP = float(os.getenv("MACD_MAX_OVERFIT_GAP", "25.0"))
+AGGRESSIVE_MAX_UNDERFIT_GAP = float(os.getenv("MACD_MAX_UNDERFIT_GAP", "20.0"))
+AGGRESSIVE_UNDERFIT_PENALTY = float(os.getenv("MACD_UNDERFIT_PENALTY", "0.3"))
 AGGRESSIVE_MIN_LEVERAGE = int(os.getenv("MACD_MIN_LEVERAGE", "14"))
 AGGRESSIVE_MIN_TP1_PNL_PCT = float(os.getenv("MACD_MIN_TP1_PNL_PCT", "42.0"))
 AGGRESSIVE_MIN_SHADOW_TEST_SCORE = float(os.getenv("MACD_MIN_SHADOW_TEST_SCORE", "0.0"))
 AGGRESSIVE_MAX_VAL_SHADOW_GAP = float(os.getenv("MACD_MAX_VAL_SHADOW_GAP", "28.0"))
 AGGRESSIVE_MAX_SHADOW_REGRESSION = float(os.getenv("MACD_MAX_SHADOW_REGRESSION", "6.0"))
 AGGRESSIVE_MIN_SHADOW_TEST_TRADES = int(os.getenv("MACD_MIN_SHADOW_TEST_TRADES", "8"))
-EVAL_START_DATE = os.getenv("MACD_EVAL_START_DATE", "2025-10-01")
+EVAL_START_DATE = os.getenv("MACD_EVAL_START_DATE", "2025-04-01")
 EVAL_END_DATE = os.getenv("MACD_EVAL_END_DATE", "2026-03-31")
 EVAL_CHUNK_DAYS = int(os.getenv("MACD_EVAL_CHUNK_DAYS", "20"))
-TRAIN_CHUNK_COUNT = int(os.getenv("MACD_TRAIN_CHUNK_COUNT", "5"))
-VAL_CHUNK_COUNT = int(os.getenv("MACD_VAL_CHUNK_COUNT", "2"))
-TEST_CHUNK_COUNT = int(os.getenv("MACD_TEST_CHUNK_COUNT", "2"))
+SHADOW_CHUNK_COUNT = int(os.getenv("MACD_SHADOW_CHUNK_COUNT", "2"))
 CORE_STRATEGY_PARAM_KEYS = (
     "macd_fast",
     "macd_slow",
@@ -73,20 +74,45 @@ CORE_STRATEGY_PARAM_KEYS = (
     "hourly_adx_min",
     "breakout_lookback",
     "breakdown_lookback",
+    "breakout_rsi_max",
 )
 CORE_EXIT_PARAM_KEYS = (
     "leverage",
     "position_fraction",
-    "stop_atr_mult",
-    "stop_max_loss_pct",
-    "tp1_pnl_pct",
-    "trailing_activation_pct",
+    "breakout_stop_atr_mult",
+    "breakout_trailing_activation_pct",
+    "breakout_trailing_giveback_pct",
+    "short_breakdown_trailing_activation_pct",
 )
+PARAM_SEARCH_GROUPS = {
+    "momentum_core": (
+        "strategy.macd_fast",
+        "strategy.macd_slow",
+        "strategy.macd_signal",
+    ),
+    "trend_timing": (
+        "strategy.hourly_adx_min",
+        "strategy.breakout_lookback",
+        "strategy.breakdown_lookback",
+        "strategy.breakout_rsi_max",
+    ),
+    "aggression_risk": (
+        "exit.leverage",
+        "exit.position_fraction",
+        "exit.breakout_stop_atr_mult",
+    ),
+    "trailing_profit": (
+        "exit.breakout_trailing_activation_pct",
+        "exit.breakout_trailing_giveback_pct",
+        "exit.short_breakdown_trailing_activation_pct",
+    ),
+}
 INTRADAY_FILE = str(BASE_DIR / "data/price/BTCUSDT_futures_15m_20240601_20260401.csv")
 HOURLY_FILE = str(BASE_DIR / "data/price/BTCUSDT_futures_1h_20240601_20260401.csv")
 
 
 def _generate_windows():
+    """将评估区间切成连续20天窗口，最后N个为影子测试，其余为评估窗口。"""
     start_dt = datetime.strptime(EVAL_START_DATE, "%Y-%m-%d")
     end_dt = datetime.strptime(EVAL_END_DATE, "%Y-%m-%d")
     total_days = (end_dt - start_dt).days + 1
@@ -95,38 +121,29 @@ def _generate_windows():
     if EVAL_CHUNK_DAYS < 5:
         raise ValueError(f"EVAL_CHUNK_DAYS too small: {EVAL_CHUNK_DAYS}")
 
-    full_chunks, remainder = divmod(total_days, EVAL_CHUNK_DAYS)
-    if full_chunks == 0:
-        chunk_lengths = [total_days]
-    elif remainder == 0:
-        chunk_lengths = [EVAL_CHUNK_DAYS] * full_chunks
-    else:
-        chunk_lengths = [remainder + EVAL_CHUNK_DAYS] + [EVAL_CHUNK_DAYS] * (full_chunks - 1)
-
-    required_chunks = TRAIN_CHUNK_COUNT + VAL_CHUNK_COUNT + TEST_CHUNK_COUNT
-    if len(chunk_lengths) < required_chunks:
-        raise ValueError(
-            f"not enough chunks for split: have={len(chunk_lengths)}, need={required_chunks}"
-        )
-
     boundaries = []
     cursor = start_dt
-    for chunk_len in chunk_lengths:
-        chunk_end = cursor + timedelta(days=chunk_len - 1)
+    while cursor + timedelta(days=EVAL_CHUNK_DAYS - 1) <= end_dt:
+        chunk_end = cursor + timedelta(days=EVAL_CHUNK_DAYS - 1)
         boundaries.append((cursor, chunk_end))
         cursor = chunk_end + timedelta(days=1)
+    if cursor <= end_dt:
+        boundaries.append((cursor, end_dt))
 
+    if len(boundaries) < SHADOW_CHUNK_COUNT + 3:
+        raise ValueError(
+            f"not enough chunks: have={len(boundaries)}, need>={SHADOW_CHUNK_COUNT + 3}"
+        )
+
+    eval_count = len(boundaries) - SHADOW_CHUNK_COUNT
     windows = []
     for idx, (chunk_start, chunk_end) in enumerate(boundaries):
-        if idx < TRAIN_CHUNK_COUNT:
-            group = "train"
-            label = f"训练块{idx + 1}"
-        elif idx < TRAIN_CHUNK_COUNT + VAL_CHUNK_COUNT:
-            group = "val"
-            label = f"验证块{idx - TRAIN_CHUNK_COUNT + 1}"
+        if idx < eval_count:
+            group = "eval"
+            label = f"窗口{idx + 1}"
         else:
-            group = "test"
-            label = f"影测块{idx - TRAIN_CHUNK_COUNT - VAL_CHUNK_COUNT + 1}"
+            group = "shadow"
+            label = f"影测{idx - eval_count + 1}"
         windows.append(
             (
                 group,
@@ -258,65 +275,65 @@ def run_all_tests():
 
 
 def _score_summary(results):
-    train_returns = [item["result"]["return"] for item in results if item["group"] == "train"]
-    val_returns = [item["result"]["return"] for item in results if item["group"] == "val"]
-    test_returns = [item["result"]["return"] for item in results if item["group"] == "test"]
-    train_avg = sum(train_returns) / len(train_returns) if train_returns else 0.0
-    val_avg = sum(val_returns) / len(val_returns) if val_returns else 0.0
-    test_avg = sum(test_returns) / len(test_returns) if test_returns else 0.0
-    train_std = (
-        sum((r - train_avg) ** 2 for r in train_returns) / len(train_returns)
-    ) ** 0.5 if len(train_returns) > 1 else 0.0
-    val_std = (
-        sum((r - val_avg) ** 2 for r in val_returns) / len(val_returns)
-    ) ** 0.5 if len(val_returns) > 1 else 0.0
-    test_std = (
-        sum((r - test_avg) ** 2 for r in test_returns) / len(test_returns)
-    ) ** 0.5 if len(test_returns) > 1 else 0.0
-    worst_val_return = min(val_returns) if val_returns else 0.0
-    worst_test_return = min(test_returns) if test_returns else 0.0
+    eval_returns = [item["result"]["return"] for item in results if item["group"] == "eval"]
+    shadow_returns = [item["result"]["return"] for item in results if item["group"] == "shadow"]
+    eval_avg = sum(eval_returns) / len(eval_returns) if eval_returns else 0.0
+    shadow_avg = sum(shadow_returns) / len(shadow_returns) if shadow_returns else 0.0
+    eval_std = (
+        sum((r - eval_avg) ** 2 for r in eval_returns) / len(eval_returns)
+    ) ** 0.5 if len(eval_returns) > 1 else 0.0
+    shadow_std = (
+        sum((r - shadow_avg) ** 2 for r in shadow_returns) / len(shadow_returns)
+    ) ** 0.5 if len(shadow_returns) > 1 else 0.0
+    worst_eval_return = min(eval_returns) if eval_returns else 0.0
+    worst_shadow_return = min(shadow_returns) if shadow_returns else 0.0
+    eval_loss_blocks = sum(1 for r in eval_returns if r < 0.0)
+    eval_loss_ratio = eval_loss_blocks / len(eval_returns) if eval_returns else 0.0
+    positive_blocks = sum(1 for r in eval_returns if r > 0.0)
+    positive_ratio = positive_blocks / len(eval_returns) if eval_returns else 0.0
 
     worst_drawdown = max((item["result"]["max_drawdown"] for item in results), default=0.0)
     avg_fee_drag = sum(item["result"].get("fee_drag_pct", 0.0) for item in results) / len(results) if results else 0.0
     liquidations = sum(item["result"].get("liquidations", 0) for item in results)
     total_trades = sum(item["result"]["trades"] for item in results)
-    train_trades = sum(item["result"]["trades"] for item in results if item["group"] == "train")
-    val_trades = sum(item["result"]["trades"] for item in results if item["group"] == "val")
-    test_trades = sum(item["result"]["trades"] for item in results if item["group"] == "test")
+    eval_trades = sum(item["result"]["trades"] for item in results if item["group"] == "eval")
+    shadow_trades = sum(item["result"]["trades"] for item in results if item["group"] == "shadow")
 
-    overfit_penalty = max(0.0, train_avg - val_avg) * 0.9
-    validation_stability_penalty = val_std * 0.18
-    validation_tail_penalty = max(0.0, -worst_val_return) * 0.35
-    train_instability_penalty = max(0.0, train_std - max(10.0, val_std + 6.0)) * 0.05
+    consistency_penalty = eval_std * 0.15
+    tail_penalty = max(0.0, -worst_eval_return - 15.0) * 0.18
+    loss_ratio_penalty = max(0.0, eval_loss_ratio - 0.55) * 10.0
+    drawdown_penalty = max(0.0, worst_drawdown - AGGRESSIVE_DRAWDOWN_SOFT_CAP) * 0.22
+    liquidation_penalty = liquidations * 1.5
 
     selection_score = (
-        train_avg * 0.35
-        + val_avg * 0.65
-        - overfit_penalty
-        - validation_stability_penalty
-        - validation_tail_penalty
-        - train_instability_penalty
-        - max(0.0, worst_drawdown - AGGRESSIVE_DRAWDOWN_SOFT_CAP) * 0.22
-        - liquidations * 1.5
+        eval_avg
+        - consistency_penalty
+        - tail_penalty
+        - loss_ratio_penalty
+        - drawdown_penalty
+        - liquidation_penalty
     )
-    shadow_gap = val_avg - test_avg
-    promotion_score = selection_score - max(0.0, shadow_gap) * 0.15 - max(0.0, -test_avg) * 0.10
+    shadow_gap = eval_avg - shadow_avg
+    promotion_score = selection_score - max(0.0, shadow_gap) * 0.15 - max(0.0, -shadow_avg) * 0.10
     return {
-        "train_avg": train_avg,
-        "val_avg": val_avg,
-        "test_avg": test_avg,
-        "train_std": train_std,
-        "val_std": val_std,
-        "test_std": test_std,
-        "worst_val_return": worst_val_return,
-        "worst_test_return": worst_test_return,
+        "eval_avg": eval_avg,
+        "shadow_avg": shadow_avg,
+        "eval_std": eval_std,
+        "shadow_std": shadow_std,
+        "worst_eval_return": worst_eval_return,
+        "worst_shadow_return": worst_shadow_return,
         "worst_drawdown": worst_drawdown,
         "avg_fee_drag": avg_fee_drag,
         "liquidations": liquidations,
         "total_trades": total_trades,
-        "train_trades": train_trades,
-        "val_trades": val_trades,
-        "test_trades": test_trades,
+        "eval_trades": eval_trades,
+        "shadow_trades": shadow_trades,
+        "eval_loss_blocks": eval_loss_blocks,
+        "eval_loss_ratio": eval_loss_ratio,
+        "positive_ratio": positive_ratio,
+        "consistency_penalty": consistency_penalty,
+        "tail_penalty": tail_penalty,
+        "loss_ratio_penalty": loss_ratio_penalty,
         "selection_score": selection_score,
         "promotion_score": promotion_score,
         "shadow_gap": shadow_gap,
@@ -328,38 +345,39 @@ def build_summary_message(title, results, metrics, include_shadow_test=True):
     worst_drawdown = metrics["worst_drawdown"]
     pyramid_adds = sum(item["result"].get("pyramid_add_count", 0) for item in results)
     avg_fee_drag = metrics["avg_fee_drag"]
+    eval_count = sum(1 for item in results if item["group"] == "eval")
     lines = [
         f"**{title}**",
         f"",
-        f"📊 综合评分",
-        f"训练: {metrics['train_avg']:.2f}",
-        f"验证: {metrics['val_avg']:.2f}",
+        f"📊 Walk-Forward 评分 ({eval_count}个窗口)",
+        f"评估均值: {metrics['eval_avg']:.2f}%",
+        f"正收益占比: {metrics['positive_ratio']:.0%}",
         f"选优分: {metrics['selection_score']:.2f}",
     ]
     if include_shadow_test:
         lines.extend(
             [
-            f"影子测试: {metrics['test_avg']:.2f}",
+            f"影子测试: {metrics['shadow_avg']:.2f}%",
             f"晋级分: {metrics['promotion_score']:.2f}",
             ]
         )
     else:
-        lines.append("影子测试: 已隔离，不向优化模型暴露最新时间块结果")
+        lines.append("影子测试: 已隔离")
     lines.extend(
         [
             f"",
             f"⚙️ 参数配置",
             f"杠杆: {backtest_module.EXIT_PARAMS['leverage']}x",
             f"并发: {backtest_module.EXIT_PARAMS['max_concurrent_positions']}",
-            f"首止盈: {backtest_module.EXIT_PARAMS['tp1_pnl_pct']:.0f}%",
             f"",
             f"⚠️ 风险指标",
             f"最大回撤: {worst_drawdown:.1f}%",
             f"总交易: {total_trades}",
+            f"一致性(std): {metrics['eval_std']:.1f}",
         ]
     )
     if include_shadow_test:
-        lines.append(f"影测差值(验证-影测): {metrics['shadow_gap']:.2f}")
+        lines.append(f"影测差值(评估-影测): {metrics['shadow_gap']:.2f}")
     lines.extend(
         [
             f"加仓次数: {pyramid_adds}",
@@ -369,10 +387,10 @@ def build_summary_message(title, results, metrics, include_shadow_test=True):
         ]
     )
     for item in results:
-        if item["group"] == "test" and not include_shadow_test:
+        if item["group"] == "shadow" and not include_shadow_test:
             continue
         result = item["result"]
-        group_label = {"train": "训", "val": "验", "test": "测"}.get(item["group"], item["group"])
+        group_label = {"eval": "评", "shadow": "影"}.get(item["group"], item["group"])
         lines.append(
             f"{item['name']}({group_label})"
         )
@@ -391,10 +409,9 @@ def _build_gate_reason(metrics, base_gate_passed, shadow_gate_passed, shadow_reg
         f"trade={metrics['total_trades']}",
         f"dd={metrics['worst_drawdown']:.2f}",
         f"liq={metrics['liquidations']}",
-        f"过拟={metrics['train_avg'] - metrics['val_avg']:.2f}",
-        f"验证={metrics['val_avg']:.2f}",
+        f"评估={metrics['eval_avg']:.2f}",
+        f"正比={metrics['positive_ratio']:.0%}",
         f"杠杆={backtest_module.EXIT_PARAMS.get('leverage', 0)}",
-        f"TP1={backtest_module.EXIT_PARAMS.get('tp1_pnl_pct', 0)}",
     ]
     if not shadow_gate_passed:
         reasons.append("影测=未过")
@@ -484,13 +501,10 @@ def _load_memory_payload():
 def _find_recent_duplicate_direction(changes):
     payload = _load_memory_payload()
     signature = _change_signature(changes)
-    direction_signature = _change_direction_signature(changes)
     for bucket in ("accepted", "rejected"):
-        for item in reversed(payload.get(bucket, [])[-16:]):
+        for item in reversed(payload.get(bucket, [])[-12:]):
             if item.get("signature") == signature:
                 return bucket, "exact", item
-            if item.get("direction_signature") == direction_signature:
-                return bucket, "direction", item
     return None
 
 
@@ -512,13 +526,72 @@ def _build_duplicate_guidance(changes, duplicate_match):
     )
 
 
+def _param_group_for_change(change_key):
+    for group_name, members in PARAM_SEARCH_GROUPS.items():
+        if change_key in members:
+            return group_name
+    return "other"
+
+
+def _memory_group_summary():
+    payload = _load_memory_payload()
+    counts = {group: {"accepted": 0, "rejected": 0} for group in PARAM_SEARCH_GROUPS}
+    for bucket in ("accepted", "rejected"):
+        for item in payload.get(bucket, [])[-12:]:
+            seen_groups = set()
+            for change in item.get("changes", []):
+                scoped_key = change.split(":", 1)[0]
+                group = _param_group_for_change(scoped_key)
+                if group not in PARAM_SEARCH_GROUPS or group in seen_groups:
+                    continue
+                counts[group][bucket] += 1
+                seen_groups.add(group)
+
+    lines = []
+    for group_name in PARAM_SEARCH_GROUPS:
+        bucket = counts[group_name]
+        lines.append(
+            f"- {group_name}: accepted={bucket['accepted']}, rejected={bucket['rejected']}"
+        )
+    return "\n".join(lines)
+
+
+def _rank_focus_groups():
+    payload = _load_memory_payload()
+    group_scores = {group: 0.0 for group in PARAM_SEARCH_GROUPS}
+    for bucket, sign, decay_base in (("accepted", 1.4, 0.92), ("rejected", -1.0, 0.92)):
+        items = payload.get(bucket, [])[-12:]
+        for idx, item in enumerate(reversed(items), start=1):
+            weight = sign * (decay_base ** (idx - 1))
+            seen_groups = set()
+            for change in item.get("changes", []):
+                scoped_key = change.split(":", 1)[0]
+                group = _param_group_for_change(scoped_key)
+                if group not in PARAM_SEARCH_GROUPS or group in seen_groups:
+                    continue
+                group_scores[group] += weight
+                seen_groups.add(group)
+    return [
+        group_name
+        for group_name, _score in sorted(
+            group_scores.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+
+
 def _current_search_policy():
     boosted = plateau_pass_streak >= PLATEAU_PASS_STREAK_TO_EXPAND
+    ranked_groups = _rank_focus_groups()
+    focus_groups = ranked_groups[: (3 if boosted else 2)]
     return {
         "mode": "boosted" if boosted else "default",
         "max_changes": BOOSTED_PARAM_CHANGES_PER_ITERATION if boosted else MAX_PARAM_CHANGES_PER_ITERATION,
         "relative_step": BOOSTED_PARAM_RELATIVE_STEP if boosted else MAX_PARAM_RELATIVE_STEP,
         "plateau_streak": plateau_pass_streak,
+        "max_groups": 2 if boosted else 1,
+        "focus_groups": focus_groups,
+        "hypothesis_style": "paired_groups" if boosted else "single_group",
     }
 
 
@@ -608,6 +681,76 @@ def _apply_local_search_guardrails(current_params, proposed_params, label, max_c
     return trimmed
 
 
+def _apply_group_focus_guardrails(
+    old_strategy_params,
+    new_strategy_params,
+    old_exit_params,
+    new_exit_params,
+    search_policy,
+):
+    changes = []
+    for key, old_value in old_strategy_params.items():
+        new_value = new_strategy_params.get(key)
+        if old_value != new_value:
+            scoped_key = f"strategy.{key}"
+            changes.append(
+                {
+                    "group": _param_group_for_change(scoped_key),
+                    "scoped_key": scoped_key,
+                    "key": key,
+                    "section": "strategy",
+                    "magnitude": _relative_change_score(old_value, new_value),
+                }
+            )
+    for key, old_value in old_exit_params.items():
+        new_value = new_exit_params.get(key)
+        if old_value != new_value:
+            scoped_key = f"exit.{key}"
+            changes.append(
+                {
+                    "group": _param_group_for_change(scoped_key),
+                    "scoped_key": scoped_key,
+                    "key": key,
+                    "section": "exit",
+                    "magnitude": _relative_change_score(old_value, new_value),
+                }
+            )
+
+    changed_groups = {item["group"] for item in changes}
+    if len(changed_groups) <= search_policy["max_groups"]:
+        return new_strategy_params, new_exit_params
+
+    group_strength = {}
+    for item in changes:
+        group_strength[item["group"]] = group_strength.get(item["group"], 0.0) + item["magnitude"]
+
+    ordered_groups = sorted(
+        group_strength,
+        key=lambda group: (
+            0 if group in search_policy["focus_groups"] else 1,
+            -group_strength[group],
+            group,
+        ),
+    )
+    keep_groups = set(ordered_groups[: search_policy["max_groups"]])
+
+    trimmed_strategy = dict(old_strategy_params)
+    trimmed_exit = dict(old_exit_params)
+    for item in changes:
+        if item["group"] not in keep_groups:
+            continue
+        if item["section"] == "strategy":
+            trimmed_strategy[item["key"]] = new_strategy_params[item["key"]]
+        else:
+            trimmed_exit[item["key"]] = new_exit_params[item["key"]]
+
+    log_info(
+        "候选跨越过多参数组，"
+        f"已限制为 {search_policy['max_groups']} 个组: {', '.join(sorted(keep_groups))}"
+    )
+    return trimmed_strategy, trimmed_exit
+
+
 def _pick_core_params(source_params, allowed_keys):
     return {key: source_params[key] for key in allowed_keys if key in source_params}
 
@@ -628,7 +771,8 @@ def optimize_strategy():
             "探索增强模式已启用: "
             f"连续 {search_policy['plateau_streak']} 轮通过但未刷新最优，"
             f"本轮允许最多 {search_policy['max_changes']} 项改动，"
-            f"单键步长上限 {search_policy['relative_step'] * 100:.0f}%"
+            f"单键步长上限 {search_policy['relative_step'] * 100:.0f}%，"
+            f"重点组 {', '.join(search_policy['focus_groups'])}"
         )
     duplicate_guidance = ""
     for candidate_attempt in range(MAX_DUPLICATE_REPLAN_ATTEMPTS + 1):
@@ -648,6 +792,9 @@ def optimize_strategy():
 历史方向记忆：
 {_memory_summary()}
 
+最近参数组效果：
+{_memory_group_summary()}
+
 约束要求：
 - 维持激进风格，优先高收益趋势跟随，不要把策略改成保守低波动版本。
 - 允许高风险，但目标是把最差回撤压到 {AGGRESSIVE_DRAWDOWN_HARD_CAP:.0f}% 以内，并让验证窗口收益保持为正。
@@ -655,6 +802,20 @@ def optimize_strategy():
 - 本轮只允许修改上面列出的 {len(core_strategy_params) + len(core_exit_params)} 个核心参数，其余参数全部保持不变。
 - 当前搜索模式: {search_policy['mode']}。
 - 每轮只做局部微调，最多改动 {search_policy['max_changes']} 个键，单个数值通常不要偏离当前值的 {search_policy['relative_step'] * 100:.0f}% 以上。
+- 本轮按单一研究假设搜索，默认只集中在 {search_policy['max_groups']} 个参数组内。
+- 优先考虑这些参数组：{', '.join(search_policy['focus_groups'])}。
+- 参数组定义：
+  - momentum_core: macd_fast / macd_slow / macd_signal
+  - trend_timing: hourly_adx_min / breakout_lookback / breakdown_lookback / breakout_rsi_max
+  - aggression_risk: leverage / position_fraction / breakout_stop_atr_mult
+  - trailing_profit: breakout_trailing_activation_pct / breakout_trailing_giveback_pct / short_breakdown_trailing_activation_pct
+- 默认先做高质量小步试探，优先 2-3 个键的成组联动，不要把参数分散乱改。
+- 非增强模式不要同时横跨多个参数组；增强模式也只允许两组以内的协调调整。
+- 当前系统使用 Walk-Forward 评估：过去一年数据切成多个20天窗口，每个窗口独立回测，评分基于所有窗口的综合表现。
+- 系统会惩罚收益不一致（标准差高）和极端亏损窗口。
+- 正收益窗口占比需 >= 35%。
+- 允许在同一方向上尝试不同幅度，只避免完全相同的重复候选。
+- 如果最近多轮都是“通过但不保留”，说明候选质量不够，不要重复轻微拨动同一批键，优先换一个新的参数组假设。
 - 如果最近方案大多是回撤过高，就优先收紧止损、缩短持有、降低加仓强度，而不是同时重写所有入场阈值。
 {f"- 额外提醒：{duplicate_guidance}" if duplicate_guidance else ""}
 
@@ -688,6 +849,13 @@ def optimize_strategy():
             "exit_params",
             search_policy["max_changes"],
             search_policy["relative_step"],
+        )
+        guarded_strategy_params, guarded_exit_params = _apply_group_focus_guardrails(
+            core_strategy_params,
+            guarded_strategy_params,
+            core_exit_params,
+            guarded_exit_params,
+            search_policy,
         )
         new_strategy_params = dict(strategy_module.PARAMS)
         new_strategy_params.update(guarded_strategy_params)
@@ -767,7 +935,7 @@ def initialize_best_score():
     results = run_all_tests()
     metrics = _score_summary(results)
     best_score = metrics["promotion_score"]
-    best_shadow_test_avg = metrics["test_avg"]
+    best_shadow_test_avg = metrics["shadow_avg"]
     latest_eval_summary = build_summary_message("基准", results, metrics, include_shadow_test=True)
     latest_public_eval_summary = build_summary_message("基准", results, metrics, include_shadow_test=False)
     last_params_snapshot = dict(strategy_module.PARAMS)
@@ -776,9 +944,8 @@ def initialize_best_score():
         "激进版初始基准: "
         f"promotion={metrics['promotion_score']:.4f}, "
         f"selection={metrics['selection_score']:.4f}, "
-        f"train={metrics['train_avg']:.4f}, "
-        f"val={metrics['val_avg']:.4f}, "
-        f"test={metrics['test_avg']:.4f}, "
+        f"eval={metrics['eval_avg']:.4f}, "
+        f"shadow={metrics['shadow_avg']:.4f}, "
         f"fee_drag={metrics['avg_fee_drag']:.4f}"
     )
     heartbeat_for_log(
@@ -786,9 +953,8 @@ def initialize_best_score():
         "initial baseline ready",
         promotion=metrics["promotion_score"],
         selection=metrics["selection_score"],
-        train=metrics["train_avg"],
-        val=metrics["val_avg"],
-        test=metrics["test_avg"],
+        eval_avg=metrics["eval_avg"],
+        shadow=metrics["shadow_avg"],
         fee_drag=metrics["avg_fee_drag"],
     )
     send_discord(latest_eval_summary)
@@ -873,27 +1039,25 @@ def run_iteration(iteration_id, use_model_optimization=True):
 
     base_gate_passed = (
         metrics["total_trades"] >= 30
-        and metrics["train_trades"] >= 15
-        and metrics["val_trades"] >= 8
+        and metrics["eval_trades"] >= 20
         and metrics["worst_drawdown"] <= AGGRESSIVE_DRAWDOWN_HARD_CAP
         and metrics["liquidations"] <= 10
-        and metrics["train_avg"] - metrics["val_avg"] <= AGGRESSIVE_MAX_OVERFIT_GAP
-        and metrics["val_avg"] > AGGRESSIVE_MIN_VALIDATION_SCORE
+        and metrics["eval_avg"] > AGGRESSIVE_MIN_VALIDATION_SCORE
+        and metrics["positive_ratio"] >= 0.35
         and backtest_module.EXIT_PARAMS.get('leverage', 0) >= AGGRESSIVE_MIN_LEVERAGE
-        and backtest_module.EXIT_PARAMS.get('tp1_pnl_pct', 0) >= AGGRESSIVE_MIN_TP1_PNL_PCT
     )
     shadow_gate_passed = (
-        metrics["test_trades"] >= AGGRESSIVE_MIN_SHADOW_TEST_TRADES
-        and metrics["test_avg"] >= AGGRESSIVE_MIN_SHADOW_TEST_SCORE
+        metrics["shadow_trades"] >= AGGRESSIVE_MIN_SHADOW_TEST_TRADES
+        and metrics["shadow_avg"] >= AGGRESSIVE_MIN_SHADOW_TEST_SCORE
         and metrics["shadow_gap"] <= AGGRESSIVE_MAX_VAL_SHADOW_GAP
     )
-    shadow_regression_passed = metrics["test_avg"] >= (best_shadow_test_avg - AGGRESSIVE_MAX_SHADOW_REGRESSION)
+    shadow_regression_passed = metrics["shadow_avg"] >= (best_shadow_test_avg - AGGRESSIVE_MAX_SHADOW_REGRESSION)
     gate_passed = base_gate_passed and shadow_gate_passed and shadow_regression_passed
     gate_reason = _build_gate_reason(metrics, base_gate_passed, shadow_gate_passed, shadow_regression_passed)
 
     if gate_passed and metrics["promotion_score"] > best_score:
         best_score = metrics["promotion_score"]
-        best_shadow_test_avg = metrics["test_avg"]
+        best_shadow_test_avg = metrics["shadow_avg"]
         plateau_pass_streak = 0
         last_params_snapshot = current_params_snapshot
         last_exit_snapshot = current_exit_snapshot
@@ -905,7 +1069,7 @@ def run_iteration(iteration_id, use_model_optimization=True):
             f"iteration {iteration_id} accepted",
             promotion=metrics["promotion_score"],
             selection=metrics["selection_score"],
-            test=metrics["test_avg"],
+            shadow=metrics["shadow_avg"],
             gate=gate_reason,
         )
         send_discord(msg)
@@ -922,7 +1086,7 @@ def run_iteration(iteration_id, use_model_optimization=True):
         f"iteration {iteration_id} rejected",
         promotion=metrics["promotion_score"],
         selection=metrics["selection_score"],
-        test=metrics["test_avg"],
+        shadow=metrics["shadow_avg"],
         gate=gate_reason,
     )
     return "rejected"

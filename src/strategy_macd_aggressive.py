@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """极致激进策略：严入场 + 慢止盈 + 慢止损 + 高杠杆。"""
 
+SIDEWAYS_INTRADAY_CHOP_MIN = 60.0
+SIDEWAYS_HOURLY_CHOP_MIN = 58.0
+SIDEWAYS_MIN_ATR_RATIO = 0.0020
+SIDEWAYS_MIN_HOURLY_SPREAD_PCT = 0.0016
+SIDEWAYS_MIN_FOURH_SPREAD_PCT = 0.0020
+
 # PARAMS_START
 PARAMS = {'breakdown_adx_min': 21.5,
  'breakdown_body_ratio_min': 0.39,
  'breakdown_buffer_pct': 0.0002,
  'breakdown_close_pos_max': 0.36,
  'breakdown_hist_max': 16.0,
- 'breakdown_lookback': 26,
+ 'breakdown_lookback': 25,
  'breakdown_rsi_max': 42.0,
  'breakdown_rsi_min': 21.0,
  'breakdown_volume_ratio_min': 1.08,
@@ -16,14 +22,14 @@ PARAMS = {'breakdown_adx_min': 21.5,
  'breakout_buffer_pct': 0.0,
  'breakout_close_pos_min': 0.48,
  'breakout_hist_min': -95.0,
- 'breakout_lookback': 21,
- 'breakout_rsi_max': 92.0,
+ 'breakout_lookback': 22,
+ 'breakout_rsi_max': 82.1,
  'breakout_rsi_min': 44.0,
  'breakout_volume_ratio_min': 0.84,
  'fourh_adx_min': 10.8,
  'fourh_ema_fast': 10,
  'fourh_ema_slow': 34,
- 'hourly_adx_min': 12.8,
+ 'hourly_adx_min': 15.2,
  'hourly_ema_anchor': 85,
  'hourly_ema_fast': 12,
  'hourly_ema_slow': 50,
@@ -91,6 +97,67 @@ def _position_side(position):
     return "short" if signal.startswith("short_") else "long"
 
 
+def _intraday_trend_metrics(market_state):
+    ema_fast = market_state["ema_fast"]
+    ema_slow = market_state["ema_slow"]
+    prev_ema_slow = market_state["prev_ema_slow"]
+    trend_base = max(abs(ema_slow), 1e-9)
+    return {
+        "spread_pct": (ema_fast - ema_slow) / trend_base,
+        "slope_pct": (ema_slow - prev_ema_slow) / trend_base,
+    }
+
+
+def _is_sideways_regime(market_state):
+    hourly = market_state["hourly"]
+    fourh = market_state["four_hour"]
+    intraday = _intraday_trend_metrics(market_state)
+    intraday_chop = market_state["chop"]
+    hourly_chop = hourly["chop"]
+    atr_ratio = market_state["atr_ratio"]
+    intraday_spread = abs(intraday["spread_pct"])
+    hourly_spread = abs(hourly["trend_spread_pct"])
+    fourh_spread = abs(fourh["trend_spread_pct"])
+    hourly_slope = abs(hourly["ema_slow_slope_pct"])
+    fourh_slope = abs(fourh["ema_slow_slope_pct"])
+
+    signals = 0
+    if intraday_chop >= SIDEWAYS_INTRADAY_CHOP_MIN and hourly_chop >= SIDEWAYS_HOURLY_CHOP_MIN:
+        signals += 1
+    if atr_ratio < SIDEWAYS_MIN_ATR_RATIO and hourly_chop >= SIDEWAYS_HOURLY_CHOP_MIN - 1.0:
+        signals += 1
+    if hourly_spread < SIDEWAYS_MIN_HOURLY_SPREAD_PCT and fourh_spread < SIDEWAYS_MIN_FOURH_SPREAD_PCT:
+        signals += 1
+    if intraday_spread < atr_ratio * 0.28 and hourly_slope < atr_ratio * 0.08 and fourh_slope < atr_ratio * 0.04:
+        signals += 1
+    return signals >= 2
+
+
+def _trend_followthrough_ok(market_state, side, trigger_price, current_close):
+    hourly = market_state["hourly"]
+    fourh = market_state["four_hour"]
+    intraday = _intraday_trend_metrics(market_state)
+    atr_ratio = market_state["atr_ratio"]
+    direction = -1.0 if side == "short" else 1.0
+    breakout_distance_pct = abs(current_close - trigger_price) / max(trigger_price, 1e-9)
+
+    confirms = 0
+    if direction * intraday["spread_pct"] >= atr_ratio * 0.30:
+        confirms += 1
+    if direction * hourly["trend_spread_pct"] >= max(SIDEWAYS_MIN_HOURLY_SPREAD_PCT * 1.35, atr_ratio * 0.85):
+        confirms += 1
+    if direction * fourh["trend_spread_pct"] >= max(SIDEWAYS_MIN_FOURH_SPREAD_PCT * 1.10, atr_ratio * 1.05):
+        confirms += 1
+    if (
+        direction * hourly["ema_slow_slope_pct"] >= atr_ratio * 0.08
+        and direction * fourh["ema_slow_slope_pct"] >= atr_ratio * 0.04
+    ):
+        confirms += 1
+    if breakout_distance_pct >= atr_ratio * 0.35:
+        confirms += 1
+    return confirms >= 3
+
+
 def strategy(data, idx, positions, market_state):
     p = PARAMS
     if idx < p["min_history"]:
@@ -106,6 +173,9 @@ def strategy(data, idx, positions, market_state):
     for bar in (current, prev):
         if bar["open"] <= 0 or bar["close"] <= 0 or bar["volume"] <= 0 or bar["high"] < bar["low"]:
             return None
+
+    if _is_sideways_regime(market_state):
+        return None
 
     current_candle = _candle_metrics(current)
     avg_volume = max(_avg(data, idx - p["volume_lookback"] + 1, idx, "volume"), 1e-9)
@@ -140,7 +210,7 @@ def strategy(data, idx, positions, market_state):
             and p["breakout_rsi_min"] <= market_state["rsi"] <= p["breakout_rsi_max"]
             and market_state["histogram"] >= p["breakout_hist_min"]
         )
-        if breakout_ready:
+        if breakout_ready and _trend_followthrough_ok(market_state, "long", breakout_high, current["close"]):
             return "long_breakout"
 
     # 做空：三周期共振 + Breakdown
@@ -170,7 +240,7 @@ def strategy(data, idx, positions, market_state):
             and p["breakdown_rsi_min"] <= market_state["rsi"] <= p["breakdown_rsi_max"]
             and market_state["histogram"] <= p["breakdown_hist_max"]
         )
-        if breakdown_ready:
+        if breakdown_ready and _trend_followthrough_ok(market_state, "short", breakdown_low, current["close"]):
             return "short_breakdown"
 
     return None

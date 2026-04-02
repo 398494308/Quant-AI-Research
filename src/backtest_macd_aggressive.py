@@ -21,11 +21,11 @@ EXIT_PARAMS = {'break_even_activation_pct': 28.0,
  'break_even_buffer_pct': 0.35,
  'breakout_break_even_activation_pct': 42.0,
  'breakout_max_hold_bars': 384,
- 'breakout_stop_atr_mult': 3.8,
- 'breakout_tp1_close_fraction': 0.03,
+ 'breakout_stop_atr_mult': 2.3,
+ 'breakout_tp1_close_fraction': 0.16,
  'breakout_tp1_pnl_pct': 56.0,
- 'breakout_trailing_activation_pct': 110.0,
- 'breakout_trailing_giveback_pct': 38.0,
+ 'breakout_trailing_activation_pct': 98.0,
+ 'breakout_trailing_giveback_pct': 32.0,
  'dynamic_hold_adx_strong_threshold': 26.0,
  'dynamic_hold_adx_threshold': 16.0,
  'dynamic_hold_extension_bars': 96,
@@ -33,12 +33,12 @@ EXIT_PARAMS = {'break_even_activation_pct': 28.0,
  'entry_delay_minutes': 1,
  'execution_use_1m': 1,
  'funding_fee_enabled': 1,
- 'leverage': 15,
+ 'leverage': 14,
  'max_concurrent_positions': 5,
  'max_hold_bars': 288,
  'okx_maker_fee_rate': 0.0002,
  'okx_taker_fee_rate': 0.0005,
- 'position_fraction': 0.19,
+ 'position_fraction': 0.17,
  'position_size_max': 30000,
  'position_size_min': 5000,
  'pyramid_adx_min': 19.0,
@@ -56,14 +56,15 @@ EXIT_PARAMS = {'break_even_activation_pct': 28.0,
  'short_breakdown_stop_atr_mult': 2.1,
  'short_breakdown_tp1_close_fraction': 0.22,
  'short_breakdown_tp1_pnl_pct': 22.0,
- 'short_breakdown_trailing_activation_pct': 40.0,
+ 'short_breakdown_trailing_activation_pct': 34.0,
  'short_breakdown_trailing_giveback_pct': 9.0,
- 'stop_atr_mult': 3.0,
+ 'stop_atr_mult': 3.1,
  'stop_max_loss_pct': 53.0,
  'tp1_close_fraction': 0.04,
  'tp1_pnl_pct': 46.0,
  'trading_fee_enabled': 1,
- 'trailing_activation_pct': 88.0,
+ 'slippage_pct': 0.0003,
+ 'trailing_activation_pct': 87.0,
  'trailing_giveback_pct': 28.0}
 # EXIT_PARAMS_END
 
@@ -372,6 +373,24 @@ def _trading_fee_amount(notional, exit_p):
     return max(0.0, notional) * float(exit_p["okx_taker_fee_rate"])
 
 
+def _fill_with_slippage(price, side, is_entry, slippage_pct):
+    """Apply slippage in the unfavorable direction for the trader."""
+    if slippage_pct <= 0.0:
+        return price
+    is_buying = (side == "long") == is_entry
+    if is_buying:
+        return price * (1.0 + slippage_pct)
+    return price * (1.0 - slippage_pct)
+
+
+def _tp_trigger_price(entry_price, tp_pnl_pct, leverage, side):
+    """Calculate the exact price that triggers a take-profit level."""
+    pct_move = tp_pnl_pct / leverage / 100.0
+    if side == "long":
+        return entry_price * (1.0 + pct_move)
+    return entry_price * (1.0 - pct_move)
+
+
 def _execution_price(bar_timestamp, bar_close, execution_timestamps, execution_data, intraday_interval_ms, delay_minutes):
     if not execution_timestamps or not execution_data:
         return bar_close
@@ -625,6 +644,7 @@ def backtest_macd_aggressive(
     funding_idx = 0
     delay_minutes = int(exit_p.get("entry_delay_minutes", 1))
     taker_fee_rate = float(exit_p["okx_taker_fee_rate"]) if int(exit_p.get("trading_fee_enabled", 1)) > 0 else 0.0
+    slippage_pct = float(exit_p.get("slippage_pct", 0.0003))
 
     def record_trade(trade):
         trades.append(trade)
@@ -736,13 +756,14 @@ def backtest_macd_aggressive(
 
             stop_hit = bar["high"] >= position["stop_price"] if side == "short" else bar["low"] <= position["stop_price"]
             if stop_hit:
-                exit_notional = _position_notional(position, position["stop_price"], leverage)
+                stop_fill = _fill_with_slippage(position["stop_price"], side, False, slippage_pct)
+                exit_notional = _position_notional(position, stop_fill, leverage)
                 exit_fee = _trading_fee_amount(exit_notional, exit_p)
                 allocated_entry_fee = position.get("entry_fee_paid", 0.0)
                 allocated_funding = position.get("funding_pnl", 0.0)
                 trade, pnl_amount = _close_trade(
                     position,
-                    position["stop_price"],
+                    stop_fill,
                     "止损",
                     leverage,
                     allocated_entry_fee=allocated_entry_fee,
@@ -755,13 +776,14 @@ def backtest_macd_aggressive(
                 continue
 
             if _should_pyramid(position, market_state, close_pnl_pct, exit_p):
+                pyramid_fill = _fill_with_slippage(market_fill_price, side, True, slippage_pct)
                 max_affordable_size = capital / (1.0 + leverage * taker_fee_rate)
                 add_size = min(max_affordable_size, position["size"] * float(exit_p.get("pyramid_size_ratio", 0.5)), position_size_max)
                 if add_size >= position_size_min:
                     add_fee = _trading_fee_amount(add_size * leverage, exit_p)
                     total_size = position["size"] + add_size
                     position["entry_price"] = (
-                        position["entry_price"] * position["size"] + market_fill_price * add_size
+                        position["entry_price"] * position["size"] + pyramid_fill * add_size
                     ) / total_size
                     position["size"] = total_size
                     position["pyramids_done"] = position.get("pyramids_done", 0) + 1
@@ -773,6 +795,8 @@ def backtest_macd_aggressive(
             tp1_pnl_pct = float(_exit_value(exit_p, position, "tp1_pnl_pct"))
             tp1_close_fraction = float(_exit_value(exit_p, position, "tp1_close_fraction"))
             if (not position["tp1_done"]) and best_pnl_pct >= tp1_pnl_pct:
+                tp1_trigger = _tp_trigger_price(position["entry_price"], tp1_pnl_pct, leverage, side)
+                tp1_fill = _fill_with_slippage(tp1_trigger, side, False, slippage_pct)
                 close_size = position["size"] * tp1_close_fraction
                 remaining_size = position["size"] - close_size
                 close_fraction = close_size / max(position["size"], 1e-9)
@@ -780,11 +804,11 @@ def backtest_macd_aggressive(
                 allocated_funding = position.get("funding_pnl", 0.0) * close_fraction
                 partial_position = dict(position)
                 partial_position["size"] = close_size
-                exit_notional = _position_notional(partial_position, market_fill_price, leverage)
+                exit_notional = _position_notional(partial_position, tp1_fill, leverage)
                 exit_fee = _trading_fee_amount(exit_notional, exit_p)
                 trade, pnl_amount = _close_trade(
                     partial_position,
-                    market_fill_price,
+                    tp1_fill,
                     "第一止盈",
                     leverage,
                     allocated_entry_fee=allocated_entry_fee,
@@ -824,13 +848,14 @@ def backtest_macd_aggressive(
             if int(exit_p["regime_exit_enabled"]) > 0 and hourly_context is not None:
                 regime_broken = _confirmed_regime_break(position, exit_p, bar, prev_bar, market_state)
                 if regime_broken and close_pnl_pct < trailing_activation_pct:
-                    exit_notional = _position_notional(position, market_fill_price, leverage)
+                    regime_fill = _fill_with_slippage(market_fill_price, side, False, slippage_pct)
+                    exit_notional = _position_notional(position, regime_fill, leverage)
                     exit_fee = _trading_fee_amount(exit_notional, exit_p)
                     allocated_entry_fee = position.get("entry_fee_paid", 0.0)
                     allocated_funding = position.get("funding_pnl", 0.0)
                     trade, pnl_amount = _close_trade(
                         position,
-                        market_fill_price,
+                        regime_fill,
                         "趋势失效",
                         leverage,
                         allocated_entry_fee=allocated_entry_fee,
@@ -844,13 +869,14 @@ def backtest_macd_aggressive(
 
             hold_limit = _resolve_hold_limit(position, exit_p, market_state, close_pnl_pct)
             if position["hold_bars"] >= hold_limit:
-                exit_notional = _position_notional(position, market_fill_price, leverage)
+                time_fill = _fill_with_slippage(market_fill_price, side, False, slippage_pct)
+                exit_notional = _position_notional(position, time_fill, leverage)
                 exit_fee = _trading_fee_amount(exit_notional, exit_p)
                 allocated_entry_fee = position.get("entry_fee_paid", 0.0)
                 allocated_funding = position.get("funding_pnl", 0.0)
                 trade, pnl_amount = _close_trade(
                     position,
-                    market_fill_price,
+                    time_fill,
                     "时间退出",
                     leverage,
                     allocated_entry_fee=allocated_entry_fee,
@@ -869,13 +895,29 @@ def backtest_macd_aggressive(
         signal = strategy_func(intraday_data, idx, positions, market_state)
         if signal and positions and _signal_side(signal) != _position_side(positions[0]):
             for position in positions:
-                trade, pnl_amount = _close_trade(position, bar["close"], "反向信号", leverage)
-                capital += position["size"] + pnl_amount
+                rev_side = _position_side(position)
+                rev_fill = _fill_with_slippage(market_fill_price, rev_side, False, slippage_pct)
+                exit_notional = _position_notional(position, rev_fill, leverage)
+                exit_fee = _trading_fee_amount(exit_notional, exit_p)
+                allocated_entry_fee = position.get("entry_fee_paid", 0.0)
+                allocated_funding = position.get("funding_pnl", 0.0)
+                trade, pnl_amount = _close_trade(
+                    position,
+                    rev_fill,
+                    "反向信号",
+                    leverage,
+                    allocated_entry_fee=allocated_entry_fee,
+                    exit_fee=exit_fee,
+                    funding_pnl=allocated_funding,
+                )
+                capital += position["size"] + pnl_amount - exit_fee
+                total_trading_fees += exit_fee
                 record_trade(trade)
             positions = []
         target_position_size = capital * position_fraction
         target_position_size = max(position_size_min, target_position_size)
-        target_position_size = min(position_size_max, target_position_size, capital)
+        max_affordable_size = capital / (1.0 + leverage * taker_fee_rate) if taker_fee_rate > 0 else capital
+        target_position_size = min(position_size_max, target_position_size, max_affordable_size)
         if (
             signal
             and len(positions) < max_concurrent_positions
@@ -897,18 +939,23 @@ def backtest_macd_aggressive(
                 stop_price = max(atr_stop, hard_stop)
                 valid_stop = stop_price < market_fill_price
             if valid_stop:
-                capital -= target_position_size
+                entry_fill = _fill_with_slippage(market_fill_price, signal_side, True, slippage_pct)
+                entry_fee = _trading_fee_amount(target_position_size * leverage, exit_p)
+                capital -= target_position_size + entry_fee
+                total_trading_fees += entry_fee
                 signal_entries[signal] = signal_entries.get(signal, 0) + 1
                 positions.append(
                     {
-                        "entry_price": bar["close"],
+                        "entry_price": entry_fill,
                         "entry_signal": signal,
                         "size": target_position_size,
                         "hold_bars": 0,
                         "peak_pnl_pct": 0.0,
-                        "favorable_price": bar["close"],
+                        "favorable_price": entry_fill,
                         "tp1_done": False,
                         "pyramids_done": 0,
+                        "entry_fee_paid": entry_fee,
+                        "funding_pnl": 0.0,
                         "stop_price": stop_price,
                     }
                 )
@@ -923,8 +970,23 @@ def backtest_macd_aggressive(
 
     last_close = intraday_data[-1]["close"]
     for position in positions:
-        trade, pnl_amount = _close_trade(position, last_close, "数据结束", leverage)
-        capital += position["size"] + pnl_amount
+        end_side = _position_side(position)
+        end_fill = _fill_with_slippage(last_close, end_side, False, slippage_pct)
+        exit_notional = _position_notional(position, end_fill, leverage)
+        exit_fee = _trading_fee_amount(exit_notional, exit_p)
+        allocated_entry_fee = position.get("entry_fee_paid", 0.0)
+        allocated_funding = position.get("funding_pnl", 0.0)
+        trade, pnl_amount = _close_trade(
+            position,
+            end_fill,
+            "数据结束",
+            leverage,
+            allocated_entry_fee=allocated_entry_fee,
+            exit_fee=exit_fee,
+            funding_pnl=allocated_funding,
+        )
+        capital += position["size"] + pnl_amount - exit_fee
+        total_trading_fees += exit_fee
         record_trade(trade)
 
     total_return = (capital - initial_capital) / initial_capital * 100.0

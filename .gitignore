@@ -9,3 +9,4 @@ state/*.lock
 reports/*.csv
 dist/
 .git/
+.venv/

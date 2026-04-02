@@ -7,9 +7,12 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PID_FILE="${REPO_ROOT}/state/research_macd_aggressive.pid"
 LOCK_FILE="${REPO_ROOT}/state/research_macd_aggressive.lock"
 OUT_FILE="${REPO_ROOT}/logs/macd_aggressive_research.out"
+HEARTBEAT_FILE="${REPO_ROOT}/state/research_macd_aggressive_heartbeat.json"
+STOP_FILE="${REPO_ROOT}/state/research_macd_aggressive.stop"
 BASE_ENV="${REPO_ROOT}/../test1/freqtrade.service.env"
 LOCAL_ENV="${REPO_ROOT}/config/research.env"
 RUNNER="${REPO_ROOT}/scripts/run_research_macd_aggressive.sh"
+STARTUP_TIMEOUT_SECONDS="${MACD_SUPERVISOR_STARTUP_TIMEOUT_SECONDS:-25}"
 
 mkdir -p "${REPO_ROOT}/logs" "${REPO_ROOT}/state"
 
@@ -22,6 +25,37 @@ is_running() {
     fi
   fi
   return 1
+}
+
+heartbeat_summary() {
+  if [[ ! -f "${HEARTBEAT_FILE}" ]]; then
+    return 1
+  fi
+  python3 - "${HEARTBEAT_FILE}" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+path = sys.argv[1]
+try:
+    payload = json.load(open(path))
+except Exception:
+    sys.exit(1)
+updated_at = payload.get("updated_at")
+age_seconds = None
+if updated_at:
+    try:
+        dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        age_seconds = int((datetime.now(timezone.utc) - dt).total_seconds())
+    except Exception:
+        age_seconds = None
+parts = [
+    f"heartbeat={payload.get('status', 'unknown')}",
+    f"iter={payload.get('iteration', 0)}",
+]
+if age_seconds is not None:
+    parts.append(f"age={age_seconds}s")
+print(" ".join(parts))
+PY
 }
 
 list_running_pids() {
@@ -49,14 +83,23 @@ cmd_start() {
     exit 1
   fi
 
+  rm -f "${STOP_FILE}"
   local pid
   pid="$(bash -lc "cd '${REPO_ROOT}' && exec setsid nohup '${RUNNER}' > /dev/null 2>&1 < /dev/null & printf '%s\n' \$!")"
-  sleep 1
-  if kill -0 "${pid}" 2>/dev/null; then
-    echo "${pid}" > "${PID_FILE}"
-    echo "started: pid=${pid}"
-    exit 0
-  fi
+  local observed_pid=""
+  for _ in $(seq 1 "${STARTUP_TIMEOUT_SECONDS}"); do
+    if [[ -f "${PID_FILE}" ]]; then
+      observed_pid="$(cat "${PID_FILE}")"
+      if [[ -n "${observed_pid}" ]] && kill -0 "${observed_pid}" 2>/dev/null; then
+        echo "started: pid=${observed_pid}"
+        exit 0
+      fi
+    fi
+    if kill -0 "${pid}" 2>/dev/null; then
+      observed_pid="${pid}"
+    fi
+    sleep 1
+  done
   echo "failed to start, check ${OUT_FILE}" >&2
   exit 1
 }
@@ -79,23 +122,29 @@ cmd_stop() {
   fi
   local pid
   pid="$(cat "${PID_FILE}")"
+  touch "${STOP_FILE}"
   kill "${pid}" 2>/dev/null || true
   for _ in {1..20}; do
     if ! kill -0 "${pid}" 2>/dev/null; then
-      rm -f "${PID_FILE}"
+      rm -f "${PID_FILE}" "${STOP_FILE}"
       echo "stopped: pid=${pid}"
       exit 0
     fi
     sleep 1
   done
   kill -9 "${pid}" 2>/dev/null || true
-  rm -f "${PID_FILE}"
+  rm -f "${PID_FILE}" "${STOP_FILE}"
   echo "killed: pid=${pid}"
 }
 
 cmd_status() {
   if is_running; then
-    echo "running: pid=$(cat "${PID_FILE}")"
+    local summary=""
+    if summary="$(heartbeat_summary 2>/dev/null)"; then
+      echo "running: pid=$(cat "${PID_FILE}") ${summary}"
+    else
+      echo "running: pid=$(cat "${PID_FILE}")"
+    fi
   else
     local stray_pids
     stray_pids="$(list_running_pids | xargs echo)"
