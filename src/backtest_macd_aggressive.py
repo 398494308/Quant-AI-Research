@@ -17,68 +17,54 @@ DEFAULT_FUNDING_FILE = REPO_ROOT / "data/funding/OKX_BTC_USDT_SWAP_funding_20240
 
 
 # EXIT_PARAMS_START
-EXIT_PARAMS = {'break_even_activation_pct': 38.0,
- 'break_even_buffer_pct': 1.0,
- 'breakout_break_even_activation_pct': 56.0,
+EXIT_PARAMS = {'break_even_activation_pct': 28.0,
+ 'break_even_buffer_pct': 0.35,
+ 'breakout_break_even_activation_pct': 42.0,
  'breakout_max_hold_bars': 384,
- 'breakout_stop_atr_mult': 4.4,
- 'breakout_tp1_close_fraction': 0.0,
- 'breakout_tp1_pnl_pct': 82.0,
- 'breakout_trailing_activation_pct': 138.0,
- 'breakout_trailing_giveback_pct': 46.0,
- 'dynamic_hold_adx_strong_threshold': 28.0,
+ 'breakout_stop_atr_mult': 3.8,
+ 'breakout_tp1_close_fraction': 0.03,
+ 'breakout_tp1_pnl_pct': 56.0,
+ 'breakout_trailing_activation_pct': 110.0,
+ 'breakout_trailing_giveback_pct': 38.0,
+ 'dynamic_hold_adx_strong_threshold': 26.0,
  'dynamic_hold_adx_threshold': 16.0,
- 'dynamic_hold_extension_bars': 216,
- 'dynamic_hold_max_bars': 720,
+ 'dynamic_hold_extension_bars': 96,
+ 'dynamic_hold_max_bars': 384,
  'entry_delay_minutes': 1,
  'execution_use_1m': 1,
  'funding_fee_enabled': 1,
  'leverage': 15,
- 'max_concurrent_positions': 4,
- 'max_hold_bars': 360,
+ 'max_concurrent_positions': 5,
+ 'max_hold_bars': 288,
  'okx_maker_fee_rate': 0.0002,
  'okx_taker_fee_rate': 0.0005,
- 'position_fraction': 0.24,
+ 'position_fraction': 0.19,
  'position_size_max': 30000,
  'position_size_min': 5000,
- 'pullback_break_even_activation_pct': 26.0,
- 'pullback_max_hold_bars': 288,
- 'pullback_stop_atr_mult': 3.0,
- 'pullback_tp1_close_fraction': 0.0,
- 'pullback_tp1_pnl_pct': 40.0,
- 'pullback_trailing_activation_pct': 60.0,
- 'pullback_trailing_giveback_pct': 24.0,
- 'pyramid_adx_min': 13.0,
+ 'pyramid_adx_min': 19.0,
  'pyramid_enabled': 1,
  'pyramid_max_times': 3,
- 'pyramid_size_ratio': 0.24,
- 'pyramid_trigger_pnl': 9.0,
- 'regime_close_below_hourly_fast': 1,
+ 'pyramid_size_ratio': 0.28,
+ 'pyramid_trigger_pnl': 10.0,
+ 'regime_close_below_hourly_fast': 0,
  'regime_exit_confirm_bars': 1,
  'regime_exit_enabled': 1,
- 'regime_hist_floor': -88.0,
- 'regime_price_confirm_buffer_pct': 0.012,
- 'short_bounce_fail_break_even_activation_pct': 9.5,
- 'short_bounce_fail_max_hold_bars': 30,
- 'short_bounce_fail_stop_atr_mult': 1.25,
- 'short_bounce_fail_tp1_close_fraction': 0.22,
- 'short_bounce_fail_tp1_pnl_pct': 7.0,
- 'short_bounce_fail_trailing_activation_pct': 8.5,
- 'short_bounce_fail_trailing_giveback_pct': 4.0,
- 'short_breakdown_break_even_activation_pct': 14.0,
- 'short_breakdown_max_hold_bars': 72,
- 'short_breakdown_stop_atr_mult': 1.55,
- 'short_breakdown_tp1_close_fraction': 0.18,
- 'short_breakdown_tp1_pnl_pct': 10.0,
- 'short_breakdown_trailing_activation_pct': 14.0,
- 'short_breakdown_trailing_giveback_pct': 4.5,
- 'stop_atr_mult': 3.6,
- 'stop_max_loss_pct': 82.0,
- 'tp1_close_fraction': 0.0,
- 'tp1_pnl_pct': 60.0,
+ 'regime_hist_floor': -110.0,
+ 'regime_price_confirm_buffer_pct': 0.015,
+ 'short_breakdown_break_even_activation_pct': 18.0,
+ 'short_breakdown_max_hold_bars': 96,
+ 'short_breakdown_stop_atr_mult': 2.1,
+ 'short_breakdown_tp1_close_fraction': 0.22,
+ 'short_breakdown_tp1_pnl_pct': 22.0,
+ 'short_breakdown_trailing_activation_pct': 40.0,
+ 'short_breakdown_trailing_giveback_pct': 9.0,
+ 'stop_atr_mult': 3.0,
+ 'stop_max_loss_pct': 53.0,
+ 'tp1_close_fraction': 0.04,
+ 'tp1_pnl_pct': 46.0,
  'trading_fee_enabled': 1,
- 'trailing_activation_pct': 82.0,
- 'trailing_giveback_pct': 34.0}
+ 'trailing_activation_pct': 88.0,
+ 'trailing_giveback_pct': 28.0}
 # EXIT_PARAMS_END
 
 
@@ -460,11 +446,11 @@ def _resolve_hold_limit(position, exit_params, market_state, close_pnl_pct):
 def _should_pyramid(position, market_state, close_pnl_pct, exit_p):
     side = _position_side(position)
     return (
-        int(exit_p["pyramid_enabled"]) > 0
-        and position.get("pyramids_done", 0) < int(exit_p["pyramid_max_times"])
+        int(exit_p.get("pyramid_enabled", 0)) > 0
+        and position.get("pyramids_done", 0) < int(exit_p.get("pyramid_max_times", 3))
         and position.get("entry_signal") in {"long_breakout", "short_breakdown"}
-        and close_pnl_pct >= float(exit_p["pyramid_trigger_pnl"])
-        and market_state["adx"] >= float(exit_p["pyramid_adx_min"])
+        and close_pnl_pct >= float(exit_p.get("pyramid_trigger_pnl", 20.0))
+        and market_state["adx"] >= float(exit_p.get("pyramid_adx_min", 30.0))
         and (
             market_state["macd_line"] > market_state["signal_line"]
             if side == "long"
@@ -770,7 +756,7 @@ def backtest_macd_aggressive(
 
             if _should_pyramid(position, market_state, close_pnl_pct, exit_p):
                 max_affordable_size = capital / (1.0 + leverage * taker_fee_rate)
-                add_size = min(max_affordable_size, position["size"] * float(exit_p["pyramid_size_ratio"]), position_size_max)
+                add_size = min(max_affordable_size, position["size"] * float(exit_p.get("pyramid_size_ratio", 0.5)), position_size_max)
                 if add_size >= position_size_min:
                     add_fee = _trading_fee_amount(add_size * leverage, exit_p)
                     total_size = position["size"] + add_size

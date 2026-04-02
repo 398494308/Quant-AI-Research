@@ -116,8 +116,8 @@ case "${1:-status}" in
     cmd_stop
     ;;
   restart)
-    cmd_stop || true
-    cmd_start
+    bash "$0" stop || true
+    bash "$0" start
     ;;
   status)
     cmd_status
