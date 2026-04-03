@@ -3,33 +3,37 @@
 
 SIDEWAYS_INTRADAY_CHOP_MIN = 60.0
 SIDEWAYS_HOURLY_CHOP_MIN = 58.0
+SIDEWAYS_HARD_INTRADAY_CHOP_MIN = 62.0
+SIDEWAYS_HARD_HOURLY_CHOP_MIN = 60.0
 SIDEWAYS_MIN_ATR_RATIO = 0.0020
 SIDEWAYS_MIN_HOURLY_SPREAD_PCT = 0.0016
 SIDEWAYS_MIN_FOURH_SPREAD_PCT = 0.0020
+SIDEWAYS_MAX_HOURLY_ADX = 18.0
+SIDEWAYS_MAX_FOURH_ADX = 16.0
 
 # PARAMS_START
-PARAMS = {'breakdown_adx_min': 21.5,
+PARAMS = {'breakdown_adx_min': 24.3,
  'breakdown_body_ratio_min': 0.39,
  'breakdown_buffer_pct': 0.0002,
  'breakdown_close_pos_max': 0.36,
  'breakdown_hist_max': 16.0,
- 'breakdown_lookback': 25,
+ 'breakdown_lookback': 23,
  'breakdown_rsi_max': 42.0,
  'breakdown_rsi_min': 21.0,
  'breakdown_volume_ratio_min': 1.08,
- 'breakout_adx_min': 12.6,
+ 'breakout_adx_min': 18.3,
  'breakout_body_ratio_min': 0.22,
  'breakout_buffer_pct': 0.0,
  'breakout_close_pos_min': 0.48,
  'breakout_hist_min': -95.0,
- 'breakout_lookback': 22,
- 'breakout_rsi_max': 82.1,
+ 'breakout_lookback': 20,
+ 'breakout_rsi_max': 80.8,
  'breakout_rsi_min': 44.0,
- 'breakout_volume_ratio_min': 0.84,
- 'fourh_adx_min': 10.8,
+ 'breakout_volume_ratio_min': 1.12,
+ 'fourh_adx_min': 12.5,
  'fourh_ema_fast': 10,
  'fourh_ema_slow': 34,
- 'hourly_adx_min': 15.2,
+ 'hourly_adx_min': 19.0,
  'hourly_ema_anchor': 85,
  'hourly_ema_fast': 12,
  'hourly_ema_slow': 50,
@@ -120,6 +124,28 @@ def _is_sideways_regime(market_state):
     fourh_spread = abs(fourh["trend_spread_pct"])
     hourly_slope = abs(hourly["ema_slow_slope_pct"])
     fourh_slope = abs(fourh["ema_slow_slope_pct"])
+    adx_soft = hourly["adx"] <= SIDEWAYS_MAX_HOURLY_ADX and fourh["adx"] <= SIDEWAYS_MAX_FOURH_ADX
+
+    hard_sideways = (
+        (
+            intraday_chop >= SIDEWAYS_HARD_INTRADAY_CHOP_MIN
+            and hourly_chop >= SIDEWAYS_HARD_HOURLY_CHOP_MIN
+            and adx_soft
+        )
+        or (
+            atr_ratio < SIDEWAYS_MIN_ATR_RATIO * 1.10
+            and hourly_spread < SIDEWAYS_MIN_HOURLY_SPREAD_PCT * 1.15
+            and fourh_spread < SIDEWAYS_MIN_FOURH_SPREAD_PCT * 1.15
+        )
+        or (
+            hourly_spread < SIDEWAYS_MIN_HOURLY_SPREAD_PCT * 0.92
+            and fourh_spread < SIDEWAYS_MIN_FOURH_SPREAD_PCT * 0.92
+            and hourly_slope < atr_ratio * 0.06
+            and fourh_slope < atr_ratio * 0.03
+        )
+    )
+    if hard_sideways:
+        return True
 
     signals = 0
     if intraday_chop >= SIDEWAYS_INTRADAY_CHOP_MIN and hourly_chop >= SIDEWAYS_HOURLY_CHOP_MIN:
@@ -130,7 +156,33 @@ def _is_sideways_regime(market_state):
         signals += 1
     if intraday_spread < atr_ratio * 0.28 and hourly_slope < atr_ratio * 0.08 and fourh_slope < atr_ratio * 0.04:
         signals += 1
-    return signals >= 2
+    if adx_soft:
+        signals += 1
+    return signals >= 3
+
+
+def _trend_quality_ok(market_state, side):
+    hourly = market_state["hourly"]
+    fourh = market_state["four_hour"]
+    intraday = _intraday_trend_metrics(market_state)
+    atr_ratio = market_state["atr_ratio"]
+    direction = -1.0 if side == "short" else 1.0
+
+    confirms = 0
+    if market_state["adx"] >= 14.0 and hourly["adx"] >= 18.0:
+        confirms += 1
+    if direction * intraday["spread_pct"] >= atr_ratio * 0.30:
+        confirms += 1
+    if direction * hourly["trend_spread_pct"] >= max(SIDEWAYS_MIN_HOURLY_SPREAD_PCT * 1.20, atr_ratio * 0.75):
+        confirms += 1
+    if direction * fourh["trend_spread_pct"] >= max(SIDEWAYS_MIN_FOURH_SPREAD_PCT * 1.05, atr_ratio * 0.95):
+        confirms += 1
+    if (
+        direction * hourly["ema_slow_slope_pct"] >= atr_ratio * 0.07
+        and direction * fourh["ema_slow_slope_pct"] >= atr_ratio * 0.035
+    ):
+        confirms += 1
+    return confirms >= 3
 
 
 def _trend_followthrough_ok(market_state, side, trigger_price, current_close):
@@ -200,7 +252,7 @@ def strategy(data, idx, positions, market_state):
         and fourh["adx"] >= p["fourh_adx_min"]
     )
 
-    if intraday_bull and hourly_bull and fourh_bull:
+    if intraday_bull and hourly_bull and fourh_bull and _trend_quality_ok(market_state, "long"):
         breakout_ready = (
             current["close"] >= breakout_high * (1.0 + p["breakout_buffer_pct"])
             and current_candle["close_pos"] >= p["breakout_close_pos_min"]
@@ -230,7 +282,7 @@ def strategy(data, idx, positions, market_state):
         and fourh["adx"] >= p["fourh_adx_min"]
     )
 
-    if intraday_bear and hourly_bear and fourh_bear:
+    if intraday_bear and hourly_bear and fourh_bear and _trend_quality_ok(market_state, "short"):
         breakdown_ready = (
             current["close"] <= breakdown_low * (1.0 - p["breakdown_buffer_pct"])
             and current_candle["close_pos"] <= p["breakdown_close_pos_max"]

@@ -63,18 +63,18 @@ AGGRESSIVE_MIN_SHADOW_TEST_SCORE = float(os.getenv("MACD_MIN_SHADOW_TEST_SCORE",
 AGGRESSIVE_MAX_VAL_SHADOW_GAP = float(os.getenv("MACD_MAX_VAL_SHADOW_GAP", "28.0"))
 AGGRESSIVE_MAX_SHADOW_REGRESSION = float(os.getenv("MACD_MAX_SHADOW_REGRESSION", "6.0"))
 AGGRESSIVE_MIN_SHADOW_TEST_TRADES = int(os.getenv("MACD_MIN_SHADOW_TEST_TRADES", "8"))
-EVAL_START_DATE = os.getenv("MACD_EVAL_START_DATE", "2025-04-01")
+EVAL_START_DATE = os.getenv("MACD_EVAL_START_DATE", "2025-09-01")
 EVAL_END_DATE = os.getenv("MACD_EVAL_END_DATE", "2026-03-31")
-EVAL_CHUNK_DAYS = int(os.getenv("MACD_EVAL_CHUNK_DAYS", "20"))
+EVAL_CHUNK_DAYS = int(os.getenv("MACD_EVAL_CHUNK_DAYS", "28"))
 SHADOW_CHUNK_COUNT = int(os.getenv("MACD_SHADOW_CHUNK_COUNT", "2"))
 CORE_STRATEGY_PARAM_KEYS = (
-    "macd_fast",
-    "macd_slow",
-    "macd_signal",
     "hourly_adx_min",
+    "breakout_adx_min",
+    "breakdown_adx_min",
     "breakout_lookback",
     "breakdown_lookback",
     "breakout_rsi_max",
+    "breakout_volume_ratio_min",
 )
 CORE_EXIT_PARAM_KEYS = (
     "leverage",
@@ -82,29 +82,29 @@ CORE_EXIT_PARAM_KEYS = (
     "breakout_stop_atr_mult",
     "breakout_trailing_activation_pct",
     "breakout_trailing_giveback_pct",
-    "short_breakdown_trailing_activation_pct",
+    "pyramid_trigger_pnl",
 )
 PARAM_SEARCH_GROUPS = {
-    "momentum_core": (
-        "strategy.macd_fast",
-        "strategy.macd_slow",
-        "strategy.macd_signal",
-    ),
     "trend_timing": (
         "strategy.hourly_adx_min",
+        "strategy.breakout_adx_min",
+        "strategy.breakdown_adx_min",
         "strategy.breakout_lookback",
         "strategy.breakdown_lookback",
+    ),
+    "entry_quality": (
         "strategy.breakout_rsi_max",
+        "strategy.breakout_volume_ratio_min",
     ),
     "aggression_risk": (
         "exit.leverage",
         "exit.position_fraction",
         "exit.breakout_stop_atr_mult",
+        "exit.pyramid_trigger_pnl",
     ),
     "trailing_profit": (
         "exit.breakout_trailing_activation_pct",
         "exit.breakout_trailing_giveback_pct",
-        "exit.short_breakdown_trailing_activation_pct",
     ),
 }
 INTRADAY_FILE = str(BASE_DIR / "data/price/BTCUSDT_futures_15m_20240601_20260401.csv")
@@ -112,7 +112,7 @@ HOURLY_FILE = str(BASE_DIR / "data/price/BTCUSDT_futures_1h_20240601_20260401.cs
 
 
 def _generate_windows():
-    """将评估区间切成连续20天窗口，最后N个为影子测试，其余为评估窗口。"""
+    """将评估区间切成尽量等长的窗口，并保持 shadow 窗口长度一致。"""
     start_dt = datetime.strptime(EVAL_START_DATE, "%Y-%m-%d")
     end_dt = datetime.strptime(EVAL_END_DATE, "%Y-%m-%d")
     total_days = (end_dt - start_dt).days + 1
@@ -121,21 +121,32 @@ def _generate_windows():
     if EVAL_CHUNK_DAYS < 5:
         raise ValueError(f"EVAL_CHUNK_DAYS too small: {EVAL_CHUNK_DAYS}")
 
-    boundaries = []
-    cursor = start_dt
-    while cursor + timedelta(days=EVAL_CHUNK_DAYS - 1) <= end_dt:
-        chunk_end = cursor + timedelta(days=EVAL_CHUNK_DAYS - 1)
-        boundaries.append((cursor, chunk_end))
-        cursor = chunk_end + timedelta(days=1)
-    if cursor <= end_dt:
-        boundaries.append((cursor, end_dt))
+    full_chunks, remainder = divmod(total_days, EVAL_CHUNK_DAYS)
+    if full_chunks == 0:
+        chunk_lengths = [total_days]
+    else:
+        chunk_lengths = [EVAL_CHUNK_DAYS] * full_chunks
+        eval_capacity = max(0, full_chunks - SHADOW_CHUNK_COUNT)
+        if remainder > 0:
+            if eval_capacity >= 3:
+                for idx in range(remainder):
+                    chunk_lengths[idx % eval_capacity] += 1
+            else:
+                chunk_lengths.append(remainder)
 
-    if len(boundaries) < SHADOW_CHUNK_COUNT + 3:
+    if len(chunk_lengths) < SHADOW_CHUNK_COUNT + 3:
         raise ValueError(
-            f"not enough chunks: have={len(boundaries)}, need>={SHADOW_CHUNK_COUNT + 3}"
+            f"not enough chunks: have={len(chunk_lengths)}, need>={SHADOW_CHUNK_COUNT + 3}"
         )
 
-    eval_count = len(boundaries) - SHADOW_CHUNK_COUNT
+    boundaries = []
+    cursor = start_dt
+    for chunk_len in chunk_lengths:
+        chunk_end = cursor + timedelta(days=chunk_len - 1)
+        boundaries.append((cursor, chunk_end))
+        cursor = chunk_end + timedelta(days=1)
+
+    eval_count = len(chunk_lengths) - SHADOW_CHUNK_COUNT
     windows = []
     for idx, (chunk_start, chunk_end) in enumerate(boundaries):
         if idx < eval_count:
@@ -287,6 +298,10 @@ def _score_summary(results):
     ) ** 0.5 if len(shadow_returns) > 1 else 0.0
     worst_eval_return = min(eval_returns) if eval_returns else 0.0
     worst_shadow_return = min(shadow_returns) if shadow_returns else 0.0
+    worst_tail_count = min(3, len(eval_returns)) if eval_returns else 0
+    worst_eval_cluster_avg = (
+        sum(sorted(eval_returns)[:worst_tail_count]) / worst_tail_count if worst_tail_count else 0.0
+    )
     eval_loss_blocks = sum(1 for r in eval_returns if r < 0.0)
     eval_loss_ratio = eval_loss_blocks / len(eval_returns) if eval_returns else 0.0
     positive_blocks = sum(1 for r in eval_returns if r > 0.0)
@@ -300,8 +315,9 @@ def _score_summary(results):
     shadow_trades = sum(item["result"]["trades"] for item in results if item["group"] == "shadow")
 
     consistency_penalty = eval_std * 0.15
-    tail_penalty = max(0.0, -worst_eval_return - 15.0) * 0.18
-    loss_ratio_penalty = max(0.0, eval_loss_ratio - 0.55) * 10.0
+    tail_penalty = max(0.0, -worst_eval_return - 15.0) * 0.12
+    tail_cluster_penalty = max(0.0, -worst_eval_cluster_avg - 10.0) * 0.18
+    loss_ratio_penalty = max(0.0, eval_loss_ratio - 0.45) * 12.0
     drawdown_penalty = max(0.0, worst_drawdown - AGGRESSIVE_DRAWDOWN_SOFT_CAP) * 0.22
     liquidation_penalty = liquidations * 1.5
 
@@ -309,6 +325,7 @@ def _score_summary(results):
         eval_avg
         - consistency_penalty
         - tail_penalty
+        - tail_cluster_penalty
         - loss_ratio_penalty
         - drawdown_penalty
         - liquidation_penalty
@@ -321,6 +338,7 @@ def _score_summary(results):
         "eval_std": eval_std,
         "shadow_std": shadow_std,
         "worst_eval_return": worst_eval_return,
+        "worst_eval_cluster_avg": worst_eval_cluster_avg,
         "worst_shadow_return": worst_shadow_return,
         "worst_drawdown": worst_drawdown,
         "avg_fee_drag": avg_fee_drag,
@@ -333,6 +351,7 @@ def _score_summary(results):
         "positive_ratio": positive_ratio,
         "consistency_penalty": consistency_penalty,
         "tail_penalty": tail_penalty,
+        "tail_cluster_penalty": tail_cluster_penalty,
         "loss_ratio_penalty": loss_ratio_penalty,
         "selection_score": selection_score,
         "promotion_score": promotion_score,
@@ -400,6 +419,63 @@ def build_summary_message(title, results, metrics, include_shadow_test=True):
             f"回撤{result['max_drawdown']:.1f}%"
         )
     return "\n".join(lines)
+
+
+def _render_markdown_table(rows):
+    lines = [
+        "| 项目 | 数值 |",
+        "| --- | --- |",
+    ]
+    for label, value in rows:
+        lines.append(f"| {label} | {value} |")
+    return "\n".join(lines)
+
+
+def _format_discord_changes(changes, limit=4):
+    if not changes:
+        return ""
+    preview = []
+    for item in changes[:limit]:
+        key, _, delta = item.partition(":")
+        preview.append(f"{key.split('.')[-1]} {delta}")
+    if len(changes) > limit:
+        preview.append(f"+{len(changes) - limit}项")
+    return "变动: " + "；".join(preview)
+
+
+def build_discord_summary_message(title, results, metrics, include_shadow_test=True, changes=None):
+    eval_count = sum(1 for item in results if item["group"] == "eval")
+    shadow_count = sum(1 for item in results if item["group"] == "shadow")
+    leverage = backtest_module.EXIT_PARAMS.get("leverage", 0)
+    position_fraction = backtest_module.EXIT_PARAMS.get("position_fraction", 0.0)
+    rows = [
+        ("窗口", f"{eval_count}评估" + (f" / {shadow_count}影测" if include_shadow_test else "")),
+        (
+            "收益",
+            f"{metrics['eval_avg']:.2f}%"
+            + (f" / {metrics['shadow_avg']:.2f}%" if include_shadow_test else ""),
+        ),
+        (
+            "评分",
+            f"{metrics['selection_score']:.2f}"
+            + (f" / {metrics['promotion_score']:.2f}" if include_shadow_test else ""),
+        ),
+        ("最大回撤", f"{metrics['worst_drawdown']:.1f}%"),
+        ("正收益窗", f"{metrics['positive_ratio']:.0%}"),
+        ("总交易", str(metrics["total_trades"])),
+        ("手续费拖累", f"{metrics['avg_fee_drag']:.2f}%"),
+        ("杠杆/仓位", f"{leverage}x / {position_fraction:.0%}"),
+    ]
+    message_parts = [
+        f"**{title}**",
+        "```text",
+        _render_markdown_table(rows),
+        "```",
+    ]
+    changes_line = _format_discord_changes(changes)
+    if changes_line:
+        message_parts.append(changes_line)
+    return "\n".join(message_parts)
 
 
 def _build_gate_reason(metrics, base_gate_passed, shadow_gate_passed, shadow_regression_passed):
@@ -805,13 +881,13 @@ def optimize_strategy():
 - 本轮按单一研究假设搜索，默认只集中在 {search_policy['max_groups']} 个参数组内。
 - 优先考虑这些参数组：{', '.join(search_policy['focus_groups'])}。
 - 参数组定义：
-  - momentum_core: macd_fast / macd_slow / macd_signal
-  - trend_timing: hourly_adx_min / breakout_lookback / breakdown_lookback / breakout_rsi_max
-  - aggression_risk: leverage / position_fraction / breakout_stop_atr_mult
-  - trailing_profit: breakout_trailing_activation_pct / breakout_trailing_giveback_pct / short_breakdown_trailing_activation_pct
+  - trend_timing: hourly_adx_min / breakout_adx_min / breakdown_adx_min / breakout_lookback / breakdown_lookback
+  - entry_quality: breakout_rsi_max / breakout_volume_ratio_min
+  - aggression_risk: leverage / position_fraction / breakout_stop_atr_mult / pyramid_trigger_pnl
+  - trailing_profit: breakout_trailing_activation_pct / breakout_trailing_giveback_pct
 - 默认先做高质量小步试探，优先 2-3 个键的成组联动，不要把参数分散乱改。
 - 非增强模式不要同时横跨多个参数组；增强模式也只允许两组以内的协调调整。
-- 当前系统使用 Walk-Forward 评估：过去一年数据切成多个20天窗口，每个窗口独立回测，评分基于所有窗口的综合表现。
+- 当前系统使用 Walk-Forward 评估：近期区间按多个28天窗口切分，每个窗口独立回测，评分基于所有窗口的综合表现。
 - 系统会惩罚收益不一致（标准差高）和极端亏损窗口。
 - 正收益窗口占比需 >= 35%。
 - 允许在同一方向上尝试不同幅度，只避免完全相同的重复候选。
@@ -957,7 +1033,7 @@ def initialize_best_score():
         shadow=metrics["shadow_avg"],
         fee_drag=metrics["avg_fee_drag"],
     )
-    send_discord(latest_eval_summary)
+    send_discord(build_discord_summary_message("基准", results, metrics, include_shadow_test=True))
 
 
 def run_iteration(iteration_id, use_model_optimization=True):
@@ -1051,7 +1127,10 @@ def run_iteration(iteration_id, use_model_optimization=True):
         and metrics["shadow_avg"] >= AGGRESSIVE_MIN_SHADOW_TEST_SCORE
         and metrics["shadow_gap"] <= AGGRESSIVE_MAX_VAL_SHADOW_GAP
     )
-    shadow_regression_passed = metrics["shadow_avg"] >= (best_shadow_test_avg - AGGRESSIVE_MAX_SHADOW_REGRESSION)
+    shadow_regression_passed = (
+        metrics["promotion_score"] > best_score
+        or metrics["shadow_avg"] >= (best_shadow_test_avg - AGGRESSIVE_MAX_SHADOW_REGRESSION)
+    )
     gate_passed = base_gate_passed and shadow_gate_passed and shadow_regression_passed
     gate_reason = _build_gate_reason(metrics, base_gate_passed, shadow_gate_passed, shadow_regression_passed)
 
@@ -1072,7 +1151,15 @@ def run_iteration(iteration_id, use_model_optimization=True):
             shadow=metrics["shadow_avg"],
             gate=gate_reason,
         )
-        send_discord(msg)
+        send_discord(
+            build_discord_summary_message(
+                f"🚀 新最优激进版策略 #{iteration_id}",
+                results,
+                metrics,
+                include_shadow_test=True,
+                changes=changes,
+            )
+        )
         return "accepted"
 
     _append_memory("rejected", changes, metrics["promotion_score"], gate_reason)

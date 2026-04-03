@@ -24,8 +24,8 @@ EXIT_PARAMS = {'break_even_activation_pct': 28.0,
  'breakout_stop_atr_mult': 2.3,
  'breakout_tp1_close_fraction': 0.16,
  'breakout_tp1_pnl_pct': 56.0,
- 'breakout_trailing_activation_pct': 98.0,
- 'breakout_trailing_giveback_pct': 32.0,
+ 'breakout_trailing_activation_pct': 85.9,
+ 'breakout_trailing_giveback_pct': 32.6,
  'dynamic_hold_adx_strong_threshold': 26.0,
  'dynamic_hold_adx_threshold': 16.0,
  'dynamic_hold_extension_bars': 96,
@@ -34,7 +34,7 @@ EXIT_PARAMS = {'break_even_activation_pct': 28.0,
  'execution_use_1m': 1,
  'funding_fee_enabled': 1,
  'leverage': 14,
- 'max_concurrent_positions': 5,
+ 'max_concurrent_positions': 4,
  'max_hold_bars': 288,
  'okx_maker_fee_rate': 0.0002,
  'okx_taker_fee_rate': 0.0005,
@@ -43,9 +43,9 @@ EXIT_PARAMS = {'break_even_activation_pct': 28.0,
  'position_size_min': 5000,
  'pyramid_adx_min': 19.0,
  'pyramid_enabled': 1,
- 'pyramid_max_times': 3,
+ 'pyramid_max_times': 2,
  'pyramid_size_ratio': 0.28,
- 'pyramid_trigger_pnl': 10.0,
+ 'pyramid_trigger_pnl': 16.0,
  'regime_close_below_hourly_fast': 0,
  'regime_exit_confirm_bars': 1,
  'regime_exit_enabled': 1,
@@ -56,14 +56,14 @@ EXIT_PARAMS = {'break_even_activation_pct': 28.0,
  'short_breakdown_stop_atr_mult': 2.1,
  'short_breakdown_tp1_close_fraction': 0.22,
  'short_breakdown_tp1_pnl_pct': 22.0,
- 'short_breakdown_trailing_activation_pct': 34.0,
+ 'short_breakdown_trailing_activation_pct': 28.0,
  'short_breakdown_trailing_giveback_pct': 9.0,
+ 'slippage_pct': 0.0003,
  'stop_atr_mult': 3.1,
  'stop_max_loss_pct': 53.0,
  'tp1_close_fraction': 0.04,
  'tp1_pnl_pct': 46.0,
  'trading_fee_enabled': 1,
- 'slippage_pct': 0.0003,
  'trailing_activation_pct': 87.0,
  'trailing_giveback_pct': 28.0}
 # EXIT_PARAMS_END
@@ -428,6 +428,63 @@ def _close_trade(position, price, reason, leverage, allocated_entry_fee=0.0, exi
     }, gross_pnl_amount
 
 
+def _close_cash_release(position_size, gross_pnl_amount, exit_fee=0.0, funding_pnl=0.0):
+    """Cash returned to capital when a position slice is settled.
+
+    Entry fees are paid at entry time, so settlement should only release
+    margin, gross pnl, unsettled funding, and then deduct the exit fee.
+    """
+    return position_size + gross_pnl_amount + funding_pnl - exit_fee
+
+
+def _market_risk_profile(market_state, exit_p):
+    base_max_positions = max(1, int(exit_p.get("max_concurrent_positions", 1)))
+    profile = {
+        "position_fraction_scale": 1.0,
+        "max_concurrent_positions": base_max_positions,
+        "allow_pyramid": True,
+    }
+
+    hourly = market_state.get("hourly")
+    four_hour = market_state.get("four_hour")
+    if hourly is None or four_hour is None:
+        return profile
+
+    atr_ratio = market_state.get("atr_ratio", 0.0)
+    weak_signals = 0
+    if market_state.get("chop", 0.0) >= 58.0 and hourly.get("chop", 0.0) >= 56.0:
+        weak_signals += 1
+    if market_state.get("adx", 0.0) < 16.0 and hourly.get("adx", 0.0) < 18.0:
+        weak_signals += 1
+    if (
+        abs(hourly.get("trend_spread_pct", 0.0)) < max(0.0018, atr_ratio * 0.75)
+        and abs(four_hour.get("trend_spread_pct", 0.0)) < max(0.0021, atr_ratio * 0.95)
+    ):
+        weak_signals += 1
+    if (
+        abs(hourly.get("ema_slow_slope_pct", 0.0)) < atr_ratio * 0.07
+        and abs(four_hour.get("ema_slow_slope_pct", 0.0)) < atr_ratio * 0.035
+    ):
+        weak_signals += 1
+
+    severe = weak_signals >= 3 or (
+        market_state.get("chop", 0.0) >= 60.0
+        and hourly.get("chop", 0.0) >= 58.0
+        and market_state.get("adx", 0.0) < 15.0
+    )
+    if severe:
+        profile["position_fraction_scale"] = 0.55
+        profile["max_concurrent_positions"] = min(base_max_positions, 2)
+        profile["allow_pyramid"] = False
+        return profile
+
+    if weak_signals >= 2:
+        profile["position_fraction_scale"] = 0.72
+        profile["max_concurrent_positions"] = min(base_max_positions, 3)
+        profile["allow_pyramid"] = False
+    return profile
+
+
 def _resolve_hold_limit(position, exit_params, market_state, close_pnl_pct):
     base_limit = int(_exit_value(exit_params, position, "max_hold_bars"))
     base_limit = max(20, base_limit)
@@ -462,9 +519,11 @@ def _resolve_hold_limit(position, exit_params, market_state, close_pnl_pct):
     return min(int(exit_params["dynamic_hold_max_bars"]), base_limit + extension)
 
 
-def _should_pyramid(position, market_state, close_pnl_pct, exit_p):
+def _should_pyramid(position, market_state, close_pnl_pct, exit_p, allow_pyramid=True):
     side = _position_side(position)
     return (
+        allow_pyramid
+        and
         int(exit_p.get("pyramid_enabled", 0)) > 0
         and position.get("pyramids_done", 0) < int(exit_p.get("pyramid_max_times", 3))
         and position.get("entry_signal") in {"long_breakout", "short_breakdown"}
@@ -699,6 +758,7 @@ def backtest_macd_aggressive(
             intraday_interval_ms,
             delay_minutes,
         )
+        risk_profile = _market_risk_profile(market_state, exit_p)
 
         if funding_rows and positions:
             while funding_idx < len(funding_rows) and funding_timestamps[funding_idx] <= bar_close_ts:
@@ -717,7 +777,6 @@ def backtest_macd_aggressive(
                             settlement_price,
                             leverage,
                         )
-                        capital += funding_pnl
                         total_funding_pnl += funding_pnl
                     funding_event_count += 1
                 funding_idx += 1
@@ -738,6 +797,7 @@ def backtest_macd_aggressive(
             position["peak_pnl_pct"] = max(position["peak_pnl_pct"], best_pnl_pct)
 
             if worst_pnl_pct <= -100.0:
+                capital += position.get("funding_pnl", 0.0)
                 record_trade(
                     {
                         "pnl_pct": -100.0,
@@ -761,7 +821,7 @@ def backtest_macd_aggressive(
                 exit_fee = _trading_fee_amount(exit_notional, exit_p)
                 allocated_entry_fee = position.get("entry_fee_paid", 0.0)
                 allocated_funding = position.get("funding_pnl", 0.0)
-                trade, pnl_amount = _close_trade(
+                trade, gross_pnl_amount = _close_trade(
                     position,
                     stop_fill,
                     "止损",
@@ -770,12 +830,17 @@ def backtest_macd_aggressive(
                     exit_fee=exit_fee,
                     funding_pnl=allocated_funding,
                 )
-                capital += position["size"] + pnl_amount - exit_fee
+                capital += _close_cash_release(
+                    position["size"],
+                    gross_pnl_amount,
+                    exit_fee=exit_fee,
+                    funding_pnl=allocated_funding,
+                )
                 total_trading_fees += exit_fee
                 record_trade(trade)
                 continue
 
-            if _should_pyramid(position, market_state, close_pnl_pct, exit_p):
+            if _should_pyramid(position, market_state, close_pnl_pct, exit_p, allow_pyramid=risk_profile["allow_pyramid"]):
                 pyramid_fill = _fill_with_slippage(market_fill_price, side, True, slippage_pct)
                 max_affordable_size = capital / (1.0 + leverage * taker_fee_rate)
                 add_size = min(max_affordable_size, position["size"] * float(exit_p.get("pyramid_size_ratio", 0.5)), position_size_max)
@@ -806,7 +871,7 @@ def backtest_macd_aggressive(
                 partial_position["size"] = close_size
                 exit_notional = _position_notional(partial_position, tp1_fill, leverage)
                 exit_fee = _trading_fee_amount(exit_notional, exit_p)
-                trade, pnl_amount = _close_trade(
+                trade, gross_pnl_amount = _close_trade(
                     partial_position,
                     tp1_fill,
                     "第一止盈",
@@ -815,7 +880,12 @@ def backtest_macd_aggressive(
                     exit_fee=exit_fee,
                     funding_pnl=allocated_funding,
                 )
-                capital += close_size + pnl_amount - exit_fee
+                capital += _close_cash_release(
+                    close_size,
+                    gross_pnl_amount,
+                    exit_fee=exit_fee,
+                    funding_pnl=allocated_funding,
+                )
                 total_trading_fees += exit_fee
                 record_trade(trade)
                 position["size"] = remaining_size
@@ -853,7 +923,7 @@ def backtest_macd_aggressive(
                     exit_fee = _trading_fee_amount(exit_notional, exit_p)
                     allocated_entry_fee = position.get("entry_fee_paid", 0.0)
                     allocated_funding = position.get("funding_pnl", 0.0)
-                    trade, pnl_amount = _close_trade(
+                    trade, gross_pnl_amount = _close_trade(
                         position,
                         regime_fill,
                         "趋势失效",
@@ -862,7 +932,12 @@ def backtest_macd_aggressive(
                         exit_fee=exit_fee,
                         funding_pnl=allocated_funding,
                     )
-                    capital += position["size"] + pnl_amount - exit_fee
+                    capital += _close_cash_release(
+                        position["size"],
+                        gross_pnl_amount,
+                        exit_fee=exit_fee,
+                        funding_pnl=allocated_funding,
+                    )
                     total_trading_fees += exit_fee
                     record_trade(trade)
                     continue
@@ -874,7 +949,7 @@ def backtest_macd_aggressive(
                 exit_fee = _trading_fee_amount(exit_notional, exit_p)
                 allocated_entry_fee = position.get("entry_fee_paid", 0.0)
                 allocated_funding = position.get("funding_pnl", 0.0)
-                trade, pnl_amount = _close_trade(
+                trade, gross_pnl_amount = _close_trade(
                     position,
                     time_fill,
                     "时间退出",
@@ -883,7 +958,12 @@ def backtest_macd_aggressive(
                     exit_fee=exit_fee,
                     funding_pnl=allocated_funding,
                 )
-                capital += position["size"] + pnl_amount - exit_fee
+                capital += _close_cash_release(
+                    position["size"],
+                    gross_pnl_amount,
+                    exit_fee=exit_fee,
+                    funding_pnl=allocated_funding,
+                )
                 total_trading_fees += exit_fee
                 record_trade(trade)
                 continue
@@ -901,7 +981,7 @@ def backtest_macd_aggressive(
                 exit_fee = _trading_fee_amount(exit_notional, exit_p)
                 allocated_entry_fee = position.get("entry_fee_paid", 0.0)
                 allocated_funding = position.get("funding_pnl", 0.0)
-                trade, pnl_amount = _close_trade(
+                trade, gross_pnl_amount = _close_trade(
                     position,
                     rev_fill,
                     "反向信号",
@@ -910,19 +990,23 @@ def backtest_macd_aggressive(
                     exit_fee=exit_fee,
                     funding_pnl=allocated_funding,
                 )
-                capital += position["size"] + pnl_amount - exit_fee
+                capital += _close_cash_release(
+                    position["size"],
+                    gross_pnl_amount,
+                    exit_fee=exit_fee,
+                    funding_pnl=allocated_funding,
+                )
                 total_trading_fees += exit_fee
                 record_trade(trade)
             positions = []
-        target_position_size = capital * position_fraction
-        target_position_size = max(position_size_min, target_position_size)
+        target_position_size = capital * position_fraction * risk_profile["position_fraction_scale"]
         max_affordable_size = capital / (1.0 + leverage * taker_fee_rate) if taker_fee_rate > 0 else capital
         target_position_size = min(position_size_max, target_position_size, max_affordable_size)
         if (
             signal
-            and len(positions) < max_concurrent_positions
+            and len(positions) < risk_profile["max_concurrent_positions"]
             and capital >= position_size_min
-            and target_position_size > 0
+            and target_position_size >= position_size_min
             and market_state["atr"] > 0
             and (not positions or _signal_side(signal) == _position_side(positions[0]))
         ):
@@ -961,7 +1045,9 @@ def backtest_macd_aggressive(
                 )
 
         equity = capital + sum(
-            position["size"] + position["size"] * (_position_pnl_pct(position, bar["close"], leverage) / 100.0)
+            position["size"]
+            + position["size"] * (_position_pnl_pct(position, bar["close"], leverage) / 100.0)
+            + position.get("funding_pnl", 0.0)
             for position in positions
         )
         max_equity = max(max_equity, equity)
@@ -976,7 +1062,7 @@ def backtest_macd_aggressive(
         exit_fee = _trading_fee_amount(exit_notional, exit_p)
         allocated_entry_fee = position.get("entry_fee_paid", 0.0)
         allocated_funding = position.get("funding_pnl", 0.0)
-        trade, pnl_amount = _close_trade(
+        trade, gross_pnl_amount = _close_trade(
             position,
             end_fill,
             "数据结束",
@@ -985,7 +1071,12 @@ def backtest_macd_aggressive(
             exit_fee=exit_fee,
             funding_pnl=allocated_funding,
         )
-        capital += position["size"] + pnl_amount - exit_fee
+        capital += _close_cash_release(
+            position["size"],
+            gross_pnl_amount,
+            exit_fee=exit_fee,
+            funding_pnl=allocated_funding,
+        )
         total_trading_fees += exit_fee
         record_trade(trade)
 
