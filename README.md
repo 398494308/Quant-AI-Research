@@ -9,22 +9,23 @@
 - 执行周期：15 分钟
 - 趋势过滤：1 小时 + 4 小时
 - 当前有效信号：`long_breakout`、`short_breakdown`
-- 默认杠杆：`15x`
-- 最大并发仓位：`5`
-- 研究循环冷却：`60` 秒
-- 评估切片：默认 `20` 天连续时间块，按时间顺序拆成 Walk-Forward `eval` 加最终 `holdout`
+- 默认杠杆：`14x`
+- 最大并发仓位：`4`
+- 研究循环间隔：默认 `600` 秒
+- 失败冷却：默认 `60` 秒
+- 评估切片：代码默认按尽量等长窗口切分，`EVAL_CHUNK_DAYS` 默认 `28`，最后 `2` 个窗口作为 `holdout`
 
-当前优化器只允许 AI 微调 12 个核心参数：
+当前优化器只允许 AI 微调 13 个核心参数：
 
-- 入场 6 个：`macd_fast`、`macd_slow`、`macd_signal`、`hourly_adx_min`、`breakout_lookback`、`breakdown_lookback`
-- 出场 6 个：`leverage`、`position_fraction`、`stop_atr_mult`、`stop_max_loss_pct`、`tp1_pnl_pct`、`trailing_activation_pct`
+- 入场 7 个：`hourly_adx_min`、`breakout_adx_min`、`breakdown_adx_min`、`breakout_lookback`、`breakdown_lookback`、`breakout_rsi_max`、`breakout_volume_ratio_min`
+- 出场 6 个：`leverage`、`position_fraction`、`breakout_stop_atr_mult`、`breakout_trailing_activation_pct`、`breakout_trailing_giveback_pct`、`pyramid_trigger_pnl`
 
 更完整的策略说明见 [STRATEGY.md](STRATEGY.md)。
 
 当前评估链路：
 
-- `eval`：除最后 `2` 个留出块外，其余连续 `20` 天块全部参与 Walk-Forward 评分
-- `holdout`：最后 `2` 个连续 `20` 天块，只用于外层晋级拦截
+- `eval`：除最后 `2` 个留出块外，其余窗口全部参与 Walk-Forward 评分
+- `holdout`：最后 `2` 个窗口，只用于外层晋级拦截
 - 研究器提示词只看公开版 `eval` 摘要，不直接展示 `holdout` 指标
 
 ## 目录结构
@@ -34,9 +35,12 @@ test2/
 ├── config/      环境变量和 Discord 配置
 ├── data/        价格数据和情绪数据
 ├── docs/        策略说明、计划、当前状态
+├── dist/        临时产物
 ├── backups/     研究循环写回前的备份文件
 ├── logs/        运行日志
 ├── reports/     回测和对比报告
+├── state/       研究循环状态和心跳
+├── real-money-test/ freqtrade dry-run / live 壳子
 ├── scripts/     下载、回测、研究、搜索脚本
 └── src/         核心策略、回测引擎、OpenAI 客户端
 ```
@@ -91,6 +95,12 @@ tail -f logs/macd_aggressive_research.log
 - 配置文件：[config/research.env](config/research.env)
 
 研究循环会优先读取本仓库的 `config/research.env`，如果上级目录存在 `test1/freqtrade.service.env`，也会把其中的通用密钥一起加载。
+
+说明：
+
+- 代码内置默认值和 `config/research.env(.example)` 的覆盖值可能不同
+- 例如代码默认研究循环间隔是 `600` 秒、默认切窗长度是 `28` 天
+- 如果在环境变量里显式设置 `MACD_LOOP_INTERVAL_SECONDS` 或 `MACD_EVAL_CHUNK_DAYS`，运行时会以环境变量为准
 
 公开上传前至少应确认以下密钥没有被提交：
 

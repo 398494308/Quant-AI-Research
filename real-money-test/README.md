@@ -22,8 +22,20 @@
   统一入口，直接用 `start / stop / restart / status / log`
 - `status.sh`
   看当前有没有 `freqtrade` 进程在跑
+- `daily_report.py`
+  汇总 dry-run 的权益、持仓、近 24h 表现，并可发到 Discord
 - `systemd/freqtrade-test2-dryrun.service.example`
   systemd 服务示例
+
+## 当前运行口径
+
+- `pair`: `BTC/USDT:USDT`
+- `timeframe`: `15m`
+- `dry_run_wallet`: `1000 USDT`
+- `max_open_trades`: `4`
+- `tradable_balance_ratio`: `0.17`
+- `position_adjustment_enable`: 开启
+- `max_entry_position_adjustment`: 跟随 `EXIT_PARAMS["pyramid_max_times"]`，当前为 `2`
 
 ## 先做什么
 
@@ -89,6 +101,11 @@ bash real-money-test/start_live.sh
 - `TP1` 分批止盈
 - `pyramid` 有限次加仓
 
+当前入场信号只有两个：
+
+- `long_breakout`
+- `short_breakdown`
+
 但它还没有完整复刻自研回测器里的整套执行细节。主要差异还在：
 
 - 回测里的 1 分钟执行价与实盘真实成交之间的细微差异
@@ -105,6 +122,6 @@ bash real-money-test/start_live.sh
 ## 推荐推进顺序
 
 1. 先跑 `dry-run`，确认能稳定拉起、能下模拟单、日志正常
-2. 做 2 到 5 天的连续纸面盘观察，重点看开平仓、部分止盈、加仓、退出原因
+2. 做至少 `1` 到 `2` 周的连续纸面盘观察，重点看开平仓、部分止盈、加仓、退出原因
 3. 再做 very small size 的真实资金测试
 4. 最后才考虑放大仓位
