@@ -40,19 +40,21 @@ def run_detailed_backtest(start_date, end_date, label):
 
 def analyze_window(start_date, end_date, label):
     """Run a modified backtest that captures per-trade details."""
-    from bisect import bisect_right
-
     intraday_all = bt.load_ohlcv_data(INTRADAY_FILE)
     hourly_all = bt.load_ohlcv_data(HOURLY_FILE)
-    intraday_data = bt._slice_by_beijing_window(intraday_all, start_date, end_date)
-    hourly_data = bt._slice_by_beijing_window(hourly_all, start_date, end_date)
+    start_idx, end_idx = bt._beijing_window_indices(intraday_all, start_date, end_date)
+    intraday_data = intraday_all[start_idx:end_idx]
+    if not intraday_data or not hourly_all:
+        raise ValueError(f"missing data for window {start_date}~{end_date}")
 
     exit_p = dict(bt.EXIT_PARAMS)
     leverage = float(exit_p["leverage"])
     position_fraction = float(exit_p["position_fraction"])
+    intraday_interval_ms = bt._infer_interval_ms(intraday_all, 15)
+    hourly_interval_ms = bt._infer_interval_ms(hourly_all, 60)
 
     hourly_state = bt._prepare_state(
-        hourly_data,
+        hourly_all,
         strat.PARAMS["hourly_ema_fast"],
         strat.PARAMS["hourly_ema_slow"],
         strat.PARAMS["macd_fast"],
@@ -60,7 +62,7 @@ def analyze_window(start_date, end_date, label):
         strat.PARAMS["macd_signal"],
         strat.PARAMS.get("hourly_ema_anchor"),
     )
-    four_hour_bars = bt._aggregate_bars(hourly_data, 4)
+    four_hour_bars = bt._aggregate_bars(hourly_all, 4)
     four_hour_state = bt._prepare_state(
         four_hour_bars,
         strat.PARAMS["fourh_ema_fast"],
@@ -70,7 +72,7 @@ def analyze_window(start_date, end_date, label):
         strat.PARAMS["macd_signal"],
     )
     intraday_state = bt._prepare_state(
-        intraday_data,
+        intraday_all,
         strat.PARAMS["intraday_ema_fast"],
         strat.PARAMS["intraday_ema_slow"],
         strat.PARAMS["macd_fast"],
@@ -78,9 +80,9 @@ def analyze_window(start_date, end_date, label):
         strat.PARAMS["macd_signal"],
     )
 
-    hourly_timestamps = [r["timestamp"] for r in hourly_state]
-    four_hour_timestamps = [r["timestamp"] for r in four_hour_state]
-    intraday_interval_ms = bt._infer_interval_ms(intraday_data, 15)
+    four_hour_interval_ms = bt._infer_interval_ms(four_hour_bars, 240) if four_hour_bars else 240 * 60_000
+    hourly_close_timestamps = [r["timestamp"] + hourly_interval_ms for r in hourly_state]
+    four_hour_close_timestamps = [r["timestamp"] + four_hour_interval_ms for r in four_hour_state]
 
     # Get price range for context
     prices = [bar["close"] for bar in intraday_data]
@@ -129,14 +131,34 @@ def analyze_window(start_date, end_date, label):
     print(f"  {'序号':>4} | {'方向':<6} | {'入场日期':<12} | {'入场价':>10} | {'盈亏%':>8} | {'盈亏$':>8} | {'持仓':>4} | {'退出原因':<8} | {'加仓':>2}")
 
     # We need a modified backtest - let's do a simplified trace
-    _run_trade_trace(intraday_data, hourly_state, four_hour_state, intraday_state,
-                     hourly_timestamps, four_hour_timestamps, intraday_interval_ms, exit_p)
+    _run_trade_trace(
+        intraday_all,
+        start_idx,
+        end_idx,
+        hourly_state,
+        four_hour_state,
+        intraday_state,
+        hourly_close_timestamps,
+        four_hour_close_timestamps,
+        intraday_interval_ms,
+        exit_p,
+    )
 
     return result
 
 
-def _run_trade_trace(intraday_data, hourly_state, four_hour_state, intraday_state,
-                     hourly_timestamps, four_hour_timestamps, intraday_interval_ms, exit_p):
+def _run_trade_trace(
+    intraday_all,
+    start_idx,
+    end_idx,
+    hourly_state,
+    four_hour_state,
+    intraday_state,
+    hourly_close_timestamps,
+    four_hour_close_timestamps,
+    intraday_interval_ms,
+    exit_p,
+):
     """Simplified backtest that prints each trade as it closes."""
     from bisect import bisect_right
 
@@ -160,8 +182,8 @@ def _run_trade_trace(intraday_data, hourly_state, four_hour_state, intraday_stat
     execution_rows = []
     execution_timestamps = []
     if Path(execution_file).exists() and int(exit_p.get("execution_use_1m", 1)) > 0:
-        start_ts = intraday_data[0]["timestamp"]
-        end_ts = intraday_data[-1]["timestamp"] + intraday_interval_ms
+        start_ts = intraday_all[start_idx]["timestamp"]
+        end_ts = intraday_all[end_idx - 1]["timestamp"] + intraday_interval_ms
         execution_all = bt.load_ohlcv_data(execution_file)
         execution_rows = bt._slice_by_timestamp_window(execution_all, start_ts, end_ts + 60_000)
         execution_timestamps = [r["timestamp"] for r in execution_rows]
@@ -171,22 +193,23 @@ def _run_trade_trace(intraday_data, hourly_state, four_hour_state, intraday_stat
     funding_rows = []
     funding_timestamps = []
     if Path(funding_file).exists() and int(exit_p.get("funding_fee_enabled", 1)) > 0:
-        start_ts = intraday_data[0]["timestamp"]
-        end_ts = intraday_data[-1]["timestamp"] + intraday_interval_ms
+        start_ts = intraday_all[start_idx]["timestamp"]
+        end_ts = intraday_all[end_idx - 1]["timestamp"] + intraday_interval_ms
         funding_all = bt.load_funding_data(funding_file)
         funding_rows = bt._slice_by_timestamp_window(funding_all, start_ts, end_ts)
         funding_timestamps = [r["timestamp"] for r in funding_rows]
 
     funding_idx = 0
 
-    for idx, bar in enumerate(intraday_data):
-        prev_bar = intraday_data[idx - 1] if idx > 0 else None
+    for idx in range(start_idx, end_idx):
+        bar = intraday_all[idx]
+        prev_bar = intraday_all[idx - 1] if idx > 0 else None
         prev_bar_close_ts = prev_bar["timestamp"] + intraday_interval_ms if prev_bar else bar["timestamp"]
         bar_close_ts = bar["timestamp"] + intraday_interval_ms
         current_ts = bar["timestamp"]
-        context_ref_ts = bar_close_ts - 1
-        hourly_idx = bisect_right(hourly_timestamps, context_ref_ts) - 1
-        four_hour_idx = bisect_right(four_hour_timestamps, context_ref_ts) - 1
+        context_ref_ts = bar_close_ts
+        hourly_idx = bisect_right(hourly_close_timestamps, context_ref_ts) - 1
+        four_hour_idx = bisect_right(four_hour_close_timestamps, context_ref_ts) - 1
 
         hourly_context = hourly_state[hourly_idx] if hourly_idx >= 0 else None
         prev_hourly_context = hourly_state[hourly_idx - 1] if hourly_idx > 0 else hourly_context
@@ -377,7 +400,7 @@ def _run_trade_trace(intraday_data, hourly_state, four_hour_state, intraday_stat
         positions = remaining
 
         # Entry signals
-        signal = strat.strategy(intraday_data, idx, positions, market_state)
+        signal = strat.strategy(intraday_all, idx, positions, market_state)
         if signal and positions and bt._signal_side(signal) != bt._position_side(positions[0]):
             for pos in positions:
                 rev_side = bt._position_side(pos)

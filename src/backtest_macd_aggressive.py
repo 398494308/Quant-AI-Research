@@ -161,6 +161,15 @@ def _slice_by_beijing_window(data, start_date, end_date):
     return data[start_idx:end_idx]
 
 
+def _beijing_window_indices(data, start_date, end_date):
+    start_ts = _beijing_timestamp_ms(start_date)
+    end_exclusive_ts = _beijing_timestamp_ms(end_date) + 24 * 60 * 60 * 1000
+    timestamps = [row["timestamp"] for row in data]
+    start_idx = bisect_right(timestamps, start_ts - 1)
+    end_idx = bisect_right(timestamps, end_exclusive_ts - 1)
+    return start_idx, end_idx
+
+
 def _slice_by_timestamp_window(data, start_ts, end_ts):
     timestamps = [row["timestamp"] for row in data]
     start_idx = bisect_right(timestamps, start_ts - 1)
@@ -625,15 +634,16 @@ def backtest_macd_aggressive(
 
     intraday_all = load_ohlcv_data(intraday_file)
     hourly_all = load_ohlcv_data(hourly_file)
-    intraday_data = _slice_by_beijing_window(intraday_all, start_date, end_date)
-    hourly_data = _slice_by_beijing_window(hourly_all, start_date, end_date)
-    if not intraday_data or not hourly_data:
+    intraday_start_idx, intraday_end_idx = _beijing_window_indices(intraday_all, start_date, end_date)
+    intraday_data = intraday_all[intraday_start_idx:intraday_end_idx]
+    if not intraday_data or not hourly_all:
         raise ValueError(f"missing data for window {start_date}~{end_date}")
 
     sentiment_rows = load_sentiment_data(sentiment_file) if Path(sentiment_file).exists() else []
     sentiment_state = _prepare_sentiment_state(sentiment_rows) if sentiment_rows else []
     sentiment_timestamps = [row["timestamp"] for row in sentiment_state]
-    intraday_interval_ms = _infer_interval_ms(intraday_data, 15)
+    intraday_interval_ms = _infer_interval_ms(intraday_all, 15)
+    hourly_interval_ms = _infer_interval_ms(hourly_all, 60)
     start_ts = intraday_data[0]["timestamp"]
     end_ts = intraday_data[-1]["timestamp"] + intraday_interval_ms
 
@@ -652,7 +662,7 @@ def backtest_macd_aggressive(
         funding_timestamps = [row["timestamp"] for row in funding_rows]
 
     hourly_state = _prepare_state(
-        hourly_data,
+        hourly_all,
         strategy_params["hourly_ema_fast"],
         strategy_params["hourly_ema_slow"],
         strategy_params["macd_fast"],
@@ -660,7 +670,7 @@ def backtest_macd_aggressive(
         strategy_params["macd_signal"],
         strategy_params.get("hourly_ema_anchor"),
     )
-    four_hour_bars = _aggregate_bars(hourly_data, 4)
+    four_hour_bars = _aggregate_bars(hourly_all, 4)
     four_hour_state = _prepare_state(
         four_hour_bars,
         strategy_params["fourh_ema_fast"],
@@ -670,7 +680,7 @@ def backtest_macd_aggressive(
         strategy_params["macd_signal"],
     )
     intraday_state = _prepare_state(
-        intraday_data,
+        intraday_all,
         strategy_params["intraday_ema_fast"],
         strategy_params["intraday_ema_slow"],
         strategy_params["macd_fast"],
@@ -678,8 +688,9 @@ def backtest_macd_aggressive(
         strategy_params["macd_signal"],
     )
 
-    hourly_timestamps = [row["timestamp"] for row in hourly_state]
-    four_hour_timestamps = [row["timestamp"] for row in four_hour_state]
+    four_hour_interval_ms = _infer_interval_ms(four_hour_bars, 240) if four_hour_bars else 240 * 60_000
+    hourly_close_timestamps = [row["timestamp"] + hourly_interval_ms for row in hourly_state]
+    four_hour_close_timestamps = [row["timestamp"] + four_hour_interval_ms for row in four_hour_state]
 
     capital = 100000.0
     initial_capital = capital
@@ -713,14 +724,15 @@ def backtest_macd_aggressive(
         if trade["pnl_pct"] > 0:
             signal_closed_wins[signal] = signal_closed_wins.get(signal, 0) + 1
 
-    for idx, bar in enumerate(intraday_data):
-        prev_bar = intraday_data[idx - 1] if idx > 0 else None
+    for idx in range(intraday_start_idx, intraday_end_idx):
+        bar = intraday_all[idx]
+        prev_bar = intraday_all[idx - 1] if idx > 0 else None
         prev_bar_close_ts = prev_bar["timestamp"] + intraday_interval_ms if prev_bar is not None else bar["timestamp"]
         bar_close_ts = bar["timestamp"] + intraday_interval_ms
         current_ts = bar["timestamp"]
-        context_ref_ts = bar_close_ts - 1
-        hourly_idx = bisect_right(hourly_timestamps, context_ref_ts) - 1
-        four_hour_idx = bisect_right(four_hour_timestamps, context_ref_ts) - 1
+        context_ref_ts = bar_close_ts
+        hourly_idx = bisect_right(hourly_close_timestamps, context_ref_ts) - 1
+        four_hour_idx = bisect_right(four_hour_close_timestamps, context_ref_ts) - 1
         sentiment_idx = bisect_right(sentiment_timestamps, current_ts) - 1
 
         hourly_context = hourly_state[hourly_idx] if hourly_idx >= 0 else None
@@ -970,7 +982,7 @@ def backtest_macd_aggressive(
 
         positions = remaining
 
-        signal = strategy_func(intraday_data, idx, positions, market_state)
+        signal = strategy_func(intraday_all, idx, positions, market_state)
         if signal and positions and _signal_side(signal) != _position_side(positions[0]):
             for position in positions:
                 rev_side = _position_side(position)

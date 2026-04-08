@@ -17,6 +17,7 @@ DEFAULT_BASE_CONFIG = BASE_DIR / "config.base.json"
 DEFAULT_SOURCE_CONFIG = REPO_ROOT.parent / "test1" / "user_data" / "config.json"
 DEFAULT_OUTPUT = BASE_DIR / "runtime" / "config.runtime.json"
 DEFAULT_USER_DATA_DIR = BASE_DIR / "user_data"
+INHERITED_EXECUTION_KEYS = ("entry_pricing", "exit_pricing", "unfilledtimeout")
 
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -59,7 +60,9 @@ def build_runtime_config(mode: str, base_config_path: Path, source_config_path: 
 
     _copy_exchange_credentials(runtime_config, source_config)
 
-    for key in ("entry_pricing", "exit_pricing", "unfilledtimeout", "telegram", "api_server", "internals"):
+    # Keep test2 isolated from test1 side effects. Only inherit execution-related
+    # settings that matter for order pricing and timeout behavior.
+    for key in INHERITED_EXECUTION_KEYS:
         if key in source_config:
             runtime_config[key] = _deep_merge(runtime_config.get(key, {}), source_config[key])
 

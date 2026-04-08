@@ -11,7 +11,7 @@
 - `config.base.json`
   `test2` 的基础 `freqtrade` 配置，不含敏感信息
 - `build_runtime_config.py`
-  从 `test1/user_data/config.json` 读取 OKX 的 `key/secret/password`，拼成 `test2` 可运行配置
+  从 `test1/user_data/config.json` 读取 OKX 的 `key/secret/password`，并只继承下单相关配置，拼成 `test2` 可运行配置
 - `strategies/MacdAggressiveStrategy.py`
   `freqtrade` 的策略入口，内部转到 `src/freqtrade_macd_aggressive.py`
 - `start_dry_run.sh`
@@ -41,6 +41,7 @@
 
 - 入场信号已直接复用主策略 `src/strategy_macd_aggressive.py`
 - 指标计算口径已尽量对齐自研回测器 `src/backtest_macd_aggressive.py`
+- 默认对比窗口下，原始入场时间戳集合已经可以和 `scripts/freqtrade_compare.py` 对齐
 - `dry-run` 更适合看执行链路和持仓管理是否正常，不适合把单段收益直接当成未来 live 收益
 
 ## 先做什么
@@ -92,6 +93,7 @@ bash real-money-test/start_live.sh
 
 - `test2` 有了单独的实盘测试目录，不再和研究脚本混在一起
 - `test1` 已有的 OKX 凭证可以直接复用
+- `telegram`、`api_server`、`internals` 不会再从 `test1` 继承，避免把旧实例的通知或 API 一起带开
 - `test2` 已经能直接调用本机现成的 `freqtrade` 环境
 - futures / isolated / `BTC/USDT:USDT` 的基础配置已经单独整理好
 
@@ -119,13 +121,14 @@ bash real-money-test/start_live.sh
 - 回测里的 1 分钟执行价与实盘真实成交之间的细微差异
 - 回测里的滑点假设与真实盘口冲击差异
 - 资金费、手续费和交易所返回字段在真实环境下的逐笔核对
+- 退出、`TP1`、`pyramid`、权益曲线还没有独立的系统化对比脚本来证明逐项等价
 - 当前 `freqtrade` 壳子只跑单一交易对，因此更接近“单一净仓位 + 分批加减仓”，不是回测里 4 笔独立仓同时持有的结构
 
 所以这套现在的定位应该是：
 
 - 可以开始跑纸面盘
-- 可以准备小资金实盘
-- 已经很接近可执行版本
+- 在重新跑完修正后的研究/回测之前，不建议直接转小资金实盘
+- 执行链路已经接近可用版本
 - 但还不能把 4 并发回测收益直接当成未来实盘收益
 
 ## 推荐推进顺序
