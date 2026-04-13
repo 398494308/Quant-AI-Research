@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Any
 
-from research_v2.config import GateConfig, ScoringConfig
+from research_v2.config import GateConfig
 from research_v2.windows import ResearchWindow
 
 
@@ -148,7 +148,7 @@ def summarize_evaluation(
     results: list[dict[str, Any]],
     stress_results: list[dict[str, Any]],
     gates: GateConfig,
-    scoring: ScoringConfig | None = None,
+    **_kwargs: Any,
 ) -> EvaluationReport:
     eval_results = _window_payloads(results, "eval")
     holdout_results = _window_payloads(results, "holdout")
@@ -174,6 +174,8 @@ def summarize_evaluation(
     holdout_trades = sum(int(item["result"]["trades"]) for item in holdout_results)
 
     eval_daily_returns = _collect_daily_returns(results, "eval")
+    holdout_daily_returns = _collect_daily_returns(results, "holdout")
+    all_daily_returns = eval_daily_returns + holdout_daily_returns
     daily_sharpe = _annualized_sharpe(eval_daily_returns)
     daily_sortino = _annualized_sortino(eval_daily_returns)
 
@@ -188,56 +190,14 @@ def summarize_evaluation(
     stress_avg_return = _mean(stress_returns)
     stress_worst_drawdown = max((item["result"]["max_drawdown"] for item in stress_results), default=0.0)
 
-    # 使用默认系数或外部传入的配置
-    if scoring is None:
-        from research_v2.config import ScoringConfig
-        scoring = ScoringConfig(
-            weighted_return_weight=0.42, median_return_weight=0.24,
-            p25_return_weight=0.20, holdout_return_weight=0.18,
-            sortino_weight=4.0, sharpe_weight=2.0, profit_factor_weight=3.0,
-            risk_ratio_clamp_low=-2.5, risk_ratio_clamp_high=5.0,
-            profit_factor_clamp_low=-1.0, profit_factor_clamp_high=2.5,
-            drawdown_threshold=32.0, drawdown_weight=0.45,
-            fee_drag_threshold=4.0, fee_drag_weight=1.60,
-            liquidation_weight=8.0,
-            tail_loss_threshold=10.0, tail_loss_weight=0.28,
-            consistency_threshold=16.0, consistency_weight=0.25,
-            holdout_gap_weight=0.18,
-            stress_loss_threshold=4.0, stress_loss_weight=0.20,
-        )
-
-    sc = scoring
-    sortino_component = _clamp(daily_sortino, sc.risk_ratio_clamp_low, sc.risk_ratio_clamp_high) * sc.sortino_weight
-    sharpe_component = _clamp(daily_sharpe, sc.risk_ratio_clamp_low, sc.risk_ratio_clamp_high) * sc.sharpe_weight
-    profit_factor_component = _clamp(profit_factor - 1.0, sc.profit_factor_clamp_low, sc.profit_factor_clamp_high) * sc.profit_factor_weight
-    weighted_return_component = weighted_eval_return * sc.weighted_return_weight
-    median_component = eval_median_return * sc.median_return_weight
-    p25_component = eval_p25_return * sc.p25_return_weight
-    holdout_component = holdout_avg_return * sc.holdout_return_weight
-
-    drawdown_penalty = max(0.0, worst_drawdown - sc.drawdown_threshold) * sc.drawdown_weight
-    fee_penalty = max(0.0, avg_fee_drag - sc.fee_drag_threshold) * sc.fee_drag_weight
-    liquidation_penalty = liquidations * sc.liquidation_weight
-    tail_penalty = max(0.0, -eval_worst_return - sc.tail_loss_threshold) * sc.tail_loss_weight
-    consistency_penalty = max(0.0, eval_std - sc.consistency_threshold) * sc.consistency_weight
     holdout_gap = weighted_eval_return - holdout_avg_return
-    holdout_gap_penalty = max(0.0, holdout_gap) * sc.holdout_gap_weight
-    stress_penalty = max(0.0, -stress_worst_return - sc.stress_loss_threshold) * sc.stress_loss_weight
 
-    quality_score = (
-        weighted_return_component
-        + median_component
-        + p25_component
-        + sortino_component
-        + sharpe_component
-        + profit_factor_component
-        - drawdown_penalty
-        - fee_penalty
-        - liquidation_penalty
-        - tail_penalty
-        - consistency_penalty
-    )
-    promotion_score = quality_score + holdout_component - holdout_gap_penalty - stress_penalty
+    # ==================== 评分：纯 Sortino ====================
+    # quality_score = eval 窗口的年化 Sortino（平时练习的风险收益比）
+    # promotion_score = eval + holdout 合并后的年化 Sortino
+    #   如果留出窗口表现差，会自然拉低 promotion_score，不需要额外惩罚
+    quality_score = daily_sortino
+    promotion_score = _annualized_sortino(all_daily_returns)
 
     gate_reasons: list[str] = []
     if total_trades < gates.min_total_trades:

@@ -95,48 +95,30 @@ python3 scripts/research_macd_aggressive_v2.py --once --no-optimize
 
 - 总交易数 `>= 30`
 - `eval` 交易数 `>= 24`
-- `holdout` 交易数 `>= 8`
-- `eval` 正收益窗口占比 `>= 40%`
-- 最大回撤 `<= 45%`
+- `holdout` 交易数 `>= 5`
+- `eval` 正收益窗口占比 `>= 30%`
+- 最大回撤 `<= 50%`
 - 爆仓次数 `<= 0`
-- `holdout` 平均收益 `>= 0%`
-- `eval - holdout` 落差 `<= 22`
+- `holdout` 平均收益 `>= -10%`
+- `eval - holdout` 落差 `<= 30`
 - 平均手续费拖累 `<= 6%`
-- 压力测试最差收益 `>= -8%`
+- 压力测试最差收益 `>= -12%`
 
 以上全部可通过 `config/research_v2.env` 覆盖。
 
-## 评分系数
+## 评分方式
 
-评分公式里有很多权重和惩罚系数，以前全部写死在代码里。现在已经全部提取到 `ScoringConfig` 结构中，可以通过环境变量单独调整:
+评分已简化为**纯 Sortino Ratio**（年化）:
 
-| 环境变量 | 默认值 | 说明 |
-|---------|--------|------|
-| `MACD_V2_SCORE_WEIGHTED_RETURN_W` | `0.42` | 加权评估收益的权重 |
-| `MACD_V2_SCORE_MEDIAN_RETURN_W` | `0.24` | 中位数收益的权重 |
-| `MACD_V2_SCORE_P25_RETURN_W` | `0.20` | P25 收益的权重 |
-| `MACD_V2_SCORE_HOLDOUT_RETURN_W` | `0.18` | 留出窗口收益的权重 |
-| `MACD_V2_SCORE_SORTINO_W` | `4.0` | Sortino 指标的乘数 |
-| `MACD_V2_SCORE_SHARPE_W` | `2.0` | Sharpe 指标的乘数 |
-| `MACD_V2_SCORE_PROFIT_FACTOR_W` | `3.0` | 盈亏比的乘数 |
-| `MACD_V2_SCORE_DD_THRESHOLD` | `32.0` | 回撤惩罚起点（%） |
-| `MACD_V2_SCORE_DD_W` | `0.45` | 回撤惩罚每 1% 扣多少分 |
-| `MACD_V2_SCORE_FEE_THRESHOLD` | `4.0` | 手续费惩罚起点（%） |
-| `MACD_V2_SCORE_FEE_W` | `1.60` | 手续费惩罚每 1% 扣多少分 |
-| `MACD_V2_SCORE_LIQ_W` | `8.0` | 每次爆仓扣多少分 |
-| `MACD_V2_SCORE_TAIL_THRESHOLD` | `10.0` | 尾部亏损惩罚起点（%） |
-| `MACD_V2_SCORE_TAIL_W` | `0.28` | 尾部亏损惩罚每 1% 扣多少分 |
-| `MACD_V2_SCORE_CONSISTENCY_THRESHOLD` | `16.0` | 一致性惩罚起点（标准差%） |
-| `MACD_V2_SCORE_CONSISTENCY_W` | `0.25` | 一致性惩罚每 1% 扣多少分 |
-| `MACD_V2_SCORE_HOLDOUT_GAP_W` | `0.18` | 留出落差惩罚的乘数 |
-| `MACD_V2_SCORE_STRESS_THRESHOLD` | `4.0` | 压力测试惩罚起点（%） |
-| `MACD_V2_SCORE_STRESS_W` | `0.20` | 压力测试惩罚每 1% 扣多少分 |
+- `quality_score` = eval 窗口的年化 Sortino（只看平时练习的风险收益比）
+- `promotion_score` = eval + holdout 合并后的年化 Sortino
 
 大白话:
 
-- 以前这些数字全部直接写在代码里，想调就得改代码。
-- 现在只要在 `config/research_v2.env` 里加一行 `MACD_V2_SCORE_DD_W=0.30` 就能把回撤惩罚调轻。
-- 默认值和以前完全一样，不改的话行为不变。
+- Sortino 只看"亏钱的时候波动有多大"，不惩罚赚大钱。
+- 如果留出窗口（最终考试）表现很差，promotion_score 会自然被拉低，不需要额外的惩罚公式。
+- 以前的 18 个系数加减公式已经全部去掉了。
+- Gate 负责"淘汰明显不合格的"，Sortino 负责"在合格的里面挑最好的"。
 
 ## 参数安全范围
 

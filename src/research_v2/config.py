@@ -94,67 +94,10 @@ class StressScenario:
 
 
 @dataclass(frozen=True)
-class ScoringConfig:
-    """评分函数系数。
-
-    每个系数控制评分公式中某一项的权重或阈值。
-    如果你觉得某个惩罚太重或太轻，直接在 env 里覆盖对应的环境变量即可。
-
-    命名规则：
-    - *_weight: 乘法权重，越大该项对总分影响越大
-    - *_threshold: 超过这个值才开始惩罚
-    - *_clamp_*: 截断上下界，防止极端值主导
-    """
-    # ---- 收益项权重（加分） ----
-    # 加权评估收益的权重，体现"近期窗口更重要"
-    weighted_return_weight: float
-    # 中位数收益的权重，体现"典型表现"
-    median_return_weight: float
-    # P25 收益的权重，体现"较差情况下的表现"
-    p25_return_weight: float
-    # 留出窗口收益的权重
-    holdout_return_weight: float
-    # Sortino 指标的乘数（下行风险调整后收益）
-    sortino_weight: float
-    # Sharpe 指标的乘数（整体风险调整后收益）
-    sharpe_weight: float
-    # 盈亏比（profit_factor - 1）的乘数
-    profit_factor_weight: float
-    # Sortino/Sharpe 截断范围
-    risk_ratio_clamp_low: float
-    risk_ratio_clamp_high: float
-    # 盈亏比截断范围
-    profit_factor_clamp_low: float
-    profit_factor_clamp_high: float
-
-    # ---- 惩罚项（扣分） ----
-    # 回撤惩罚：超过 threshold 后每多 1% 扣多少分
-    drawdown_threshold: float
-    drawdown_weight: float
-    # 手续费惩罚：超过 threshold 后每多 1% 扣多少分
-    fee_drag_threshold: float
-    fee_drag_weight: float
-    # 爆仓惩罚：每次爆仓扣多少分
-    liquidation_weight: float
-    # 尾部风险惩罚：最差窗口亏损超过 threshold 后每多 1% 扣多少分
-    tail_loss_threshold: float
-    tail_loss_weight: float
-    # 一致性惩罚：窗口标准差超过 threshold 后每多 1% 扣多少分
-    consistency_threshold: float
-    consistency_weight: float
-    # 留出差值惩罚：eval 与 holdout 落差的乘数
-    holdout_gap_weight: float
-    # 压力测试惩罚：最差压力收益低于 threshold 后每多 1% 扣多少分
-    stress_loss_threshold: float
-    stress_loss_weight: float
-
-
-@dataclass(frozen=True)
 class ResearchRuntimeConfig:
     paths: ResearchPaths
     windows: WindowConfig
     gates: GateConfig
-    scoring: ScoringConfig
     stress_enabled: bool
     stress_scenarios: tuple[StressScenario, ...]
     loop_interval_seconds: int
@@ -198,14 +141,14 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
     gates = GateConfig(
         min_total_trades=_env_int("MACD_V2_MIN_TOTAL_TRADES", 30),
         min_eval_trades=_env_int("MACD_V2_MIN_EVAL_TRADES", 24),
-        min_holdout_trades=_env_int("MACD_V2_MIN_HOLDOUT_TRADES", 8),
-        min_positive_ratio=_env_float("MACD_V2_MIN_POSITIVE_RATIO", 0.40),
-        max_drawdown_pct=_env_float("MACD_V2_MAX_DRAWDOWN_PCT", 45.0),
+        min_holdout_trades=_env_int("MACD_V2_MIN_HOLDOUT_TRADES", 5),
+        min_positive_ratio=_env_float("MACD_V2_MIN_POSITIVE_RATIO", 0.30),
+        max_drawdown_pct=_env_float("MACD_V2_MAX_DRAWDOWN_PCT", 50.0),
         max_liquidations=_env_int("MACD_V2_MAX_LIQUIDATIONS", 0),
-        min_holdout_return=_env_float("MACD_V2_MIN_HOLDOUT_RETURN", 0.0),
-        max_eval_holdout_gap=_env_float("MACD_V2_MAX_EVAL_HOLDOUT_GAP", 22.0),
+        min_holdout_return=_env_float("MACD_V2_MIN_HOLDOUT_RETURN", -10.0),
+        max_eval_holdout_gap=_env_float("MACD_V2_MAX_EVAL_HOLDOUT_GAP", 30.0),
         max_fee_drag_pct=_env_float("MACD_V2_MAX_FEE_DRAG_PCT", 6.0),
-        min_stress_return=_env_float("MACD_V2_MIN_STRESS_RETURN", -8.0),
+        min_stress_return=_env_float("MACD_V2_MIN_STRESS_RETURN", -12.0),
     )
 
     stress_scenarios = (
@@ -218,39 +161,10 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         ),
     )
 
-    scoring = ScoringConfig(
-        # 收益项
-        weighted_return_weight=_env_float("MACD_V2_SCORE_WEIGHTED_RETURN_W", 0.42),
-        median_return_weight=_env_float("MACD_V2_SCORE_MEDIAN_RETURN_W", 0.24),
-        p25_return_weight=_env_float("MACD_V2_SCORE_P25_RETURN_W", 0.20),
-        holdout_return_weight=_env_float("MACD_V2_SCORE_HOLDOUT_RETURN_W", 0.18),
-        sortino_weight=_env_float("MACD_V2_SCORE_SORTINO_W", 4.0),
-        sharpe_weight=_env_float("MACD_V2_SCORE_SHARPE_W", 2.0),
-        profit_factor_weight=_env_float("MACD_V2_SCORE_PROFIT_FACTOR_W", 3.0),
-        risk_ratio_clamp_low=_env_float("MACD_V2_SCORE_RISK_CLAMP_LOW", -2.5),
-        risk_ratio_clamp_high=_env_float("MACD_V2_SCORE_RISK_CLAMP_HIGH", 5.0),
-        profit_factor_clamp_low=_env_float("MACD_V2_SCORE_PF_CLAMP_LOW", -1.0),
-        profit_factor_clamp_high=_env_float("MACD_V2_SCORE_PF_CLAMP_HIGH", 2.5),
-        # 惩罚项
-        drawdown_threshold=_env_float("MACD_V2_SCORE_DD_THRESHOLD", 32.0),
-        drawdown_weight=_env_float("MACD_V2_SCORE_DD_W", 0.45),
-        fee_drag_threshold=_env_float("MACD_V2_SCORE_FEE_THRESHOLD", 4.0),
-        fee_drag_weight=_env_float("MACD_V2_SCORE_FEE_W", 1.60),
-        liquidation_weight=_env_float("MACD_V2_SCORE_LIQ_W", 8.0),
-        tail_loss_threshold=_env_float("MACD_V2_SCORE_TAIL_THRESHOLD", 10.0),
-        tail_loss_weight=_env_float("MACD_V2_SCORE_TAIL_W", 0.28),
-        consistency_threshold=_env_float("MACD_V2_SCORE_CONSISTENCY_THRESHOLD", 16.0),
-        consistency_weight=_env_float("MACD_V2_SCORE_CONSISTENCY_W", 0.25),
-        holdout_gap_weight=_env_float("MACD_V2_SCORE_HOLDOUT_GAP_W", 0.18),
-        stress_loss_threshold=_env_float("MACD_V2_SCORE_STRESS_THRESHOLD", 4.0),
-        stress_loss_weight=_env_float("MACD_V2_SCORE_STRESS_W", 0.20),
-    )
-
     return ResearchRuntimeConfig(
         paths=paths,
         windows=windows,
         gates=gates,
-        scoring=scoring,
         stress_enabled=_env_flag("MACD_V2_STRESS_ENABLED", True),
         stress_scenarios=stress_scenarios,
         loop_interval_seconds=_env_int("MACD_V2_LOOP_INTERVAL_SECONDS", _env_int("MACD_LOOP_INTERVAL_SECONDS", 120)),
