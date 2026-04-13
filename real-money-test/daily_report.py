@@ -19,16 +19,33 @@ import requests
 CN_TZ = ZoneInfo("Asia/Shanghai")
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
-RUNTIME_DIR = SCRIPT_DIR / "runtime"
-CONFIG_PATH = RUNTIME_DIR / "config.runtime.json"
-PID_FILE = RUNTIME_DIR / "freqtrade-dryrun.pid"
-DB_PATH = RUNTIME_DIR / "tradesv3.dryrun.sqlite"
-LOG_PATH = RUNTIME_DIR / "freqtrade-dryrun.log"
-SNAPSHOT_PATH = RUNTIME_DIR / "daily-report-snapshots.json"
 BASE_ENV_PATH = REPO_ROOT / "config" / "research.env"
+SECRETS_ENV_PATH = REPO_ROOT / "config" / "secrets.env"
 LOCAL_ENV_PATH = SCRIPT_DIR / "report.env"
 DISCORD_API_BASE = "https://discord.com/api/v10"
 LOG_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}")
+
+# 运行模式：通过命令行参数或环境变量选择
+REPORT_MODE = os.getenv("REPORT_MODE", "dry-run")
+
+
+def _resolve_paths(mode: str) -> tuple[Path, Path, Path, Path, Path]:
+    """根据模式返回 (runtime_dir, config_path, pid_file, db_path, log_path)。"""
+    if mode == "live":
+        runtime_dir = SCRIPT_DIR / "runtime" / "live"
+        db_name = "tradesv3.live.sqlite"
+        log_name = "freqtrade.log"
+    else:
+        runtime_dir = SCRIPT_DIR / "runtime" / "dryrun"
+        db_name = "tradesv3.dryrun.sqlite"
+        log_name = "freqtrade.log"
+    return (
+        runtime_dir,
+        runtime_dir / "config.runtime.json",
+        runtime_dir / "freqtrade.pid",
+        runtime_dir / db_name,
+        runtime_dir / log_name,
+    )
 
 
 @dataclass
@@ -411,7 +428,7 @@ def send_discord(message: str, env: dict[str, str]) -> None:
     response.raise_for_status()
 
 
-def build_message(now: datetime, status: BotStatus, runtime_config: dict, summary: dict) -> str:
+def build_message(now: datetime, status: BotStatus, runtime_config: dict, summary: dict, mode_label: str = "Dry Run") -> str:
     initial_capital = float(runtime_config.get("dry_run_wallet") or 0.0)
     total_realized = float(summary["closed_pnl_abs"]) + float(summary["open_realized_pnl_abs"])
     equity = initial_capital + total_realized + float(summary["unrealized_pnl_abs"])
@@ -449,7 +466,7 @@ def build_message(now: datetime, status: BotStatus, runtime_config: dict, summar
     save_snapshots(upsert_snapshot(snapshots, snapshot))
 
     lines = [
-        f"【test2 Dry Run】{now.strftime('%Y-%m-%d %H:%M CST')}",
+        f"【{mode_label}】{now.strftime('%Y-%m-%d %H:%M CST')}",
         (
             f"权益 {equity:.2f}U"
             f" | 昨日 {format_abs(day_delta_abs)} ({format_pct(day_delta_pct)})"
@@ -478,12 +495,23 @@ def build_message(now: datetime, status: BotStatus, runtime_config: dict, summar
 
 
 def main() -> int:
-    env = load_env([BASE_ENV_PATH, LOCAL_ENV_PATH])
+    mode = REPORT_MODE
+    if len(sys.argv) > 1 and sys.argv[1] in ("dry-run", "live"):
+        mode = sys.argv[1]
+
+    # 设置模块级路径变量
+    global RUNTIME_DIR, CONFIG_PATH, PID_FILE, DB_PATH, LOG_PATH, SNAPSHOT_PATH
+    RUNTIME_DIR, CONFIG_PATH, PID_FILE, DB_PATH, LOG_PATH = _resolve_paths(mode)
+    SNAPSHOT_PATH = RUNTIME_DIR / "daily-report-snapshots.json"
+
+    mode_label = "Live" if mode == "live" else "Dry Run"
+
+    env = load_env([SECRETS_ENV_PATH, BASE_ENV_PATH, LOCAL_ENV_PATH])
     now = datetime.now(CN_TZ)
     runtime_config = read_runtime_config()
     status = read_bot_status()
     summary = read_summary(now)
-    message = build_message(now, status, runtime_config, summary)
+    message = build_message(now, status, runtime_config, summary, mode_label=mode_label)
     send_discord(message, env)
     print(message)
     return 0

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a local freqtrade runtime config for test2 live testing."""
+"""Build a local freqtrade runtime config for dry-run or live trading."""
 
 from __future__ import annotations
 
@@ -15,14 +15,20 @@ REPO_ROOT = BASE_DIR.parent
 SRC_DIR = REPO_ROOT / "src"
 DEFAULT_BASE_CONFIG = BASE_DIR / "config.base.json"
 DEFAULT_SOURCE_CONFIG = BASE_DIR / "config.base.json"
-DEFAULT_OUTPUT = BASE_DIR / "runtime" / "config.runtime.json"
-DEFAULT_USER_DATA_DIR = BASE_DIR / "user_data"
 INHERITED_EXECUTION_KEYS = ("entry_pricing", "exit_pricing", "unfilledtimeout")
 
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 import backtest_macd_aggressive as backtest_module
+
+
+def _runtime_dir(mode: str) -> Path:
+    return BASE_DIR / "runtime" / ("live" if mode == "live" else "dryrun")
+
+
+def _user_data_dir(mode: str) -> Path:
+    return BASE_DIR / "user_data" / ("live" if mode == "live" else "dryrun")
 
 
 def _load_json(path: Path) -> dict:
@@ -54,22 +60,38 @@ def _copy_exchange_credentials(runtime_config: dict, source_config: dict) -> Non
             target_exchange[key] = deepcopy(source_exchange[key])
 
 
-def build_runtime_config(mode: str, base_config_path: Path, source_config_path: Path, output_path: Path) -> Path:
+def build_runtime_config(
+    mode: str,
+    base_config_path: Path,
+    source_config_path: Path,
+    output_path: Path | None = None,
+    include_telegram: bool = False,
+    include_api_server: bool = False,
+) -> Path:
     runtime_config = _load_json(base_config_path)
     source_config = _load_json(source_config_path)
 
     _copy_exchange_credentials(runtime_config, source_config)
 
-    # Keep test2 isolated from test1 side effects. Only inherit execution-related
-    # settings that matter for order pricing and timeout behavior.
+    # 只继承执行参数（pricing / timeout），不继承 telegram / api_server
     for key in INHERITED_EXECUTION_KEYS:
         if key in source_config:
             runtime_config[key] = _deep_merge(runtime_config.get(key, {}), source_config[key])
 
-    runtime_dir = output_path.parent
+    # telegram 和 api_server 只在显式请求时继承
+    if include_telegram and "telegram" in source_config:
+        runtime_config["telegram"] = deepcopy(source_config["telegram"])
+    if include_api_server and "api_server" in source_config:
+        runtime_config["api_server"] = deepcopy(source_config["api_server"])
+
+    runtime_dir = _runtime_dir(mode)
+    user_data_dir = _user_data_dir(mode)
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    DEFAULT_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    (DEFAULT_USER_DATA_DIR / "data").mkdir(parents=True, exist_ok=True)
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+    (user_data_dir / "data").mkdir(parents=True, exist_ok=True)
+
+    if output_path is None:
+        output_path = runtime_dir / "config.runtime.json"
 
     is_live = mode == "live"
     runtime_config["dry_run"] = not is_live
@@ -78,9 +100,10 @@ def build_runtime_config(mode: str, base_config_path: Path, source_config_path: 
     else:
         runtime_config.pop("dry_run_wallet", None)
 
-    runtime_config["db_url"] = f"sqlite:///{runtime_dir / ('tradesv3.live.sqlite' if is_live else 'tradesv3.dryrun.sqlite')}"
-    runtime_config["datadir"] = str(DEFAULT_USER_DATA_DIR / "data")
-    runtime_config["user_data_dir"] = str(DEFAULT_USER_DATA_DIR)
+    db_name = "tradesv3.live.sqlite" if is_live else "tradesv3.dryrun.sqlite"
+    runtime_config["db_url"] = f"sqlite:///{runtime_dir / db_name}"
+    runtime_config["datadir"] = str(user_data_dir / "data")
+    runtime_config["user_data_dir"] = str(user_data_dir)
     runtime_config["bot_name"] = "macd-aggressive-live" if is_live else "macd-aggressive-dryrun"
     runtime_config["position_adjustment_enable"] = True
     runtime_config["max_entry_position_adjustment"] = max(
@@ -88,8 +111,6 @@ def build_runtime_config(mode: str, base_config_path: Path, source_config_path: 
         int(backtest_module.EXIT_PARAMS.get("pyramid_max_times", 0)),
     )
 
-    # test2 uses market orders for breakout-style execution, so keep the
-    # price-side settings aligned even if test1 source config uses older defaults.
     order_types = runtime_config.get("order_types", {})
     if order_types.get("entry") == "market":
         runtime_config.setdefault("entry_pricing", {})["price_side"] = "other"
@@ -103,17 +124,28 @@ def build_runtime_config(mode: str, base_config_path: Path, source_config_path: 
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build freqtrade runtime config for test2 real-money-test")
+    parser = argparse.ArgumentParser(description="Build freqtrade runtime config")
     parser.add_argument("--mode", choices=("dry-run", "live"), default="dry-run")
     parser.add_argument("--base-config", type=Path, default=DEFAULT_BASE_CONFIG)
     parser.add_argument("--source-config", type=Path, default=DEFAULT_SOURCE_CONFIG)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--include-telegram", action="store_true",
+                        help="从 source config 继承 telegram 配置")
+    parser.add_argument("--include-api-server", action="store_true",
+                        help="从 source config 继承 api_server 配置")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    output_path = build_runtime_config(args.mode, args.base_config, args.source_config, args.output)
+    output_path = build_runtime_config(
+        args.mode,
+        args.base_config,
+        args.source_config,
+        args.output,
+        include_telegram=args.include_telegram,
+        include_api_server=args.include_api_server,
+    )
     print(output_path)
 
 

@@ -2,11 +2,45 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNTIME_DIR="${SCRIPT_DIR}/runtime"
-PID_FILE="${RUNTIME_DIR}/freqtrade-dryrun.pid"
-LOG_FILE="${RUNTIME_DIR}/freqtrade-dryrun.log"
-STDOUT_FILE="${RUNTIME_DIR}/freqtrade-dryrun.stdout.log"
-CONFIG_PATH="${RUNTIME_DIR}/config.runtime.json"
+
+usage() {
+  echo "usage: bash manage.sh {start|stop|restart|status|log} {dry-run|live}"
+  exit 1
+}
+
+ACTION="${1:-}"
+MODE="${2:-dry-run}"
+
+if [[ -z "${ACTION}" ]]; then
+  usage
+fi
+
+case "${MODE}" in
+  dry-run|dryrun)
+    MODE_LABEL="dry-run"
+    RUNTIME_DIR="${SCRIPT_DIR}/runtime/dryrun"
+    PID_FILE="${RUNTIME_DIR}/freqtrade.pid"
+    LOG_FILE="${RUNTIME_DIR}/freqtrade.log"
+    STDOUT_FILE="${RUNTIME_DIR}/freqtrade.stdout.log"
+    CONFIG_PATH="${RUNTIME_DIR}/config.runtime.json"
+    START_SCRIPT="${SCRIPT_DIR}/start_dry_run.sh"
+    BUILD_MODE="dry-run"
+    ;;
+  live)
+    MODE_LABEL="live"
+    RUNTIME_DIR="${SCRIPT_DIR}/runtime/live"
+    PID_FILE="${RUNTIME_DIR}/freqtrade.pid"
+    LOG_FILE="${RUNTIME_DIR}/freqtrade.log"
+    STDOUT_FILE="${RUNTIME_DIR}/freqtrade.stdout.log"
+    CONFIG_PATH="${RUNTIME_DIR}/config.runtime.json"
+    START_SCRIPT="${SCRIPT_DIR}/start_live.sh"
+    BUILD_MODE="live"
+    ;;
+  *)
+    echo "unknown mode: ${MODE}"
+    usage
+    ;;
+esac
 
 mkdir -p "${RUNTIME_DIR}"
 
@@ -51,19 +85,19 @@ current_pid() {
 start_bot() {
   local pid
   if pid="$(current_pid)"; then
-    echo "dry-run already running: pid ${pid}"
+    echo "${MODE_LABEL} already running: pid ${pid}"
     exit 0
   fi
 
-  python3 "${SCRIPT_DIR}/build_runtime_config.py" --mode dry-run >/dev/null
-  setsid nohup bash "${SCRIPT_DIR}/start_dry_run.sh" >>"${STDOUT_FILE}" 2>&1 </dev/null &
+  python3 "${SCRIPT_DIR}/build_runtime_config.py" --mode "${BUILD_MODE}" >/dev/null
+  setsid nohup bash "${START_SCRIPT}" >>"${STDOUT_FILE}" 2>&1 </dev/null &
   pid=$!
   echo "${pid}" > "${PID_FILE}"
   sleep 2
   if pid_is_alive "${pid}"; then
-    echo "dry-run started: pid ${pid}"
+    echo "${MODE_LABEL} started: pid ${pid}"
   else
-    echo "dry-run failed to start"
+    echo "${MODE_LABEL} failed to start"
     rm -f "${PID_FILE}"
     exit 1
   fi
@@ -89,23 +123,23 @@ stop_bot() {
       done
     fi
     if pid_is_alive "${pid}"; then
-      echo "dry-run did not stop cleanly: pid ${pid}"
+      echo "${MODE_LABEL} did not stop cleanly: pid ${pid}"
       exit 1
     fi
     rm -f "${PID_FILE}"
-    echo "dry-run stopped"
+    echo "${MODE_LABEL} stopped"
   else
-    echo "not running"
+    echo "${MODE_LABEL} not running"
   fi
 }
 
 status_bot() {
   local pid
   if pid="$(current_pid)"; then
-    echo "running: pid ${pid}"
+    echo "${MODE_LABEL} running: pid ${pid}"
     ps -fp "${pid}"
   else
-    echo "not running"
+    echo "${MODE_LABEL} not running"
   fi
 }
 
@@ -114,7 +148,7 @@ log_bot() {
   tail -f "${LOG_FILE}"
 }
 
-case "${1:-}" in
+case "${ACTION}" in
   start)
     start_bot
     ;;
@@ -132,7 +166,6 @@ case "${1:-}" in
     log_bot
     ;;
   *)
-    echo "usage: bash real-money-test/manage.sh {start|stop|restart|status|log}"
-    exit 1
+    usage
     ;;
 esac
