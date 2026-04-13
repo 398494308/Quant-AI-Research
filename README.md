@@ -54,13 +54,13 @@
 2. 然后加载“当前最优基底”。如果 `backups/strategy_macd_aggressive_v2_best.py` 存在，就优先拿它；否则拿当前的 [src/strategy_macd_aggressive.py](src/strategy_macd_aggressive.py)。
 3. 评估时会把 `2025-09-01` 到 `2026-03-31` 切成 `9` 个重叠的 `eval` 窗口，再加 `1` 个最终 `holdout` 窗口。
 4. 每个窗口都调用同一个回测器 [src/backtest_macd_aggressive.py](src/backtest_macd_aggressive.py)，用同一套进出场、费用、滑点和资金费规则算结果。
-5. 如果是优化模式，研究器会生成一个候选策略。优先走 OpenAI；如果模型没输出、暂时不稳，或者你强制兜底，它会自动退回“本地小步改参数”，不会把整轮卡死。
+5. 如果是优化模式，研究器会生成一个候选策略。现在只走 OpenAI；如果模型暂时不可用或空输出，本轮会延后，等下次继续。
 6. 新候选先过源码校验，再检查是不是和最近试过的版本重复，避免反复撞墙。
 7. 通过后，候选会跑完整套 `eval + holdout + stress` 评估。
 8. 只有同时满足两件事，才会被收成新的最优:
    - `gate_passed = true`
    - `promotion_score` 比当前最优更高
-9. 不管通过还是失败，都会记进 `state/research_macd_aggressive_v2_journal.jsonl`，下次提示词和本地兜底都会参考这份研究历史。
+9. 不管通过还是失败，都会记进 `state/research_macd_aggressive_v2_journal.jsonl`，下次提示词会参考这份研究历史。
 
 如果你只想看当前版本有多烂或多好，不想生成新候选，可以用:
 
@@ -122,7 +122,7 @@ python3 scripts/research_macd_aggressive_v2.py --once --no-optimize
 
 ## 参数安全范围
 
-策略的每个可调参数现在都有硬性上下界。不管是 AI 生成的还是本地兜底生成的候选，参数超出范围就直接拒绝:
+策略的每个可调参数现在都有硬性上下界。AI 生成的候选只要参数超出范围就直接拒绝:
 
 - ADX 阈值: `5` ~ `50`
 - lookback 周期: `3` ~ `60`
@@ -200,7 +200,7 @@ python3 scripts/research_macd_aggressive_v2.py --once --no-optimize
 - [src/research_v2/evaluation.py](src/research_v2/evaluation.py)
   所有核心评分、惩罚和 Gate 都在这里。
 - [src/research_v2/strategy_code.py](src/research_v2/strategy_code.py)
-  负责候选源码校验、去重和本地参数兜底。
+  负责候选源码校验、参数边界检查和 diff 摘要。
 - [src/research_v2/journal.py](src/research_v2/journal.py)
   负责研究历史记录，避免同样的坑反复踩。
 
@@ -289,11 +289,11 @@ python3 scripts/stress_test_aggressive.py
 
 ## 关于 AI 不稳定
 
-当前代码已经内置兜底逻辑:
+当前代码不再做本地参数兜底:
 
-- OpenAI 正常可用时，优先让模型给完整候选策略源码。
-- 如果模型空输出、暂时不稳，或者你显式开启强制兜底，研究器会自动切到本地小步改参数。
-- 所以 AI 不稳定是“会影响效率”的问题，不是“整个研究流程彻底不能跑”的问题。
+- OpenAI 正常可用时，由模型给完整候选策略源码。
+- 如果模型空输出、超时或暂时不可用，这一轮会延后，按恢复等待时间再试。
+- 所以 AI 的稳定性现在会直接影响研究推进速度。
 
 ## 实盘壳子
 

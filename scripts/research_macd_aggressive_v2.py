@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import sys
-import time
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,12 +30,12 @@ from openai_strategy_client import StrategyGenerationTransientError, build_json_
 from research_v2.config import ResearchRuntimeConfig, StressScenario, load_research_runtime_config
 from research_v2.evaluation import EvaluationReport, summarize_evaluation
 from research_v2.journal import append_journal_entry, build_journal_prompt_summary, has_recent_code_hash, load_journal_entries, maybe_compact
+from research_v2.notifications import build_discord_summary_message, load_discord_config, send_discord_message
 from research_v2.prompting import build_candidate_response_schema, build_strategy_research_prompt
 from research_v2.strategy_code import (
     StrategyCandidate,
     StrategySourceError,
     build_diff_summary,
-    build_local_param_candidate,
     load_strategy_source,
     normalize_strategy_source,
     source_hash,
@@ -51,11 +50,12 @@ from research_v2.windows import ResearchWindow, build_research_windows
 
 RUNTIME = load_research_runtime_config(REPO_ROOT)
 WINDOWS = build_research_windows(RUNTIME.windows)
+DISCORD_CONFIG = load_discord_config()
+EVAL_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "eval")
+HOLDOUT_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "holdout")
 
 best_source = ""
 best_report: EvaluationReport | None = None
-provider_local_only_until = 0.0
-provider_local_only_reason = ""
 iteration_counter = 0
 
 logging.basicConfig(
@@ -76,6 +76,16 @@ def log_info(message: str) -> None:
 def log_exception(message: str) -> None:
     print(message)
     logging.error("%s\n%s", message, traceback.format_exc())
+
+
+def maybe_send_discord(message: str, *, context: str) -> None:
+    if not DISCORD_CONFIG.enabled:
+        return
+    try:
+        send_discord_message(message, DISCORD_CONFIG)
+    except Exception as exc:
+        log_info(f"Discord 发送失败({context}): {exc}")
+        logging.exception("Discord 发送失败(%s)", context)
 
 
 def write_heartbeat(status: str, **extra: Any) -> None:
@@ -181,28 +191,15 @@ def evaluate_current_strategy() -> EvaluationReport:
 # ==================== 候选策略生成 ====================
 
 
-def _provider_local_fallback_remaining_seconds() -> int:
-    return max(0, int(provider_local_only_until - time.time()))
+def _is_provider_empty_output(exc: Exception) -> bool:
+    return "Responses API returned no text output" in str(exc)
 
 
-def _provider_local_fallback_active() -> bool:
-    if RUNTIME.force_local_fallback:
-        return True
-    return RUNTIME.local_fallback_enabled and _provider_local_fallback_remaining_seconds() > 0
-
-
-def _should_use_local_fallback(exc: Exception) -> bool:
-    if not RUNTIME.local_fallback_enabled:
-        return False
-    message = str(exc)
-    return "Responses API returned no text output" in message
-
-
-def _activate_provider_local_fallback(exc: Exception) -> int:
-    global provider_local_only_until, provider_local_only_reason
-    provider_local_only_until = time.time() + RUNTIME.provider_empty_output_fallback_seconds
-    provider_local_only_reason = str(exc).splitlines()[0]
-    return RUNTIME.provider_empty_output_fallback_seconds
+def _provider_empty_output_message(exc: Exception) -> str:
+    for line in str(exc).splitlines():
+        if "Responses API returned no text output" in line:
+            return line
+    return "provider returned empty output"
 
 
 def _candidate_from_payload(payload: dict[str, Any]) -> StrategyCandidate:
@@ -253,38 +250,14 @@ def _build_model_candidate(base_source: str, journal_entries: list[dict[str, Any
 
 def build_strategy_candidate(base_source: str) -> StrategyCandidate:
     journal_entries = load_journal_entries(RUNTIME.paths.journal_file)
-    if _provider_local_fallback_active():
-        if RUNTIME.force_local_fallback:
-            log_info("已启用强制本地兜底，跳过模型请求")
-        else:
-            remaining = _provider_local_fallback_remaining_seconds()
-            log_info(
-                "Provider 本地兜底窗口生效中，跳过模型请求: "
-                f"remaining={remaining}s, reason={provider_local_only_reason}"
-            )
-        return build_local_param_candidate(
-            base_source=base_source,
-            seed=time.time_ns() ^ len(journal_entries),
-            attempts=RUNTIME.local_param_mutation_attempts,
-        )
-
     try:
         return _build_model_candidate(base_source, journal_entries)
     except StrategyGenerationTransientError:
         raise
     except Exception as exc:
-        if not _should_use_local_fallback(exc):
-            raise
-        cooldown_seconds = _activate_provider_local_fallback(exc)
-        log_info(
-            "模型候选输出不可用，切换到本地参数兜底: "
-            f"fallback_window={cooldown_seconds}s, error={str(exc).splitlines()[0]}"
-        )
-        return build_local_param_candidate(
-            base_source=base_source,
-            seed=time.time_ns() ^ len(journal_entries),
-            attempts=RUNTIME.local_param_mutation_attempts,
-        )
+        if _is_provider_empty_output(exc):
+            raise StrategyGenerationTransientError(_provider_empty_output_message(exc)) from exc
+        raise
 
 
 # ==================== 最优状态管理 ====================
@@ -327,6 +300,15 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
             promotion=best_report.metrics["promotion_score"],
             quality=best_report.metrics["quality_score"],
         )
+        maybe_send_discord(
+            build_discord_summary_message(
+                title="📌 研究器 v2 已加载最优基底",
+                report=best_report,
+                eval_window_count=EVAL_WINDOW_COUNT,
+                holdout_window_count=HOLDOUT_WINDOW_COUNT,
+            ),
+            context="initialize_saved_best",
+        )
         return
 
     best_source = load_strategy_source(RUNTIME.paths.strategy_file)
@@ -345,6 +327,15 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
         message="baseline ready",
         promotion=best_report.metrics["promotion_score"],
         quality=best_report.metrics["quality_score"],
+    )
+    maybe_send_discord(
+        build_discord_summary_message(
+            title="📌 研究器 v2 基底初始化完成",
+            report=best_report,
+            eval_window_count=EVAL_WINDOW_COUNT,
+            holdout_window_count=HOLDOUT_WINDOW_COUNT,
+        ),
+        context="initialize_baseline",
     )
 
 
@@ -457,6 +448,16 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             promotion=best_report.metrics["promotion_score"],
             quality=best_report.metrics["quality_score"],
             gate=best_report.gate_reason,
+        )
+        maybe_send_discord(
+            build_discord_summary_message(
+                title=f"🚀 研究器 v2 新最优 #{iteration_id}",
+                report=best_report,
+                eval_window_count=EVAL_WINDOW_COUNT,
+                holdout_window_count=HOLDOUT_WINDOW_COUNT,
+                candidate=candidate,
+            ),
+            context=f"accepted_iteration_{iteration_id}",
         )
         return "accepted"
 

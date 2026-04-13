@@ -103,10 +103,6 @@ class ResearchRuntimeConfig:
     loop_interval_seconds: int
     provider_recovery_wait_seconds: int
     failure_cooldown_seconds: int
-    local_fallback_enabled: bool
-    force_local_fallback: bool
-    provider_empty_output_fallback_seconds: int
-    local_param_mutation_attempts: int
     prompt_max_output_tokens: int
     max_recent_journal_entries: int
 
@@ -170,10 +166,6 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         loop_interval_seconds=_env_int("MACD_V2_LOOP_INTERVAL_SECONDS", _env_int("MACD_LOOP_INTERVAL_SECONDS", 120)),
         provider_recovery_wait_seconds=_env_int("MACD_V2_PROVIDER_RECOVERY_WAIT_SECONDS", 90),
         failure_cooldown_seconds=_env_int("MACD_V2_FAILURE_COOLDOWN_SECONDS", 60),
-        local_fallback_enabled=_env_flag("MACD_V2_LOCAL_FALLBACK_ENABLED", True),
-        force_local_fallback=_env_flag("MACD_V2_FORCE_LOCAL_FALLBACK", False),
-        provider_empty_output_fallback_seconds=_env_int("MACD_V2_PROVIDER_EMPTY_OUTPUT_FALLBACK_SECONDS", 1800),
-        local_param_mutation_attempts=_env_int("MACD_V2_LOCAL_PARAM_MUTATION_ATTEMPTS", 12),
         prompt_max_output_tokens=_env_int("MACD_V2_PROMPT_MAX_OUTPUT_TOKENS", 12000),
         max_recent_journal_entries=_env_int("MACD_V2_MAX_RECENT_JOURNAL_ENTRIES", 12),
     )
