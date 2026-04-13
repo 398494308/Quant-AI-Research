@@ -104,11 +104,52 @@ python3 scripts/research_macd_aggressive_v2.py --once --no-optimize
 - 平均手续费拖累 `<= 6%`
 - 压力测试最差收益 `>= -8%`
 
+以上全部可通过 `config/research_v2.env` 覆盖。
+
+## 评分系数
+
+评分公式里有很多权重和惩罚系数，以前全部写死在代码里。现在已经全部提取到 `ScoringConfig` 结构中，可以通过环境变量单独调整:
+
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `MACD_V2_SCORE_WEIGHTED_RETURN_W` | `0.42` | 加权评估收益的权重 |
+| `MACD_V2_SCORE_MEDIAN_RETURN_W` | `0.24` | 中位数收益的权重 |
+| `MACD_V2_SCORE_P25_RETURN_W` | `0.20` | P25 收益的权重 |
+| `MACD_V2_SCORE_HOLDOUT_RETURN_W` | `0.18` | 留出窗口收益的权重 |
+| `MACD_V2_SCORE_SORTINO_W` | `4.0` | Sortino 指标的乘数 |
+| `MACD_V2_SCORE_SHARPE_W` | `2.0` | Sharpe 指标的乘数 |
+| `MACD_V2_SCORE_PROFIT_FACTOR_W` | `3.0` | 盈亏比的乘数 |
+| `MACD_V2_SCORE_DD_THRESHOLD` | `32.0` | 回撤惩罚起点（%） |
+| `MACD_V2_SCORE_DD_W` | `0.45` | 回撤惩罚每 1% 扣多少分 |
+| `MACD_V2_SCORE_FEE_THRESHOLD` | `4.0` | 手续费惩罚起点（%） |
+| `MACD_V2_SCORE_FEE_W` | `1.60` | 手续费惩罚每 1% 扣多少分 |
+| `MACD_V2_SCORE_LIQ_W` | `8.0` | 每次爆仓扣多少分 |
+| `MACD_V2_SCORE_TAIL_THRESHOLD` | `10.0` | 尾部亏损惩罚起点（%） |
+| `MACD_V2_SCORE_TAIL_W` | `0.28` | 尾部亏损惩罚每 1% 扣多少分 |
+| `MACD_V2_SCORE_CONSISTENCY_THRESHOLD` | `16.0` | 一致性惩罚起点（标准差%） |
+| `MACD_V2_SCORE_CONSISTENCY_W` | `0.25` | 一致性惩罚每 1% 扣多少分 |
+| `MACD_V2_SCORE_HOLDOUT_GAP_W` | `0.18` | 留出落差惩罚的乘数 |
+| `MACD_V2_SCORE_STRESS_THRESHOLD` | `4.0` | 压力测试惩罚起点（%） |
+| `MACD_V2_SCORE_STRESS_W` | `0.20` | 压力测试惩罚每 1% 扣多少分 |
+
 大白话:
 
-- 不是说“某一段很猛”就行。
-- 还得证明它不是只会挑简单题做。
-- 还得证明交易成本一变坏，它不会立刻散架。
+- 以前这些数字全部直接写在代码里，想调就得改代码。
+- 现在只要在 `config/research_v2.env` 里加一行 `MACD_V2_SCORE_DD_W=0.30` 就能把回撤惩罚调轻。
+- 默认值和以前完全一样，不改的话行为不变。
+
+## 参数安全范围
+
+策略的每个可调参数现在都有硬性上下界。不管是 AI 生成的还是本地兜底生成的候选，参数超出范围就直接拒绝:
+
+- ADX 阈值: `5` ~ `50`
+- lookback 周期: `3` ~ `60`
+- RSI 范围: 各自有合理上下界
+- EMA 周期: 快线 `3` ~ `30`，慢线 `10` ~ `100`
+- MACD 参数: `fast 5~20`，`slow 15~40`，`signal 3~15`
+- 成交量比率: `0.5` ~ `5.0`
+
+范围定义在 `src/research_v2/strategy_code.py` 的 `PARAM_BOUNDS` 字典里。
 
 ## 当前关键指标
 

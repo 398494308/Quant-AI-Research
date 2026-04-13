@@ -34,6 +34,46 @@ class StrategyCandidate:
 
 PARAM_BLOCK_PATTERN = re.compile(r"# PARAMS_START\s*\nPARAMS = (.*?)\n# PARAMS_END", re.DOTALL)
 
+# 参数硬性范围：防止参数漂移到无意义的区域
+# 格式: key -> (最小值, 最大值)
+PARAM_BOUNDS: dict[str, tuple[float, float]] = {
+    # 入场 ADX 阈值
+    "intraday_adx_min": (5, 50),
+    "hourly_adx_min": (5, 50),
+    "fourh_adx_min": (5, 50),
+    "breakout_adx_min": (5, 50),
+    "breakdown_adx_min": (5, 50),
+    # lookback 周期
+    "breakout_lookback": (3, 60),
+    "breakdown_lookback": (3, 60),
+    # RSI 范围
+    "breakout_rsi_min": (10, 70),
+    "breakout_rsi_max": (30, 95),
+    "breakdown_rsi_min": (5, 70),
+    "breakdown_rsi_max": (30, 90),
+    # 成交量
+    "breakout_volume_ratio_min": (0.5, 5.0),
+    "breakdown_volume_ratio_min": (0.5, 5.0),
+    # K 线形态
+    "breakout_body_ratio_min": (0.1, 0.9),
+    "breakdown_body_ratio_min": (0.1, 0.9),
+    "breakout_close_pos_min": (0.1, 0.95),
+    "breakdown_close_pos_max": (0.05, 0.9),
+    # EMA 周期
+    "intraday_ema_fast": (3, 30),
+    "intraday_ema_slow": (10, 60),
+    "hourly_ema_fast": (3, 30),
+    "hourly_ema_slow": (10, 100),
+    "fourh_ema_fast": (3, 30),
+    "fourh_ema_slow": (10, 100),
+    # MACD 参数
+    "macd_fast": (5, 20),
+    "macd_slow": (15, 40),
+    "macd_signal": (3, 15),
+    # 成交量回看
+    "volume_lookback": (5, 40),
+}
+
 LOCAL_PARAM_GROUPS: dict[str, tuple[str, ...]] = {
     "breakout_entry": (
         "breakout_adx_min",
@@ -154,25 +194,39 @@ def validate_strategy_source(source: str) -> None:
             if module in banned_import_modules:
                 raise StrategySourceError(f"banned import in strategy source: {module}")
 
-    extract_params(normalized)
+    params = extract_params(normalized)
+    for key, value in params.items():
+        if key in PARAM_BOUNDS and isinstance(value, (int, float)) and not isinstance(value, bool):
+            lo, hi = PARAM_BOUNDS[key]
+            if value < lo or value > hi:
+                raise StrategySourceError(
+                    f"parameter {key}={value} out of bounds [{lo}, {hi}]"
+                )
 
 
 # ==================== 本地兜底候选 ====================
 
 
-def _numeric_step(value: object, rng: random.Random) -> object:
+def _numeric_step(value: object, rng: random.Random, key: str = "") -> object:
     if isinstance(value, bool):
         return not value
     if isinstance(value, int) and not isinstance(value, bool):
         step = max(1, round(abs(value) * 0.12))
         direction = rng.choice((-1, 1))
-        return max(1, value + direction * rng.randint(1, step))
+        result = max(1, value + direction * rng.randint(1, step))
+        if key in PARAM_BOUNDS:
+            lo, hi = PARAM_BOUNDS[key]
+            result = int(min(max(result, lo), hi))
+        return result
     if isinstance(value, float):
         step = max(0.0001, abs(value) * 0.10)
         direction = rng.choice((-1.0, 1.0))
         candidate = value + direction * step * rng.uniform(0.4, 1.0)
         if value > 0:
             candidate = max(value * 0.55, candidate)
+        if key in PARAM_BOUNDS:
+            lo, hi = PARAM_BOUNDS[key]
+            candidate = min(max(candidate, lo), hi)
         return round(candidate, 10)
     return value
 
@@ -195,7 +249,7 @@ def build_local_param_candidate(
         changed_keys = []
         for key in selected_keys:
             current = updated_params[key]
-            candidate = _numeric_step(current, rng)
+            candidate = _numeric_step(current, rng, key=key)
             if candidate == current:
                 continue
             updated_params[key] = candidate

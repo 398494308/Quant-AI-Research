@@ -175,7 +175,7 @@ def _run_stress_backtests() -> list[dict[str, Any]]:
 def evaluate_current_strategy() -> EvaluationReport:
     base_results = _run_base_backtests()
     stress_results = _run_stress_backtests()
-    return summarize_evaluation(base_results, stress_results, RUNTIME.gates)
+    return summarize_evaluation(base_results, stress_results, RUNTIME.gates, RUNTIME.scoring)
 
 
 # ==================== 候选策略生成 ====================

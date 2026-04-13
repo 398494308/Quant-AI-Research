@@ -1194,7 +1194,7 @@ def _append_memory(bucket, changes, overall, gate):
             "direction_signature": direction_signature,
         }
     )
-    memory[bucket] = memory[bucket][-16:]
+    memory[bucket] = memory[bucket][-50:]
     MEMORY_FILE.write_text(json.dumps(memory, ensure_ascii=False, indent=2))
 
 
@@ -1356,7 +1356,7 @@ def run_iteration(iteration_id, use_model_optimization=True):
         return "accepted"
 
     _append_memory("rejected", changes, metrics["promotion_score"], gate_reason)
-    plateau_pass_streak = plateau_pass_streak + 1 if gate_passed else 0
+    plateau_pass_streak += 1
     shutil.copy(BACKUP_FILE, STRATEGY_FILE)
     shutil.copy(BACKTEST_BACKUP_FILE, BACKTEST_FILE)
     reload_strategy()
