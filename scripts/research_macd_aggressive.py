@@ -22,7 +22,7 @@ sys.path.insert(0, str(SRC_DIR))
 
 import backtest_macd_aggressive as backtest_module
 import strategy_macd_aggressive as strategy_module
-from openai_strategy_client import (
+from codex_exec_client import (
     StrategyGenerationTransientError,
     describe_client_config,
     generate_json_object,
@@ -838,17 +838,6 @@ def _ordered_search_groups(search_policy):
     return ordered
 
 
-def _is_provider_empty_output(exc):
-    return "Responses API returned no text output" in str(exc)
-
-
-def _provider_empty_output_message(exc):
-    for line in str(exc).splitlines():
-        if "Responses API returned no text output" in line:
-            return line
-    return "provider returned empty output"
-
-
 def _json_schema_type_for_value(value):
     if isinstance(value, bool):
         return "boolean"
@@ -970,9 +959,7 @@ def optimize_strategy():
                     "strict": True,
                 },
             )
-        except Exception as exc:
-            if _is_provider_empty_output(exc):
-                raise StrategyGenerationTransientError(_provider_empty_output_message(exc)) from exc
+        except Exception:
             raise
 
         guarded_strategy_params = _apply_local_search_guardrails(

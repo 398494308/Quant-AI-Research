@@ -106,7 +106,7 @@ def _compact_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
 
     # 参数有效区间（从 accepted 中提取 metrics 范围）
     metric_keys = [
-        "weighted_eval_return", "holdout_avg_return", "worst_drawdown",
+        "eval_avg_return", "holdout_avg_return", "worst_drawdown",
         "avg_fee_drag", "daily_sharpe", "daily_sortino", "profit_factor",
     ]
     accepted_metric_ranges: dict[str, dict[str, float]] = {}
@@ -343,4 +343,3 @@ def has_recent_code_hash(entries: list[dict[str, Any]], code_hash: str, lookback
         if entry.get("code_hash") == code_hash:
             return True
     return False
-

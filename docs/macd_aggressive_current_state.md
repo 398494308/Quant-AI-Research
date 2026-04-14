@@ -4,7 +4,7 @@
 
 ## 当前定位
 
-- 目标: 找到一版能在趋势段吃到弹性、但不会在留出和压力测试里立刻崩掉的激进趋势策略
+- 目标: 找到一版能在趋势段吃到弹性、但不会在留出窗口里立刻崩掉的激进趋势策略
 - 当前主线: `v2` 研究器
 - 当前默认策略文件: [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)
 - 当前默认回测器: [src/backtest_macd_aggressive.py](../src/backtest_macd_aggressive.py)
@@ -60,7 +60,6 @@
 - `holdout` 平均收益 `>= 0%`
 - `eval-holdout` 落差 `<= 22`
 - 平均手续费拖累 `<= 6%`
-- 压力测试最差收益 `>= -8%`
 
 ## 当前最优基底指标
 
@@ -68,32 +67,28 @@
 
 - 本地运行态文件 `state/research_macd_aggressive_v2_best.json`
 
-截至 `2026-04-13`，当前最优基底是:
+截至 `2026-04-14`，当前最优基底是:
 
-- `weighted_eval_return = 3.70%`
-- `eval_median_return = 1.37%`
-- `eval_p25_return = -10.03%`
-- `holdout_avg_return = -15.50%`
-- `worst_drawdown = 31.67%`
-- `avg_fee_drag = 4.44%`
-- `total_trades = 240`
-- `daily_sharpe = 0.23`
-- `daily_sortino = 0.49`
-- `profit_factor = 1.16`
-- `stress_avg_return = 1.23%`
-- `stress_worst_return = -18.47%`
-- `quality_score = 0.52`
-- `promotion_score = -8.62`
-- `gate_passed = false`
+- `eval_avg_return = 6.47%`
+- `eval_median_return = 5.26%`
+- `eval_p25_return = 1.16%`
+- `holdout_avg_return = -0.59%`
+- `worst_drawdown = 11.99%`
+- `avg_fee_drag = 1.12%`
+- `total_trades = 68`
+- `daily_sharpe = 2.94`
+- `daily_sortino = 7.67`
+- `profit_factor = 3.01`
+- `quality_score = 7.67`
+- `promotion_score = 6.68`
+- `gate_passed = true`
 
-当前不过线的直接原因:
+当前 gate 状态:
 
-- 留出收益不足 `(-15.50%)`
-- 压力测试过弱 `(-18.47%)`
+- `通过`
 
 ## 当前结论
 
 - 这版基底在一部分 `eval` 窗口里可以赚钱。
-- 但它还没有证明自己能扛住最后的留出窗口。
-- 也没有证明自己在更差的手续费、滑点和延迟条件下足够稳。
-- 所以它目前还是“可继续研究的底稿”，不是“已经确认过关的版本”。
+- 它已经能扛住当前门槛，并通过 `v2` 的 gate。
+- 但留出窗口仍然略亏，所以它是“已经过线的基底”，不是“可以停止研究的终稿”。

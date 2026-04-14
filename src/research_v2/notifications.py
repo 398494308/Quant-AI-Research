@@ -98,7 +98,7 @@ def build_discord_summary_message(
         ("窗口", window_text),
         (
             "收益",
-            f"{metrics['weighted_eval_return']:.2f}%"
+            f"{metrics['eval_avg_return']:.2f}%"
             + (f" / {metrics['holdout_avg_return']:.2f}%" if holdout_window_count > 0 else ""),
         ),
         ("评分", f"{metrics['quality_score']:.2f} / {metrics['promotion_score']:.2f}"),
@@ -107,8 +107,6 @@ def build_discord_summary_message(
         ("总交易", str(int(metrics["total_trades"]))),
         ("手续费拖累", f"{metrics['avg_fee_drag']:.2f}%"),
     ]
-    if "stress_worst_return" in metrics:
-        rows.append(("压测最差", f"{metrics['stress_worst_return']:.2f}%"))
 
     parts = [
         f"**{title}**",

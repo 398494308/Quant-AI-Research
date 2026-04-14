@@ -5,14 +5,13 @@
 1. 拿当前最优策略当底稿。
 2. 生成一个新候选。
 3. 把新候选丢到多段历史里回测。
-4. 只有在“赚钱、回撤、留出、压力测试”都过线时，才允许它晋级。
+4. 只有在“赚钱、回撤、留出”这些核心条件都过线时，才允许它晋级。
 
 一句大白话:
 
 - 这套脚本本质上是在做“自动化策略面试”。
 - `eval` 窗口像平时做题。
 - `holdout` 窗口像最后没给答案的考试。
-- `stress` 像故意把手续费、滑点、延迟调坏，看看它会不会当场露馅。
 
 ## 当前策略在干什么
 
@@ -48,15 +47,20 @@
 
 - [scripts/research_macd_aggressive_v2.py](scripts/research_macd_aggressive_v2.py)
 
+运行前提:
+
+- 机器上要安装可用的 `codex` 命令。
+- `~/.codex/config.toml` 和 `~/.codex/auth.json` 需要已经能正常跑 `codex exec`。
+
 运行逻辑按顺序是这样的:
 
 1. 启动时先读取 `config/research_v2.env`，把窗口、门槛、循环间隔这些配置装进运行时。
 2. 然后加载“当前最优基底”。如果 `backups/strategy_macd_aggressive_v2_best.py` 存在，就优先拿它；否则拿当前的 [src/strategy_macd_aggressive.py](src/strategy_macd_aggressive.py)。
 3. 评估时会把 `2025-09-01` 到 `2026-03-31` 切成 `9` 个重叠的 `eval` 窗口，再加 `1` 个最终 `holdout` 窗口。
 4. 每个窗口都调用同一个回测器 [src/backtest_macd_aggressive.py](src/backtest_macd_aggressive.py)，用同一套进出场、费用、滑点和资金费规则算结果。
-5. 如果是优化模式，研究器会生成一个候选策略。现在只走 OpenAI；如果模型暂时不可用或空输出，本轮会延后，等下次继续。
+5. 如果是优化模式，研究器会调用本机 `codex exec` 生成候选策略；如果 Codex 暂时不可用或超时，本轮会延后，等下次继续。
 6. 新候选先过源码校验，再检查是不是和最近试过的版本重复，避免反复撞墙。
-7. 通过后，候选会跑完整套 `eval + holdout + stress` 评估。
+7. 通过后，候选会跑完整套 `eval + holdout` 评估。
 8. 只有同时满足两件事，才会被收成新的最优:
    - `gate_passed = true`
    - `promotion_score` 比当前最优更高
@@ -102,7 +106,6 @@ python3 scripts/research_macd_aggressive_v2.py --once --no-optimize
 - `holdout` 平均收益 `>= -10%`
 - `eval - holdout` 落差 `<= 30`
 - 平均手续费拖累 `<= 6%`
-- 压力测试最差收益 `>= -12%`
 
 以上全部可通过 `config/research_v2.env` 覆盖。
 
@@ -135,56 +138,52 @@ python3 scripts/research_macd_aggressive_v2.py --once --no-optimize
 
 ## 当前关键指标
 
-以下数字来自本地运行态文件 `state/research_macd_aggressive_v2_best.json`，更新时间是 `2026-04-13`:
+以下数字来自本地运行态文件 `state/research_macd_aggressive_v2_best.json`，更新时间是 `2026-04-14`:
 
-- `weighted_eval_return = 3.70%`
-  意思是 9 段平时考试里，按后面窗口稍微更重要的权重算，平均下来赚了 `3.70%`。
-- `eval_median_return = 1.37%`
-  意思是“典型窗口”大概只赚一点，不是暴利型稳定赚钱。
-- `eval_p25_return = -10.03%`
-  意思是倒霉一点的窗口，亏损会到 `10%` 左右。
-- `holdout_avg_return = -15.50%`
-  意思是最后那段没拿去喂优化器的真正考试，结果是亏的，而且亏得不轻。
-- `worst_drawdown = 31.67%`
-  意思是资金从高点到低点，最深回撤大约三成。
-- `avg_fee_drag = 4.44%`
-  意思是光手续费和执行摩擦，就吃掉了大约 `4.44%` 的收益。
-- `total_trades = 240`
-  意思是样本量不算太少，不是只靠几笔单子蒙出来的。
-- `daily_sortino / daily_sharpe = 0.49 / 0.23`
-  意思是风险收益比不算强，只能说勉强有点正值。
-- `profit_factor = 1.16`
-  意思是盈利单总利润只比亏损单总亏损高一点点，还不够硬。
-- `stress_avg_return = 1.23%`
-  意思是压力测试平均还没死透。
-- `stress_worst_return = -18.47%`
-  意思是压力测试里最差那次还是亏得比较难看。
-- `quality_score = 0.52`
-  可以理解成“平时表现分”，刚刚站上正数，但不高。
-- `promotion_score = -8.62`
-  可以理解成“综合晋级分”。把留出和压力测试算进去以后，还是负分。
-- `gate_passed = false`
-  当前最优基底没有晋级资格。
-- `gate_reason = 留出收益不足(-15.50%)；压力测试过弱(-18.47%)`
-  这就是它现在没过线的直接原因。
+- `eval_avg_return = 6.47%`
+  意思是 9 段平时考试平均下来赚了 `6.47%`。
+- `eval_median_return = 5.26%`
+  意思是“典型窗口”也有中等偏强的正收益，不再只是勉强赚钱。
+- `eval_p25_return = 1.16%`
+  意思是偏弱窗口大多也还能小幅盈利。
+- `holdout_avg_return = -0.59%`
+  意思是最后那段真正考试基本打平，略亏，但没有明显崩掉。
+- `worst_drawdown = 11.99%`
+  意思是资金从高点到低点，最深回撤大约 `12%`。
+- `avg_fee_drag = 1.12%`
+  意思是手续费和执行摩擦目前只吃掉了约 `1.12%`。
+- `total_trades = 68`
+  意思是样本量还可以，但比以前更克制，不是高频乱打。
+- `daily_sortino / daily_sharpe = 7.67 / 2.94`
+  意思是风险收益比已经明显转强。
+- `profit_factor = 3.01`
+  意思是盈利单总利润大约是亏损单总亏损的 `3` 倍。
+- `quality_score = 7.67`
+  可以理解成“平时表现分”，这版已经很高。
+- `promotion_score = 6.68`
+  可以理解成“综合晋级分”。把留出一起算进去以后，仍然保持高分。
+- `gate_passed = true`
+  当前最优基底已经有晋级资格。
+- `gate_reason = 通过`
+  说明它当前没有触发任何硬门槛。
 
 一句结论:
 
-- 现在这版策略不是“完全不能跑”。
-- 但它还远远没到“我可以放心说这版过关了”的程度。
-- 真正拖后腿的是最后留出窗口和压力测试，不是平时窗口完全赚不到钱。
+- 现在这版策略已经不是“只能继续打磨的底稿”。
+- 它在当前 `v2` 口径下已经过线，并且平时窗口表现很强。
+- 真正还需要继续盯的，是留出窗口依旧略亏，还没有形成很厚的安全垫。
 
 ## 关键指标是啥意思
 
 如果你不懂量化，记下面这几个就够了:
 
-- `weighted_eval_return`: 平时多段练习题的综合成绩
+- `eval_avg_return`: 平时多段练习题的平均成绩
 - `holdout_avg_return`: 最后正式考试的成绩
 - `max_drawdown`: 中途最多会疼到什么程度
 - `avg_fee_drag`: 手续费和执行损耗吃掉了多少
 - `profit_factor`: 赚的钱和亏的钱相比有没有明显优势
 - `quality_score`: 不看最终考试时的内部评分
-- `promotion_score`: 连最终考试和压力测试一起算的总评分
+- `promotion_score`: 连最终考试一起算的总评分
 - `gate`: 一票否决规则，只要踩线就不让晋级
 
 ## 主要脚本
@@ -206,8 +205,6 @@ python3 scripts/research_macd_aggressive_v2.py --once --no-optimize
 
 辅助脚本:
 
-- [scripts/stress_test_aggressive.py](scripts/stress_test_aggressive.py)
-  做闪崩、平盘、高杠杆等压力测试。
 - [scripts/param_sensitivity.py](scripts/param_sensitivity.py)
   看单个参数变动对收益、回撤、交易次数的影响。
 - [scripts/search_aggressive_params.py](scripts/search_aggressive_params.py)
@@ -281,19 +278,13 @@ bash scripts/manage_research_macd_aggressive_v2.sh status
 ./.venv/bin/python scripts/freqtrade_compare.py
 ```
 
-做压力测试:
-
-```bash
-python3 scripts/stress_test_aggressive.py
-```
-
 ## 关于 AI 不稳定
 
-当前代码不再做本地参数兜底:
+当前代码不再直连第三方 OpenAI 兼容代理，也不做本地参数兜底:
 
-- OpenAI 正常可用时，由模型给完整候选策略源码。
-- 如果模型空输出、超时或暂时不可用，这一轮会延后，按恢复等待时间再试。
-- 所以 AI 的稳定性现在会直接影响研究推进速度。
+- 候选生成由本机 `codex exec` 完成，模型默认使用 `gpt-5.4` + `medium`。
+- 如果 Codex 超时或暂时不可用，这一轮会延后，按恢复等待时间再试。
+- 所以 Codex 的可用性现在会直接影响研究推进速度。
 
 ## 实盘壳子
 

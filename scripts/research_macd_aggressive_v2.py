@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+import time
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,8 +27,8 @@ sys.path.insert(0, str(SRC_DIR))
 
 import backtest_macd_aggressive as backtest_module
 import strategy_macd_aggressive as strategy_module
-from openai_strategy_client import StrategyGenerationTransientError, build_json_text_format, generate_json_object
-from research_v2.config import ResearchRuntimeConfig, StressScenario, load_research_runtime_config
+from codex_exec_client import StrategyGenerationTransientError, build_json_text_format, generate_json_object
+from research_v2.config import ResearchRuntimeConfig, load_research_runtime_config
 from research_v2.evaluation import EvaluationReport, summarize_evaluation
 from research_v2.journal import append_journal_entry, build_journal_prompt_summary, has_recent_code_hash, load_journal_entries, maybe_compact
 from research_v2.notifications import build_discord_summary_message, load_discord_config, send_discord_message
@@ -42,7 +43,7 @@ from research_v2.strategy_code import (
     validate_strategy_source,
     write_strategy_source,
 )
-from research_v2.windows import ResearchWindow, build_research_windows
+from research_v2.windows import build_research_windows
 
 
 # ==================== 全局状态 ====================
@@ -131,75 +132,12 @@ def _run_base_backtests() -> list[dict[str, Any]]:
     return results
 
 
-def _stress_exit_params(scenario: StressScenario) -> dict[str, Any]:
-    params = dict(backtest_module.EXIT_PARAMS)
-    params["okx_maker_fee_rate"] = float(params.get("okx_maker_fee_rate", 0.0)) * scenario.fee_multiplier
-    params["okx_taker_fee_rate"] = float(params.get("okx_taker_fee_rate", 0.0)) * scenario.fee_multiplier
-    params["slippage_pct"] = float(params.get("slippage_pct", 0.0)) * scenario.slippage_multiplier
-    params["entry_delay_minutes"] = int(params.get("entry_delay_minutes", 0)) + scenario.entry_delay_delta
-    return params
-
-
-def _stress_windows() -> list[ResearchWindow]:
-    eval_windows = [window for window in WINDOWS if window.group == "eval"]
-    holdout_windows = [window for window in WINDOWS if window.group == "holdout"]
-    selected: list[ResearchWindow] = []
-    if eval_windows:
-        selected.append(eval_windows[-1])
-    if holdout_windows:
-        selected.append(holdout_windows[-1])
-    return selected
-
-
-def _run_stress_backtests() -> list[dict[str, Any]]:
-    if not RUNTIME.stress_enabled:
-        return []
-    selected_windows = _stress_windows()
-    if not selected_windows:
-        return []
-    results: list[dict[str, Any]] = []
-    for scenario in RUNTIME.stress_scenarios:
-        exit_params = _stress_exit_params(scenario)
-        for window in selected_windows:
-            result = backtest_module.backtest_macd_aggressive(
-                strategy_func=strategy_module.strategy,
-                intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
-                hourly_file=backtest_module.DEFAULT_HOURLY_FILE,
-                start_date=window.start_date,
-                end_date=window.end_date,
-                strategy_params=strategy_module.PARAMS,
-                exit_params=exit_params,
-                include_diagnostics=True,
-            )
-            results.append(
-                {
-                    "scenario": scenario.name,
-                    "label": scenario.label,
-                    "window": window.label,
-                    "result": result,
-                }
-            )
-    return results
-
-
 def evaluate_current_strategy() -> EvaluationReport:
     base_results = _run_base_backtests()
-    stress_results = _run_stress_backtests()
-    return summarize_evaluation(base_results, stress_results, RUNTIME.gates)
+    return summarize_evaluation(base_results, RUNTIME.gates)
 
 
 # ==================== 候选策略生成 ====================
-
-
-def _is_provider_empty_output(exc: Exception) -> bool:
-    return "Responses API returned no text output" in str(exc)
-
-
-def _provider_empty_output_message(exc: Exception) -> str:
-    for line in str(exc).splitlines():
-        if "Responses API returned no text output" in line:
-            return line
-    return "provider returned empty output"
 
 
 def _candidate_from_payload(payload: dict[str, Any]) -> StrategyCandidate:
@@ -254,9 +192,7 @@ def build_strategy_candidate(base_source: str) -> StrategyCandidate:
         return _build_model_candidate(base_source, journal_entries)
     except StrategyGenerationTransientError:
         raise
-    except Exception as exc:
-        if _is_provider_empty_output(exc):
-            raise StrategyGenerationTransientError(_provider_empty_output_message(exc)) from exc
+    except Exception:
         raise
 
 

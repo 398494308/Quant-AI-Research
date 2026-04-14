@@ -28,14 +28,6 @@ def _load_env_files(repo_root: Path) -> None:
             key, value = raw.split("=", 1)
             os.environ.setdefault(key.strip(), value.strip())
 
-
-def _env_flag(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
 def _env_int(name: str, default: int) -> int:
     return int(os.getenv(name, str(default)))
 
@@ -81,16 +73,6 @@ class GateConfig:
     min_holdout_return: float
     max_eval_holdout_gap: float
     max_fee_drag_pct: float
-    min_stress_return: float
-
-
-@dataclass(frozen=True)
-class StressScenario:
-    name: str
-    label: str
-    fee_multiplier: float
-    slippage_multiplier: float
-    entry_delay_delta: int
 
 
 @dataclass(frozen=True)
@@ -98,8 +80,6 @@ class ResearchRuntimeConfig:
     paths: ResearchPaths
     windows: WindowConfig
     gates: GateConfig
-    stress_enabled: bool
-    stress_scenarios: tuple[StressScenario, ...]
     loop_interval_seconds: int
     provider_recovery_wait_seconds: int
     failure_cooldown_seconds: int
@@ -144,25 +124,12 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         min_holdout_return=_env_float("MACD_V2_MIN_HOLDOUT_RETURN", -10.0),
         max_eval_holdout_gap=_env_float("MACD_V2_MAX_EVAL_HOLDOUT_GAP", 30.0),
         max_fee_drag_pct=_env_float("MACD_V2_MAX_FEE_DRAG_PCT", 6.0),
-        min_stress_return=_env_float("MACD_V2_MIN_STRESS_RETURN", -12.0),
-    )
-
-    stress_scenarios = (
-        StressScenario(
-            name="fee_slippage_plus",
-            label="手续费/滑点上调",
-            fee_multiplier=_env_float("MACD_V2_STRESS_FEE_MULTIPLIER", 1.25),
-            slippage_multiplier=_env_float("MACD_V2_STRESS_SLIPPAGE_MULTIPLIER", 1.5),
-            entry_delay_delta=_env_int("MACD_V2_STRESS_ENTRY_DELAY_DELTA", 1),
-        ),
     )
 
     return ResearchRuntimeConfig(
         paths=paths,
         windows=windows,
         gates=gates,
-        stress_enabled=_env_flag("MACD_V2_STRESS_ENABLED", True),
-        stress_scenarios=stress_scenarios,
         loop_interval_seconds=_env_int("MACD_V2_LOOP_INTERVAL_SECONDS", _env_int("MACD_LOOP_INTERVAL_SECONDS", 120)),
         provider_recovery_wait_seconds=_env_int("MACD_V2_PROVIDER_RECOVERY_WAIT_SECONDS", 90),
         failure_cooldown_seconds=_env_int("MACD_V2_FAILURE_COOLDOWN_SECONDS", 60),

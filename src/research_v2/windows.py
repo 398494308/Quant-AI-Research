@@ -84,18 +84,6 @@ def build_research_windows(config: WindowConfig) -> list[ResearchWindow]:
     if len(eval_windows) < 4:
         raise ValueError(f"not enough eval windows: {len(eval_windows)}")
 
-    weight_span = max(1, len(eval_windows) - 1)
-    weighted_eval_windows = [
-        ResearchWindow(
-            group=item.group,
-            label=item.label,
-            start_date=item.start_date,
-            end_date=item.end_date,
-            weight=1.0 + 0.45 * (idx / weight_span),
-        )
-        for idx, item in enumerate(eval_windows)
-    ]
-
     holdout_window = ResearchWindow(
         group="holdout",
         label="留出1",
@@ -103,4 +91,4 @@ def build_research_windows(config: WindowConfig) -> list[ResearchWindow]:
         end_date=end_dt.strftime("%Y-%m-%d"),
         weight=1.0,
     )
-    return [*weighted_eval_windows, holdout_window]
+    return [*eval_windows, holdout_window]

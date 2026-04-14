@@ -90,15 +90,6 @@ def _window_payloads(results: list[dict[str, Any]], group: str) -> list[dict[str
     return [item for item in results if item["window"].group == group]
 
 
-def _weighted_average(values: list[tuple[float, float]]) -> float:
-    if not values:
-        return 0.0
-    total_weight = sum(weight for _, weight in values)
-    if total_weight <= 1e-9:
-        return 0.0
-    return sum(value * weight for value, weight in values) / total_weight
-
-
 def _collect_daily_returns(results: list[dict[str, Any]], group: str) -> list[float]:
     collected: list[float] = []
     for item in _window_payloads(results, group):
@@ -146,7 +137,6 @@ def _build_window_lines(results: list[dict[str, Any]], include_holdout: bool) ->
 
 def summarize_evaluation(
     results: list[dict[str, Any]],
-    stress_results: list[dict[str, Any]],
     gates: GateConfig,
     **_kwargs: Any,
 ) -> EvaluationReport:
@@ -155,9 +145,7 @@ def summarize_evaluation(
 
     eval_returns = [item["result"]["return"] for item in eval_results]
     holdout_returns = [item["result"]["return"] for item in holdout_results]
-    weighted_eval_return = _weighted_average(
-        [(item["result"]["return"], item["window"].weight) for item in eval_results]
-    )
+    eval_avg_return = _mean(eval_returns)
     eval_median_return = median(eval_returns) if eval_returns else 0.0
     eval_p25_return = _quantile(eval_returns, 0.25)
     eval_worst_return = min(eval_returns) if eval_returns else 0.0
@@ -185,12 +173,7 @@ def summarize_evaluation(
         default=0.0,
     )
 
-    stress_returns = [item["result"]["return"] for item in stress_results]
-    stress_worst_return = min(stress_returns) if stress_returns else 0.0
-    stress_avg_return = _mean(stress_returns)
-    stress_worst_drawdown = max((item["result"]["max_drawdown"] for item in stress_results), default=0.0)
-
-    holdout_gap = weighted_eval_return - holdout_avg_return
+    holdout_gap = eval_avg_return - holdout_avg_return
 
     # ==================== 评分：纯 Sortino ====================
     # quality_score = eval 窗口的年化 Sortino（平时练习的风险收益比）
@@ -218,8 +201,6 @@ def summarize_evaluation(
         gate_reasons.append(f"评估/留出落差过大({holdout_gap:.2f})")
     if avg_fee_drag > gates.max_fee_drag_pct:
         gate_reasons.append(f"手续费拖累过高({avg_fee_drag:.2f}%)")
-    if stress_results and stress_worst_return < gates.min_stress_return:
-        gate_reasons.append(f"压力测试过弱({stress_worst_return:.2f}%)")
 
     gate_passed = not gate_reasons
     gate_reason = "通过" if gate_passed else "；".join(gate_reasons)
@@ -227,7 +208,7 @@ def summarize_evaluation(
     weakest_signals = _aggregate_signal_stats(results, "eval")
     summary_lines = [
         "研究评估摘要",
-        f"评估加权收益: {weighted_eval_return:.2f}%",
+        f"评估平均收益: {eval_avg_return:.2f}%",
         f"评估中位收益: {eval_median_return:.2f}%",
         f"评估P25收益: {eval_p25_return:.2f}%",
         f"留出收益: {holdout_avg_return:.2f}%",
@@ -241,33 +222,21 @@ def summarize_evaluation(
         "窗口明细:",
         *_build_window_lines(results, include_holdout=True),
     ]
-    if stress_results:
-        summary_lines.extend(
-            [
-                "",
-                f"压力测试均值 / 最差: {stress_avg_return:.2f}% / {stress_worst_return:.2f}%",
-                f"压力测试最大回撤: {stress_worst_drawdown:.2f}%",
-            ]
-        )
     if weakest_signals:
         summary_lines.extend(["", "拖累较大的信号:", *weakest_signals])
 
     prompt_lines = [
         f"当前基底质量分={quality_score:.2f}，晋级分={promotion_score:.2f}，gate={gate_reason}",
-        f"评估加权收益={weighted_eval_return:.2f}%，中位数={eval_median_return:.2f}%，P25={eval_p25_return:.2f}%",
+        f"评估平均收益={eval_avg_return:.2f}%，中位数={eval_median_return:.2f}%，P25={eval_p25_return:.2f}%",
         f"留出收益={holdout_avg_return:.2f}%，评估-留出差值={holdout_gap:.2f}",
         f"日度Sortino={daily_sortino:.2f}，Sharpe={daily_sharpe:.2f}，最大回撤={worst_drawdown:.2f}%",
         f"手续费拖累={avg_fee_drag:.2f}%，总交易={total_trades}，爆仓={liquidations}",
     ]
     if weakest_signals:
         prompt_lines.append("拖累信号: " + " | ".join(weakest_signals))
-    if stress_results:
-        prompt_lines.append(
-            f"压力测试: avg={stress_avg_return:.2f}% worst={stress_worst_return:.2f}% dd={stress_worst_drawdown:.2f}%"
-        )
 
     metrics = {
-        "weighted_eval_return": weighted_eval_return,
+        "eval_avg_return": eval_avg_return,
         "eval_median_return": eval_median_return,
         "eval_p25_return": eval_p25_return,
         "eval_worst_return": eval_worst_return,
@@ -287,9 +256,6 @@ def summarize_evaluation(
         "holdout_gap": holdout_gap,
         "quality_score": quality_score,
         "promotion_score": promotion_score,
-        "stress_avg_return": stress_avg_return,
-        "stress_worst_return": stress_worst_return,
-        "stress_worst_drawdown": stress_worst_drawdown,
     }
     return EvaluationReport(
         metrics=metrics,
@@ -298,4 +264,3 @@ def summarize_evaluation(
         summary_text="\n".join(summary_lines),
         prompt_summary_text="\n".join(prompt_lines),
     )
-

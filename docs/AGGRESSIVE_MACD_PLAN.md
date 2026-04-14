@@ -10,7 +10,6 @@
 - `backtest_macd_aggressive.py`
 - `research_macd_aggressive.py`
 - `compare_strategies.py`
-- `stress_test_aggressive.py`
 - `param_sensitivity.py`
 - `program_macd_aggressive.md`
 - `macd_aggressive_current_state.md`
@@ -26,5 +25,5 @@
 
 后续建议
 1. 先跑 `compare_strategies.py` 看 10 个月分布。
-2. 再跑 `stress_test_aggressive.py` 和 `param_sensitivity.py` 看风险上限。
+2. 再跑 `param_sensitivity.py` 看风险上限。
 3. 若需要自动调参，再启用 `research_macd_aggressive.py`。

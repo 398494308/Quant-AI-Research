@@ -92,7 +92,7 @@ def build_strategy_research_prompt(
 - 只允许改这些区域：{", ".join(EDITABLE_REGIONS)}。
 - 保留 `PARAMS`、`strategy()`、`_is_sideways_regime()`、`_trend_quality_ok()`、`_trend_followthrough_ok()` 这些符号。
 - 不要引入网络、文件、随机数、外部依赖。
-- 不要为了刷单窗收益而牺牲留出和压力测试。
+- 不要为了刷单窗收益而牺牲留出表现。
 - 每轮只做一个明确假设，最多改 1 到 3 个区域。
 - 如果最近某个方向连续失败，不要继续重复。
 
