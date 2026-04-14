@@ -35,6 +35,7 @@ from research_v2.notifications import build_discord_summary_message, load_discor
 from research_v2.prompting import build_candidate_response_schema, build_strategy_research_prompt
 from research_v2.strategy_code import (
     StrategyCandidate,
+    StrategyCoreFactor,
     StrategySourceError,
     build_diff_summary,
     load_strategy_source,
@@ -166,6 +167,22 @@ def evaluate_current_strategy(allow_early_reject: bool = False) -> EvaluationRep
 
 
 def _candidate_from_payload(payload: dict[str, Any]) -> StrategyCandidate:
+    core_factors: list[StrategyCoreFactor] = []
+    for item in payload.get("core_factors", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        thesis = str(item.get("thesis", "")).strip()
+        current_signal = str(item.get("current_signal", "")).strip()
+        if not name or not thesis or not current_signal:
+            continue
+        core_factors.append(
+            StrategyCoreFactor(
+                name=name,
+                thesis=thesis,
+                current_signal=current_signal,
+            )
+        )
     candidate = StrategyCandidate(
         candidate_id=str(payload["candidate_id"]).strip() or f"candidate-{int(time.time())}",
         hypothesis=str(payload["hypothesis"]).strip(),
@@ -173,6 +190,7 @@ def _candidate_from_payload(payload: dict[str, Any]) -> StrategyCandidate:
         change_tags=tuple(str(item).strip() for item in payload["change_tags"] if str(item).strip()),
         edited_regions=tuple(str(item).strip() for item in payload["edited_regions"] if str(item).strip()),
         expected_effects=tuple(str(item).strip() for item in payload["expected_effects"] if str(item).strip()),
+        core_factors=tuple(core_factors),
         strategy_code=normalize_strategy_source(str(payload["strategy_code"])),
     )
     if not candidate.change_tags:
@@ -333,6 +351,14 @@ def _build_journal_entry(
         "change_tags": list(candidate.change_tags),
         "edited_regions": list(candidate.edited_regions),
         "expected_effects": list(candidate.expected_effects),
+        "core_factors": [
+            {
+                "name": factor.name,
+                "thesis": factor.thesis,
+                "current_signal": factor.current_signal,
+            }
+            for factor in candidate.core_factors
+        ],
         "quality_score": quality_score,
         "promotion_score": promotion_score,
         "promotion_delta": promotion_score - base_promotion if promotion_score is not None else None,

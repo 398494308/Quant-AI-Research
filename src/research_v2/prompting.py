@@ -45,6 +45,21 @@ def build_candidate_response_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "maxItems": 5,
             },
+            "core_factors": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "thesis": {"type": "string"},
+                        "current_signal": {"type": "string"},
+                    },
+                    "required": ["name", "thesis", "current_signal"],
+                    "additionalProperties": False,
+                },
+                "minItems": 0,
+                "maxItems": 4,
+            },
             "strategy_code": {"type": "string"},
         },
         "required": [
@@ -54,6 +69,7 @@ def build_candidate_response_schema() -> dict[str, Any]:
             "change_tags",
             "edited_regions",
             "expected_effects",
+            "core_factors",
             "strategy_code",
         ],
         "additionalProperties": False,
@@ -110,6 +126,8 @@ def build_strategy_research_prompt(
 - 不要引入网络、文件、随机数、外部依赖。
 - 每轮只做一个明确假设，最多改 1 到 3 个区域。
 - 如果最近某个方向连续失败，不要继续重复。
+- 最近研究表是动态的；如果你识别出具有跨轮次解释力、值得持续追踪的新核心因子/指标，可以附带 `core_factors`。
+- 只有当该因子有明确依据，且足以影响后续多轮研究取舍时，才添加 `core_factors`；不要把一次性的局部现象包装成核心因子。
 
 你要优先解决：
 - 提高 Sortino（减少下行波动、提高收益）
@@ -121,6 +139,7 @@ def build_strategy_research_prompt(
 - 只输出 JSON。
 - `strategy_code` 字段里放完整的最新策略文件源码，不要 markdown。
 - `change_tags` 用简短标签描述方向，比如 `sideways_filter`, `breakout_entry`, `tighten_filter`, `reduce_false_breakout`。
+- `core_factors` 字段必须输出；如果当前没有足够强的新核心因子，就输出空数组 `[]`。如果填写具体因子，`name` 使用 ASCII snake_case，`thesis` 与 `current_signal` 必须使用简体中文。
 - `hypothesis`、`change_plan`、`expected_effects` 必须使用简体中文。
 - `candidate_id` 与 `change_tags` 保持 ASCII 标识符，避免中文变量名或空格标签。
 """

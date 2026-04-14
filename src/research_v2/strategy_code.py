@@ -17,6 +17,13 @@ class StrategySourceError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class StrategyCoreFactor:
+    name: str
+    thesis: str
+    current_signal: str
+
+
+@dataclass(frozen=True)
 class StrategyCandidate:
     candidate_id: str
     hypothesis: str
@@ -24,6 +31,7 @@ class StrategyCandidate:
     change_tags: tuple[str, ...]
     edited_regions: tuple[str, ...]
     expected_effects: tuple[str, ...]
+    core_factors: tuple[StrategyCoreFactor, ...]
     strategy_code: str
 
 

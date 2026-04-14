@@ -374,10 +374,53 @@ def _recent_failure_tag_lines(entries: list[dict[str, Any]], limit: int) -> list
     return [f"- {tag}: 最近失败 {count} 次" for tag, count in ranked[:limit]]
 
 
-def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int) -> list[str]:
+def _recent_core_factor_columns(entries: list[dict[str, Any]], limit: int) -> list[str]:
+    bucket: dict[str, int] = defaultdict(int)
+    for entry in entries:
+        for factor in entry.get("core_factors", []):
+            if not isinstance(factor, dict):
+                continue
+            name = str(factor.get("name", "")).strip()
+            if name:
+                bucket[name] += 1
+    ranked = sorted(bucket.items(), key=lambda item: (-item[1], item[0]))
+    return [name for name, _ in ranked[:limit]]
+
+
+def _recent_core_factor_lines(entries: list[dict[str, Any]], columns: list[str]) -> list[str]:
+    if not columns:
+        return []
+    latest_by_name: dict[str, dict[str, str]] = {}
+    for entry in reversed(entries):
+        for factor in entry.get("core_factors", []):
+            if not isinstance(factor, dict):
+                continue
+            name = str(factor.get("name", "")).strip()
+            if name in columns and name not in latest_by_name:
+                latest_by_name[name] = {
+                    "thesis": str(factor.get("thesis", "")).strip(),
+                    "current_signal": str(factor.get("current_signal", "")).strip(),
+                }
+    lines = ["最近动态核心因子:"]
+    for name in columns:
+        payload = latest_by_name.get(name, {})
+        thesis = _truncate(payload.get("thesis", ""), 64) or "-"
+        signal = _truncate(payload.get("current_signal", ""), 40) or "-"
+        lines.append(f"- {name}: 因子依据={thesis}; 最近信号={signal}")
+    return lines
+
+
+def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int, core_factor_columns: list[str]) -> list[str]:
+    factor_headers = [_truncate(name, 18) for name in core_factor_columns]
     lines = [
-        "| 轮次 | 候选 | 结果 | 阶段 | promotion | quality | gate | tags | regions | 摘要 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 轮次 | 候选 | 结果 | 阶段 | promotion | quality | gate | tags | regions | "
+        + " | ".join(factor_headers)
+        + (" | " if factor_headers else "")
+        + "摘要 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | "
+        + " | ".join("---" for _ in factor_headers)
+        + (" | " if factor_headers else "")
+        + "--- |",
     ]
     for offset, entry in enumerate(entries, start=1):
         round_label = entry.get("iteration")
@@ -392,9 +435,21 @@ def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int)
         tags = _truncate(",".join(entry.get("change_tags", [])) or "-", 42)
         regions = _truncate(",".join(entry.get("edited_regions", [])) or "-", 22)
         summary = _truncate(entry.get("note") or entry.get("hypothesis") or "-", 42)
+        factor_map: dict[str, str] = {}
+        for factor in entry.get("core_factors", []):
+            if not isinstance(factor, dict):
+                continue
+            name = str(factor.get("name", "")).strip()
+            if not name:
+                continue
+            factor_map[name] = _truncate(str(factor.get("current_signal", "")).strip(), 18) or "关注"
+        factor_cells = [factor_map.get(name, "-") for name in core_factor_columns]
         lines.append(
             f"| {round_label} | {candidate_id} | {outcome} | {stage} | {promotion} | "
-            f"{quality} | {gate} | {tags} | {regions} | {summary} |"
+            f"{quality} | {gate} | {tags} | {regions} | "
+            + " | ".join(factor_cells)
+            + (" | " if factor_cells else "")
+            + f"{summary} |"
         )
     return lines
 
@@ -423,8 +478,12 @@ def build_journal_prompt_summary(entries: list[dict[str, Any]], limit: int = 6, 
         if failure_tag_lines:
             parts.append("最近高频失败标签:")
             parts.extend(failure_tag_lines)
+        core_factor_columns = _recent_core_factor_columns(recent_entries, limit=min(4, limit))
+        core_factor_lines = _recent_core_factor_lines(recent_entries, core_factor_columns)
+        if core_factor_lines:
+            parts.extend(core_factor_lines)
         parts.append("最近未压缩轮次表:")
-        parts.extend(_format_recent_rounds_table(recent_entries, recent_start))
+        parts.extend(_format_recent_rounds_table(recent_entries, recent_start, core_factor_columns))
 
     return "\n".join(parts) if parts else "暂无研究历史。"
 
