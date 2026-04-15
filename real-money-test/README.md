@@ -1,71 +1,60 @@
 # real-money-test
 
-这个目录专门放 `test2` 的实盘测试壳子，目标很简单：
+这是本仓库内自洽的 `freqtrade` dry-run / live 壳子。
 
-- 继续用 `src/strategy_macd_aggressive.py` 和 `src/freqtrade_macd_aggressive.py` 作为策略逻辑来源
-- 用 `freqtrade` 负责连 OKX、下单、持仓、日志、重启
-- 复用 `test1` 现成的 OKX API 配置，不再重复手填一份
+它的定位很明确：
 
-## 目录说明
+- 继续复用 `src/strategy_macd_aggressive.py` 和 `src/freqtrade_macd_aggressive.py`
+- 用 `freqtrade` 负责交易所接入、下单、持仓、重启、日志
+- 不再默认继承外部仓库配置
+
+## 当前目录
 
 - `config.base.json`
-  `test2` 的基础 `freqtrade` 配置，不含敏感信息
+  基础 `freqtrade` 配置，不含敏感信息
 - `build_runtime_config.py`
-  从 `test1/user_data/config.json` 读取 OKX 的 `key/secret/password`，并只继承下单相关配置，拼成 `test2` 可运行配置
+  生成运行时配置，优先读取本地环境变量或 `config/secrets.env` 里的 OKX 凭证
 - `strategies/MacdAggressiveStrategy.py`
-  `freqtrade` 的策略入口，内部转到 `src/freqtrade_macd_aggressive.py`
+  `freqtrade` 策略入口
 - `start_dry_run.sh`
-  启动纸面盘
+  启动 dry-run
 - `start_live.sh`
-  启动真金白银实盘，需要先显式确认风险
+  启动 live，必须显式确认风险
 - `manage.sh`
-  统一入口，直接用 `start / stop / restart / status / log`
-- `status.sh`
-  看当前有没有 `freqtrade` 进程在跑
+  统一入口，支持 `start/stop/restart/status/log`
 - `daily_report.py`
-  汇总 dry-run 的权益、持仓、近 24h 表现，并可发到 Discord
-- `systemd/freqtrade-test2-dryrun.service.example`
-  systemd 服务示例
+  汇总权益、持仓和近 24h 表现，并发送 Discord
+- `report.env.example`
+  日报频道配置样板
+- `systemd/freqtrade-macd-aggressive-dryrun.service.example`
+  systemd 示例
 
-## 当前运行口径
+## 凭证来源
 
-- `pair`: `BTC/USDT:USDT`
-- `timeframe`: `15m`
-- `dry_run_wallet`: `1000 USDT`
-- `max_open_trades`: `4`
-- `tradable_balance_ratio`: `0.17`
-- `position_adjustment_enable`: 开启
-- `max_entry_position_adjustment`: 跟随 `EXIT_PARAMS["pyramid_max_times"]`，当前为 `2`
+运行时配置的凭证优先级：
 
-当前实现状态补充：
+1. 环境变量
+   - `OKX_API_KEY`
+   - `OKX_API_SECRET`
+   - `OKX_API_PASSWORD`
+2. `config/secrets.env`
+3. 你手动传入的 `--source-config`
 
-- 入场信号已直接复用主策略 `src/strategy_macd_aggressive.py`
-- 指标计算口径已尽量对齐自研回测器 `src/backtest_macd_aggressive.py`
-- 默认对比窗口下，原始入场时间戳集合已经可以和 `scripts/freqtrade_compare.py` 对齐
-- `dry-run` 更适合看执行链路和持仓管理是否正常，不适合把单段收益直接当成未来 live 收益
+如果以上都没有，`build_runtime_config.py` 会直接报错，不会再去引用外部仓库。
 
-## 先做什么
-
-先跑纸面盘，不要直接上实盘。
+## 先跑 dry-run
 
 ```bash
-cd /home/ubuntu/quant/test2
 bash real-money-test/manage.sh start
 ```
 
-日志默认会写到：
-
-```text
-real-money-test/runtime/freqtrade-dryrun.log
-```
-
-实时看日志：
+查看日志：
 
 ```bash
 bash real-money-test/manage.sh log
 ```
 
-看状态：
+查看状态：
 
 ```bash
 bash real-money-test/manage.sh status
@@ -77,64 +66,40 @@ bash real-money-test/manage.sh status
 bash real-money-test/manage.sh stop
 ```
 
-## 真正实盘怎么启动
+## live 启动
 
-只有在你已经确认纸面盘表现、交易所权限、仓位限制都没问题之后，才执行：
+只有在确认 dry-run 稳定后才运行：
 
 ```bash
-cd /home/ubuntu/quant/test2
 export I_UNDERSTAND_LIVE_RISK=YES
 bash real-money-test/start_live.sh
 ```
 
-如果刚改过策略或适配层代码，先停掉旧进程再启动新的 `dry-run` / `live`。现有进程不会自动加载新代码。
+## 当前实现状态
 
-## 这一步已经解决了什么
+这套壳子当前已经对齐了这些核心行为：
 
-- `test2` 有了单独的实盘测试目录，不再和研究脚本混在一起
-- `test1` 已有的 OKX 凭证可以直接复用
-- `telegram`、`api_server`、`internals` 不会再从 `test1` 继承，避免把旧实例的通知或 API 一起带开
-- `test2` 已经能直接调用本机现成的 `freqtrade` 环境
-- futures / isolated / `BTC/USDT:USDT` 的基础配置已经单独整理好
-
-## 这一步还没有完全解决什么
-
-目前这个 `freqtrade` 适配层，已经对齐了下面这些关键执行逻辑：
-
-- 动态仓位缩放
+- 主策略参数源
+- 入场信号
+- 主要趋势过滤
 - ATR 初始止损
 - 保本止损
-- 基于峰值利润的 trailing
+- 追踪止损
 - 趋势失效退出
 - 时间退出
-- 反向信号退出
 - `TP1` 分批止盈
-- `pyramid` 有限次加仓
+- 有限次加仓
 
-当前入场信号只有两个：
+它仍然不是自研回测器的逐字段完全镜像，尤其是：
 
-- `long_breakout`
-- `short_breakdown`
+- 回测里的 `1m` 执行价近似 vs 真实成交
+- 滑点假设 vs 真实盘口冲击
+- 多并发独立仓位 vs freqtrade 的实际持仓结构
 
-但它还没有完整复刻自研回测器里的整套执行细节。主要差异还在：
+所以它的用途应该理解为：
 
-- 回测里的 1 分钟执行价与实盘真实成交之间的细微差异
-- 回测里的滑点假设与真实盘口冲击差异
-- 资金费、手续费和交易所返回字段在真实环境下的逐笔核对
-- 退出、`TP1`、`pyramid`、权益曲线还没有独立的系统化对比脚本来证明逐项等价
-- 当前 `freqtrade` 壳子只跑单一交易对，因此更接近“单一净仓位 + 分批加减仓”，不是回测里 4 笔独立仓同时持有的结构
+- 验证执行链路
+- 验证持仓管理
+- 验证 Discord / cron / systemd / restart 行为
 
-所以这套现在的定位应该是：
-
-- 可以开始跑纸面盘
-- 在重新跑完修正后的研究/回测之前，不建议直接转小资金实盘
-- 执行链路已经接近可用版本
-- 但还不能把 4 并发回测收益直接当成未来实盘收益
-
-## 推荐推进顺序
-
-1. 先跑 `dry-run`，确认能稳定拉起、能下模拟单、日志正常
-2. 做至少 `1` 到 `2` 周的连续纸面盘观察，重点看开平仓、部分止盈、加仓、退出原因
-3. 同时用修正后的回测器补看更接近 live 的单仓基线，不要只看 `max_concurrent_positions = 4`
-4. 再做 very small size 的真实资金测试
-5. 最后才考虑放大仓位
+不要把 dry-run 的单段收益直接当成 future live 收益。

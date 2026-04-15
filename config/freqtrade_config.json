@@ -17,5 +17,5 @@
     "pairlists": [{"method": "StaticPairList"}],
     "timeframe": "15m",
     "candle_type_def": "futures",
-    "datadir": "/home/ubuntu/quant/test2/data/freqtrade"
+    "datadir": "data/freqtrade"
 }

@@ -80,6 +80,15 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "volume_lookback": (5, 40),
 }
 
+PARAM_RELATIONS: tuple[tuple[str, str, str], ...] = (
+    ("breakout_rsi_min", "<=", "breakout_rsi_max"),
+    ("breakdown_rsi_min", "<=", "breakdown_rsi_max"),
+    ("intraday_ema_fast", "<", "intraday_ema_slow"),
+    ("hourly_ema_fast", "<", "hourly_ema_slow"),
+    ("fourh_ema_fast", "<", "fourh_ema_slow"),
+    ("macd_fast", "<", "macd_slow"),
+)
+
 def load_strategy_source(path: Path) -> str:
     return path.read_text()
 
@@ -161,3 +170,15 @@ def validate_strategy_source(source: str) -> None:
                 raise StrategySourceError(
                     f"parameter {key}={value} out of bounds [{lo}, {hi}]"
                 )
+
+    for left_key, operator, right_key in PARAM_RELATIONS:
+        left_value = params.get(left_key)
+        right_value = params.get(right_key)
+        if not isinstance(left_value, (int, float)) or isinstance(left_value, bool):
+            continue
+        if not isinstance(right_value, (int, float)) or isinstance(right_value, bool):
+            continue
+        if operator == "<=" and left_value > right_value:
+            raise StrategySourceError(f"invalid parameter relation: {left_key}={left_value} > {right_key}={right_value}")
+        if operator == "<" and left_value >= right_value:
+            raise StrategySourceError(f"invalid parameter relation: {left_key}={left_value} >= {right_key}={right_value}")

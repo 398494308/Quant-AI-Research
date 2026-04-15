@@ -91,10 +91,21 @@ def _window_payloads(results: list[dict[str, Any]], group: str) -> list[dict[str
 
 
 def _collect_daily_returns(results: list[dict[str, Any]], group: str) -> list[float]:
-    collected: list[float] = []
+    collected_by_date: dict[str, list[float]] = {}
     for item in _window_payloads(results, group):
-        collected.extend(item["result"].get("daily_returns", []))
-    return collected
+        return_points = item["result"].get("daily_return_points", [])
+        if return_points:
+            for point in return_points:
+                day = str(point.get("date", "")).strip()
+                if not day:
+                    continue
+                collected_by_date.setdefault(day, []).append(float(point.get("return", 0.0)))
+            continue
+        for index, value in enumerate(item["result"].get("daily_returns", [])):
+            collected_by_date.setdefault(f"{item['window'].label}:{index}", []).append(float(value))
+
+    ordered_days = sorted(collected_by_date)
+    return [sum(collected_by_date[day]) / len(collected_by_date[day]) for day in ordered_days]
 
 
 def _aggregate_signal_stats(results: list[dict[str, Any]], group: str) -> list[str]:

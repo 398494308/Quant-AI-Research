@@ -9,7 +9,6 @@ LOCK_FILE="${REPO_ROOT}/state/research_macd_aggressive_v2.lock"
 OUT_FILE="${REPO_ROOT}/logs/macd_aggressive_research_v2.out"
 HEARTBEAT_FILE="${REPO_ROOT}/state/research_macd_aggressive_v2_heartbeat.json"
 STOP_FILE="${REPO_ROOT}/state/research_macd_aggressive_v2.stop"
-BASE_ENV="${REPO_ROOT}/config/secrets.env"
 LOCAL_ENV="${REPO_ROOT}/config/research_v2.env"
 RUNNER="${REPO_ROOT}/scripts/run_research_macd_aggressive_v2.sh"
 STARTUP_TIMEOUT_SECONDS="${MACD_V2_SUPERVISOR_STARTUP_TIMEOUT_SECONDS:-25}"
@@ -84,10 +83,6 @@ cmd_start() {
   if [[ -n "${existing_pids}" ]]; then
     echo "existing unmanaged v2 process detected: ${existing_pids}" >&2
     echo "run '$0 stop' first" >&2
-    exit 1
-  fi
-  if [[ ! -f "${BASE_ENV}" ]]; then
-    echo "missing env file: ${BASE_ENV}" >&2
     exit 1
   fi
   if [[ ! -f "${LOCAL_ENV}" ]]; then

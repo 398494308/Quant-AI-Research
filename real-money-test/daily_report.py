@@ -19,7 +19,6 @@ import requests
 CN_TZ = ZoneInfo("Asia/Shanghai")
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
-BASE_ENV_PATH = REPO_ROOT / "config" / "research.env"
 SECRETS_ENV_PATH = REPO_ROOT / "config" / "secrets.env"
 LOCAL_ENV_PATH = SCRIPT_DIR / "report.env"
 DISCORD_API_BASE = "https://discord.com/api/v10"
@@ -399,7 +398,7 @@ def resolve_discord_channel_id(env: dict[str, str]) -> str:
         return env["DISCORD_CHANNEL_ID"]
     token = env.get("DISCORD_BOT_TOKEN", "")
     guild_id = env.get("DISCORD_GUILD_ID", "")
-    channel_name = env.get("DISCORD_CHANNEL_NAME", "")
+    channel_name = env.get("DISCORD_CHANNEL_NAME", "quant-highrisk")
     if not token or not guild_id or not channel_name:
         return ""
     response = requests.get(
@@ -506,7 +505,7 @@ def main() -> int:
 
     mode_label = "Live" if mode == "live" else "Dry Run"
 
-    env = load_env([SECRETS_ENV_PATH, BASE_ENV_PATH, LOCAL_ENV_PATH])
+    env = load_env([SECRETS_ENV_PATH, LOCAL_ENV_PATH])
     now = datetime.now(CN_TZ)
     runtime_config = read_runtime_config()
     status = read_bot_status()

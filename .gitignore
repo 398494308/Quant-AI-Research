@@ -18,3 +18,4 @@ dist/
 .venv/
 real-money-test/runtime/
 real-money-test/user_data/
+real-money-test/report.env

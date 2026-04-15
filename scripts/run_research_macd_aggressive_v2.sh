@@ -8,9 +8,7 @@ LOCK_FILE="${REPO_ROOT}/state/research_macd_aggressive_v2.lock"
 PID_FILE="${REPO_ROOT}/state/research_macd_aggressive_v2.pid"
 OUT_FILE="${REPO_ROOT}/logs/macd_aggressive_research_v2.out"
 STOP_FILE="${REPO_ROOT}/state/research_macd_aggressive_v2.stop"
-BASE_ENV="${REPO_ROOT}/config/secrets.env"
 LOCAL_ENV="${REPO_ROOT}/config/research_v2.env"
-FALLBACK_ENV="${REPO_ROOT}/config/research.env"
 RESTART_DELAY_SECONDS="${MACD_V2_SUPERVISOR_RESTART_SECONDS:-10}"
 
 mkdir -p "${REPO_ROOT}/logs" "${REPO_ROOT}/state"
@@ -22,11 +20,10 @@ if ! flock -n 9; then
 fi
 
 set -a
-source "${BASE_ENV}"
-source "${LOCAL_ENV}"
-if [[ -f "${FALLBACK_ENV}" ]]; then
-  source "${FALLBACK_ENV}"
+if [[ -f "${REPO_ROOT}/config/secrets.env" ]]; then
+  source "${REPO_ROOT}/config/secrets.env"
 fi
+source "${LOCAL_ENV}"
 set +a
 
 stop_requested=0
@@ -66,4 +63,3 @@ while true; do
 done
 
 rm -f "${PID_FILE}" "${STOP_FILE}"
-

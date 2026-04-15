@@ -422,6 +422,20 @@ def _tp_trigger_price(entry_price, tp_pnl_pct, leverage, side):
     return entry_price * (1.0 - pct_move)
 
 
+def _stop_price_from_entry(entry_price, side, atr, stop_mult, stop_max_loss_pct, leverage):
+    if side == "short":
+        atr_stop = entry_price + atr * stop_mult
+        hard_stop = entry_price * (1.0 + stop_max_loss_pct / leverage / 100.0)
+        stop_price = min(atr_stop, hard_stop)
+        valid_stop = stop_price > entry_price
+    else:
+        atr_stop = entry_price - atr * stop_mult
+        hard_stop = entry_price * (1.0 - stop_max_loss_pct / leverage / 100.0)
+        stop_price = max(atr_stop, hard_stop)
+        valid_stop = stop_price < entry_price
+    return stop_price, valid_stop
+
+
 def _execution_price(bar_timestamp, bar_close, execution_timestamps, execution_data, intraday_interval_ms, delay_minutes):
     if not execution_timestamps or not execution_data:
         return bar_close
@@ -445,7 +459,7 @@ def _close_trade(position, price, reason, leverage, allocated_entry_fee=0.0, exi
     gross_pnl_amount = _position_pnl_amount(position, price, leverage)
     net_pnl_amount = gross_pnl_amount - allocated_entry_fee - exit_fee + funding_pnl
     pnl_pct = net_pnl_amount / max(position["size"], 1e-9) * 100.0
-    return {
+    trade = {
         "pnl_pct": pnl_pct,
         "pnl_amount": net_pnl_amount,
         "gross_pnl_amount": gross_pnl_amount,
@@ -456,7 +470,10 @@ def _close_trade(position, price, reason, leverage, allocated_entry_fee=0.0, exi
         "entry_signal": position["entry_signal"],
         "size": position["size"],
         "pyramids_done": position.get("pyramids_done", 0),
-    }, gross_pnl_amount
+    }
+    if "trade_id" in position:
+        trade["trade_id"] = position["trade_id"]
+    return trade, gross_pnl_amount
 
 
 def _close_cash_release(position_size, gross_pnl_amount, exit_fee=0.0, funding_pnl=0.0):
@@ -466,6 +483,63 @@ def _close_cash_release(position_size, gross_pnl_amount, exit_fee=0.0, funding_p
     margin, gross pnl, unsettled funding, and then deduct the exit fee.
     """
     return position_size + gross_pnl_amount + funding_pnl - exit_fee
+
+
+def _apply_trade_leg_rollup(position, trade):
+    position["realized_pnl_amount"] = position.get("realized_pnl_amount", 0.0) + trade["pnl_amount"]
+    position["realized_gross_pnl_amount"] = (
+        position.get("realized_gross_pnl_amount", 0.0) + trade.get("gross_pnl_amount", trade["pnl_amount"])
+    )
+    position["realized_fee_amount"] = position.get("realized_fee_amount", 0.0) + trade.get("fee_amount", 0.0)
+    position["realized_funding_amount"] = position.get("realized_funding_amount", 0.0) + trade.get("funding_amount", 0.0)
+    position["realized_hold_bars_weighted"] = (
+        position.get("realized_hold_bars_weighted", 0.0) + trade["hold_bars"] * trade["size"]
+    )
+    position["realized_closed_size"] = position.get("realized_closed_size", 0.0) + trade["size"]
+    position["realized_leg_count"] = position.get("realized_leg_count", 0) + 1
+    position["last_close_reason"] = trade["reason"]
+
+
+def _build_closed_trade(position):
+    opened_size = position.get("opened_size_total", position.get("realized_closed_size", 0.0))
+    closed_size = position.get("realized_closed_size", 0.0)
+    hold_bars = position.get("realized_hold_bars_weighted", 0.0) / max(closed_size, 1e-9)
+    trade = {
+        "pnl_pct": position.get("realized_pnl_amount", 0.0) / max(opened_size, 1e-9) * 100.0,
+        "pnl_amount": position.get("realized_pnl_amount", 0.0),
+        "gross_pnl_amount": position.get("realized_gross_pnl_amount", 0.0),
+        "fee_amount": position.get("realized_fee_amount", 0.0),
+        "funding_amount": position.get("realized_funding_amount", 0.0),
+        "hold_bars": hold_bars,
+        "reason": position.get("last_close_reason", ""),
+        "entry_signal": position["entry_signal"],
+        "size": opened_size,
+        "closed_size": closed_size,
+        "pyramids_done": position.get("pyramids_done", 0),
+        "leg_count": position.get("realized_leg_count", 0),
+    }
+    if "trade_id" in position:
+        trade["trade_id"] = position["trade_id"]
+    return trade
+
+
+def _refresh_stop_after_resize(position, market_state, exit_p, leverage):
+    side = _position_side(position)
+    stop_mult = float(_exit_value(exit_p, position, "stop_atr_mult"))
+    refreshed_stop, valid_stop = _stop_price_from_entry(
+        position["entry_price"],
+        side,
+        market_state["atr"],
+        stop_mult,
+        float(exit_p["stop_max_loss_pct"]),
+        leverage,
+    )
+    if not valid_stop:
+        return
+    if side == "short":
+        position["stop_price"] = min(position["stop_price"], refreshed_stop)
+    else:
+        position["stop_price"] = max(position["stop_price"], refreshed_stop)
 
 
 def _market_risk_profile(market_state, exit_p):
@@ -650,6 +724,22 @@ def _daily_returns_from_equity_curve(daily_equity_curve):
             continue
         returns.append((current_equity - prev_equity) / prev_equity)
     return returns
+
+
+def _daily_return_points_from_equity_curve(daily_equity_curve):
+    points = []
+    for idx in range(1, len(daily_equity_curve)):
+        prev_equity = daily_equity_curve[idx - 1]["equity"]
+        current_equity = daily_equity_curve[idx]["equity"]
+        if prev_equity <= 1e-9:
+            continue
+        points.append(
+            {
+                "date": daily_equity_curve[idx]["date"],
+                "return": (current_equity - prev_equity) / prev_equity,
+            }
+        )
+    return points
 
 
 def _trade_reason_stats(trades):
@@ -844,6 +934,7 @@ def backtest_macd_aggressive(
     max_concurrent_positions = int(exit_p["max_concurrent_positions"])
     positions = []
     trades = []
+    settlement_legs = []
     signal_entries = {}
     signal_closed_pnl = {}
     signal_closed_trades = {}
@@ -856,6 +947,7 @@ def backtest_macd_aggressive(
     funding_event_count = 0
     funding_idx = 0
     daily_equity_curve = []
+    next_trade_id = 1
     delay_minutes = int(exit_p.get("entry_delay_minutes", 1))
     taker_fee_rate = float(exit_p["okx_taker_fee_rate"]) if int(exit_p.get("trading_fee_enabled", 1)) > 0 else 0.0
     slippage_pct = float(exit_p.get("slippage_pct", 0.0003))
@@ -867,6 +959,9 @@ def backtest_macd_aggressive(
         signal_closed_trades[signal] = signal_closed_trades.get(signal, 0) + 1
         if trade["pnl_pct"] > 0:
             signal_closed_wins[signal] = signal_closed_wins.get(signal, 0) + 1
+
+    def record_settlement_leg(trade):
+        settlement_legs.append(trade)
 
     for idx in range(intraday_start_idx, intraday_end_idx):
         bar = intraday_all[idx]
@@ -952,20 +1047,22 @@ def backtest_macd_aggressive(
 
             if worst_pnl_pct <= -100.0:
                 capital += position.get("funding_pnl", 0.0)
-                record_trade(
-                    {
-                        "pnl_pct": -100.0,
-                        "pnl_amount": -position["size"] - position.get("entry_fee_paid", 0.0) + position.get("funding_pnl", 0.0),
-                        "gross_pnl_amount": -position["size"],
-                        "fee_amount": position.get("entry_fee_paid", 0.0),
-                        "funding_amount": position.get("funding_pnl", 0.0),
-                        "hold_bars": position["hold_bars"],
-                        "reason": "爆仓",
-                        "entry_signal": position["entry_signal"],
-                        "size": position["size"],
-                        "pyramids_done": position.get("pyramids_done", 0),
-                    }
-                )
+                liquidation_trade = {
+                    "pnl_pct": -100.0,
+                    "pnl_amount": -position["size"] - position.get("entry_fee_paid", 0.0) + position.get("funding_pnl", 0.0),
+                    "gross_pnl_amount": -position["size"],
+                    "fee_amount": position.get("entry_fee_paid", 0.0),
+                    "funding_amount": position.get("funding_pnl", 0.0),
+                    "hold_bars": position["hold_bars"],
+                    "reason": "爆仓",
+                    "entry_signal": position["entry_signal"],
+                    "size": position["size"],
+                    "pyramids_done": position.get("pyramids_done", 0),
+                    "trade_id": position.get("trade_id"),
+                }
+                record_settlement_leg(liquidation_trade)
+                _apply_trade_leg_rollup(position, liquidation_trade)
+                record_trade(_build_closed_trade(position))
                 continue
 
             stop_hit = bar["high"] >= position["stop_price"] if side == "short" else bar["low"] <= position["stop_price"]
@@ -991,7 +1088,9 @@ def backtest_macd_aggressive(
                     funding_pnl=allocated_funding,
                 )
                 total_trading_fees += exit_fee
-                record_trade(trade)
+                record_settlement_leg(trade)
+                _apply_trade_leg_rollup(position, trade)
+                record_trade(_build_closed_trade(position))
                 continue
 
             if _should_pyramid(position, market_state, close_pnl_pct, exit_p, allow_pyramid=risk_profile["allow_pyramid"]):
@@ -1005,11 +1104,13 @@ def backtest_macd_aggressive(
                         position["entry_price"] * position["size"] + pyramid_fill * add_size
                     ) / total_size
                     position["size"] = total_size
+                    position["opened_size_total"] = position.get("opened_size_total", 0.0) + add_size
                     position["pyramids_done"] = position.get("pyramids_done", 0) + 1
                     position["entry_fee_paid"] = position.get("entry_fee_paid", 0.0) + add_fee
                     capital -= add_size + add_fee
                     total_trading_fees += add_fee
                     pyramid_add_count += 1
+                    _refresh_stop_after_resize(position, market_state, exit_p, leverage)
 
             tp1_pnl_pct = float(_exit_value(exit_p, position, "tp1_pnl_pct"))
             tp1_close_fraction = float(_exit_value(exit_p, position, "tp1_close_fraction"))
@@ -1041,12 +1142,14 @@ def backtest_macd_aggressive(
                     funding_pnl=allocated_funding,
                 )
                 total_trading_fees += exit_fee
-                record_trade(trade)
+                record_settlement_leg(trade)
+                _apply_trade_leg_rollup(position, trade)
                 position["size"] = remaining_size
                 position["entry_fee_paid"] = position.get("entry_fee_paid", 0.0) - allocated_entry_fee
                 position["funding_pnl"] = position.get("funding_pnl", 0.0) - allocated_funding
                 position["tp1_done"] = True
                 if position["size"] <= 1e-9:
+                    record_trade(_build_closed_trade(position))
                     continue
 
             break_even_activation_pct = float(_exit_value(exit_p, position, "break_even_activation_pct"))
@@ -1093,7 +1196,9 @@ def backtest_macd_aggressive(
                         funding_pnl=allocated_funding,
                     )
                     total_trading_fees += exit_fee
-                    record_trade(trade)
+                    record_settlement_leg(trade)
+                    _apply_trade_leg_rollup(position, trade)
+                    record_trade(_build_closed_trade(position))
                     continue
 
             hold_limit = _resolve_hold_limit(position, exit_p, market_state, close_pnl_pct)
@@ -1119,7 +1224,9 @@ def backtest_macd_aggressive(
                     funding_pnl=allocated_funding,
                 )
                 total_trading_fees += exit_fee
-                record_trade(trade)
+                record_settlement_leg(trade)
+                _apply_trade_leg_rollup(position, trade)
+                record_trade(_build_closed_trade(position))
                 continue
 
             remaining.append(position)
@@ -1151,7 +1258,9 @@ def backtest_macd_aggressive(
                     funding_pnl=allocated_funding,
                 )
                 total_trading_fees += exit_fee
-                record_trade(trade)
+                record_settlement_leg(trade)
+                _apply_trade_leg_rollup(position, trade)
+                record_trade(_build_closed_trade(position))
             positions = []
         target_position_size = capital * position_fraction * risk_profile["position_fraction_scale"]
         max_affordable_size = capital / (1.0 + leverage * taker_fee_rate) if taker_fee_rate > 0 else capital
@@ -1166,27 +1275,27 @@ def backtest_macd_aggressive(
         ):
             stop_mult = float(_exit_value(exit_p, {"entry_signal": signal}, "stop_atr_mult"))
             signal_side = _signal_side(signal)
-            if signal_side == "short":
-                atr_stop = market_fill_price + market_state["atr"] * stop_mult
-                hard_stop = market_fill_price * (1.0 + float(exit_p["stop_max_loss_pct"]) / leverage / 100.0)
-                stop_price = min(atr_stop, hard_stop)
-                valid_stop = stop_price > market_fill_price
-            else:
-                atr_stop = market_fill_price - market_state["atr"] * stop_mult
-                hard_stop = market_fill_price * (1.0 - float(exit_p["stop_max_loss_pct"]) / leverage / 100.0)
-                stop_price = max(atr_stop, hard_stop)
-                valid_stop = stop_price < market_fill_price
+            entry_fill = _fill_with_slippage(market_fill_price, signal_side, True, slippage_pct)
+            stop_price, valid_stop = _stop_price_from_entry(
+                entry_fill,
+                signal_side,
+                market_state["atr"],
+                stop_mult,
+                float(exit_p["stop_max_loss_pct"]),
+                leverage,
+            )
             if valid_stop:
-                entry_fill = _fill_with_slippage(market_fill_price, signal_side, True, slippage_pct)
                 entry_fee = _trading_fee_amount(target_position_size * leverage, exit_p)
                 capital -= target_position_size + entry_fee
                 total_trading_fees += entry_fee
                 signal_entries[signal] = signal_entries.get(signal, 0) + 1
                 positions.append(
                     {
+                        "trade_id": next_trade_id,
                         "entry_price": entry_fill,
                         "entry_signal": signal,
                         "size": target_position_size,
+                        "opened_size_total": target_position_size,
                         "hold_bars": 0,
                         "peak_pnl_pct": 0.0,
                         "favorable_price": entry_fill,
@@ -1194,9 +1303,17 @@ def backtest_macd_aggressive(
                         "pyramids_done": 0,
                         "entry_fee_paid": entry_fee,
                         "funding_pnl": 0.0,
+                        "realized_pnl_amount": 0.0,
+                        "realized_gross_pnl_amount": 0.0,
+                        "realized_fee_amount": 0.0,
+                        "realized_funding_amount": 0.0,
+                        "realized_hold_bars_weighted": 0.0,
+                        "realized_closed_size": 0.0,
+                        "realized_leg_count": 0,
                         "stop_price": stop_price,
                     }
                 )
+                next_trade_id += 1
 
         equity = capital + sum(
             position["size"]
@@ -1233,7 +1350,9 @@ def backtest_macd_aggressive(
             funding_pnl=allocated_funding,
         )
         total_trading_fees += exit_fee
-        record_trade(trade)
+        record_settlement_leg(trade)
+        _apply_trade_leg_rollup(position, trade)
+        record_trade(_build_closed_trade(position))
 
     _append_daily_equity_point(daily_equity_curve, end_ts, capital)
     total_return = (capital - initial_capital) / initial_capital * 100.0
@@ -1264,18 +1383,20 @@ def backtest_macd_aggressive(
         "fee_score_penalty": fee_penalty,
         "funding_pnl_amount": total_funding_pnl,
         "funding_event_count": funding_event_count,
-        "first_tp_count": sum(1 for trade in trades if trade["reason"] == "第一止盈"),
-        "stop_exit_count": sum(1 for trade in trades if trade["reason"] == "止损"),
-        "regime_exit_count": sum(1 for trade in trades if trade["reason"] == "趋势失效"),
-        "reverse_exit_count": sum(1 for trade in trades if trade["reason"] == "反向信号"),
-        "time_exit_count": sum(1 for trade in trades if trade["reason"] == "时间退出"),
-        "liquidations": sum(1 for trade in trades if trade["reason"] == "爆仓"),
+        "first_tp_count": sum(1 for trade in settlement_legs if trade["reason"] == "第一止盈"),
+        "stop_exit_count": sum(1 for trade in settlement_legs if trade["reason"] == "止损"),
+        "regime_exit_count": sum(1 for trade in settlement_legs if trade["reason"] == "趋势失效"),
+        "reverse_exit_count": sum(1 for trade in settlement_legs if trade["reason"] == "反向信号"),
+        "time_exit_count": sum(1 for trade in settlement_legs if trade["reason"] == "时间退出"),
+        "liquidations": sum(1 for trade in settlement_legs if trade["reason"] == "爆仓"),
         "pyramid_add_count": pyramid_add_count,
         "signal_stats": signal_stats,
     }
     if include_diagnostics:
         result["daily_equity_curve"] = daily_equity_curve
         result["daily_returns"] = _daily_returns_from_equity_curve(daily_equity_curve)
-        result["trade_reason_stats"] = _trade_reason_stats(trades)
+        result["daily_return_points"] = _daily_return_points_from_equity_curve(daily_equity_curve)
+        result["trade_reason_stats"] = _trade_reason_stats(settlement_legs)
         result["trades_detail"] = trades
+        result["trade_legs_detail"] = settlement_legs
     return result

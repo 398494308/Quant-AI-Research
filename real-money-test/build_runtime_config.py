@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -15,6 +16,7 @@ REPO_ROOT = BASE_DIR.parent
 SRC_DIR = REPO_ROOT / "src"
 DEFAULT_BASE_CONFIG = BASE_DIR / "config.base.json"
 DEFAULT_SOURCE_CONFIG = BASE_DIR / "config.base.json"
+SECRETS_ENV_FILE = REPO_ROOT / "config" / "secrets.env"
 INHERITED_EXECUTION_KEYS = ("entry_pricing", "exit_pricing", "unfilledtimeout")
 
 if str(SRC_DIR) not in sys.path:
@@ -36,6 +38,17 @@ def _load_json(path: Path) -> dict:
         return json.load(handle)
 
 
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
 def _deep_merge(dst: dict, src: dict) -> dict:
     for key, value in src.items():
         if isinstance(value, dict) and isinstance(dst.get(key), dict):
@@ -46,15 +59,43 @@ def _deep_merge(dst: dict, src: dict) -> dict:
 
 
 def _copy_exchange_credentials(runtime_config: dict, source_config: dict) -> None:
+    _load_env_file(SECRETS_ENV_FILE)
     source_exchange = source_config.get("exchange", {})
     target_exchange = runtime_config.setdefault("exchange", {})
     required_keys = ("key", "secret", "password")
-    missing = [key for key in required_keys if not source_exchange.get(key)]
+    env_aliases = {
+        "key": ("OKX_API_KEY", "FT_OKX_API_KEY"),
+        "secret": ("OKX_API_SECRET", "FT_OKX_API_SECRET"),
+        "password": ("OKX_API_PASSWORD", "FT_OKX_API_PASSWORD"),
+    }
+
+    resolved: dict[str, object] = {}
+    missing: list[str] = []
+    for key in required_keys:
+        value = None
+        for env_name in env_aliases[key]:
+            env_value = os.getenv(env_name, "").strip()
+            if env_value:
+                value = env_value
+                break
+        if value is None:
+            source_value = source_exchange.get(key)
+            if isinstance(source_value, str) and source_value.strip():
+                value = source_value.strip()
+        if value is None:
+            missing.append(key)
+            continue
+        resolved[key] = value
+
     if missing:
         missing_text = ", ".join(missing)
-        raise SystemExit(f"source config missing exchange fields: {missing_text}")
+        raise SystemExit(
+            "missing OKX exchange credentials. "
+            f"Set env vars or provide a populated source config: {missing_text}"
+        )
+
     for key in required_keys:
-        target_exchange[key] = source_exchange[key]
+        target_exchange[key] = resolved[key]
     for key in ("ccxt_config", "ccxt_async_config"):
         if key in source_exchange:
             target_exchange[key] = deepcopy(source_exchange[key])

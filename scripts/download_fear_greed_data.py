@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""下载 Fear & Greed Index 历史数据到 test2。"""
+"""下载 Fear & Greed Index 历史数据到当前仓库。"""
 import csv
 from datetime import UTC, datetime
 from pathlib import Path

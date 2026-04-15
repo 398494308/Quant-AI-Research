@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CRON_CMD="cd ${REPO_ROOT} && bash ${SCRIPT_DIR}/run_daily_report.sh"
-BEGIN_MARKER="# BEGIN test2-dryrun-daily-report"
-END_MARKER="# END test2-dryrun-daily-report"
+BEGIN_MARKER="# BEGIN macd-aggressive-dryrun-daily-report"
+END_MARKER="# END macd-aggressive-dryrun-daily-report"
 
 existing_crontab="$(crontab -l 2>/dev/null || true)"
 filtered_crontab="$(

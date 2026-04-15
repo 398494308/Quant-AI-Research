@@ -12,7 +12,6 @@ from pathlib import Path
 ENV_FILES = (
     "config/secrets.env",
     "config/research_v2.env",
-    "config/research.env",
 )
 
 
@@ -109,8 +108,8 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
     )
 
     windows = WindowConfig(
-        eval_start_date=os.getenv("MACD_V2_EVAL_START_DATE", os.getenv("MACD_EVAL_START_DATE", "2025-09-01")),
-        eval_end_date=os.getenv("MACD_V2_EVAL_END_DATE", os.getenv("MACD_EVAL_END_DATE", "2026-03-31")),
+        eval_start_date=os.getenv("MACD_V2_EVAL_START_DATE", "2025-09-01"),
+        eval_end_date=os.getenv("MACD_V2_EVAL_END_DATE", "2026-03-31"),
         eval_window_days=_env_int("MACD_V2_EVAL_WINDOW_DAYS", 28),
         eval_step_days=_env_int("MACD_V2_EVAL_STEP_DAYS", 21),
         validation_days=_env_int("MACD_V2_VALIDATION_DAYS", 28),
@@ -132,7 +131,7 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         paths=paths,
         windows=windows,
         gates=gates,
-        loop_interval_seconds=_env_int("MACD_V2_LOOP_INTERVAL_SECONDS", _env_int("MACD_LOOP_INTERVAL_SECONDS", 120)),
+        loop_interval_seconds=_env_int("MACD_V2_LOOP_INTERVAL_SECONDS", 120),
         provider_recovery_wait_seconds=_env_int("MACD_V2_PROVIDER_RECOVERY_WAIT_SECONDS", 90),
         failure_cooldown_seconds=_env_int("MACD_V2_FAILURE_COOLDOWN_SECONDS", 60),
         prompt_max_output_tokens=_env_int("MACD_V2_PROMPT_MAX_OUTPUT_TOKENS", 12000),
