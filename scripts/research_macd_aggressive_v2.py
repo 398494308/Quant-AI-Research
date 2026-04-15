@@ -33,6 +33,7 @@ from research_v2.evaluation import EvaluationReport, summarize_evaluation, _annu
 from research_v2.journal import append_journal_entry, build_journal_prompt_summary, has_recent_code_hash, load_journal_entries, maybe_compact
 from research_v2.notifications import build_discord_summary_message, load_discord_config, send_discord_message
 from research_v2.prompting import build_candidate_response_schema, build_strategy_research_prompt
+from research_v2.prompting import build_strategy_runtime_repair_prompt
 from research_v2.strategy_code import (
     StrategyCandidate,
     StrategyCoreFactor,
@@ -55,6 +56,7 @@ WINDOWS = build_research_windows(RUNTIME.windows)
 DISCORD_CONFIG = load_discord_config()
 EVAL_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "eval")
 VALIDATION_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "validation")
+SCORE_REGIME = "non_overlapping_oos_v1"
 
 best_source = ""
 best_report: EvaluationReport | None = None
@@ -120,11 +122,51 @@ class EarlyRejection(Exception):
     """前 N 个 eval 窗口的非重叠 OOS Sortino 太差，提前终止回测。"""
 
 
-def _run_base_backtests(allow_early_reject: bool = False) -> list[dict[str, Any]]:
+class CandidateRuntimeFailure(Exception):
+    """候选在 smoke 或完整评估中运行失败。"""
+
+    def __init__(self, stage: str, error: Exception):
+        self.stage = stage
+        self.error = error
+        super().__init__(f"{stage}: {error}")
+
+
+class CandidateRepairExhausted(Exception):
+    """候选修复次数耗尽。"""
+
+    def __init__(self, candidate: StrategyCandidate, errors: list[str]):
+        self.candidate = candidate
+        self.errors = errors
+        super().__init__(errors[-1] if errors else "candidate repair exhausted")
+
+
+def _selected_smoke_windows() -> list[Any]:
+    eval_windows = [window for window in WINDOWS if window.group == "eval"]
+    validation_windows = [window for window in WINDOWS if window.group == "validation"]
+    selected = []
+    if eval_windows:
+        candidate_indexes = [0, len(eval_windows) // 2, len(eval_windows) - 1]
+        for index in candidate_indexes:
+            window = eval_windows[index]
+            if window not in selected:
+                selected.append(window)
+    if validation_windows and len(selected) < max(1, RUNTIME.smoke_window_count):
+        selected.append(validation_windows[0])
+    return selected[: max(1, RUNTIME.smoke_window_count)]
+
+
+def _run_base_backtests(
+    allow_early_reject: bool = False,
+    *,
+    windows: list[Any] | None = None,
+    include_diagnostics: bool = True,
+    heartbeat_phase: str = "full_eval",
+) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     eval_count = 0
     check_at = RUNTIME.early_reject_after_windows
     threshold = RUNTIME.early_reject_sortino_threshold
+    active_windows = windows or WINDOWS
     prepared_context = backtest_module.prepare_backtest_context(
         strategy_module.PARAMS,
         intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
@@ -132,7 +174,15 @@ def _run_base_backtests(allow_early_reject: bool = False) -> list[dict[str, Any]
         exit_params=backtest_module.EXIT_PARAMS,
     )
 
-    for window in WINDOWS:
+    for index, window in enumerate(active_windows, start=1):
+        write_heartbeat(
+            "iteration_running",
+            message=f"iteration {iteration_counter} {heartbeat_phase}",
+            phase=heartbeat_phase,
+            current_window=window.label,
+            window_index=index,
+            window_count=len(active_windows),
+        )
         result = backtest_module.backtest_macd_aggressive(
             strategy_func=strategy_module.strategy,
             intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
@@ -141,7 +191,7 @@ def _run_base_backtests(allow_early_reject: bool = False) -> list[dict[str, Any]
             end_date=window.end_date,
             strategy_params=strategy_module.PARAMS,
             exit_params=backtest_module.EXIT_PARAMS,
-            include_diagnostics=True,
+            include_diagnostics=include_diagnostics,
             prepared_context=prepared_context,
         )
         results.append({"window": window, "result": result})
@@ -161,6 +211,14 @@ def _run_base_backtests(allow_early_reject: bool = False) -> list[dict[str, Any]
 def evaluate_current_strategy(allow_early_reject: bool = False) -> EvaluationReport:
     base_results = _run_base_backtests(allow_early_reject=allow_early_reject)
     return summarize_evaluation(base_results, RUNTIME.gates)
+
+
+def smoke_test_current_strategy() -> None:
+    _run_base_backtests(
+        windows=_selected_smoke_windows(),
+        include_diagnostics=False,
+        heartbeat_phase="smoke_test",
+    )
 
 
 # ==================== 候选策略生成 ====================
@@ -187,6 +245,8 @@ def _candidate_from_payload(payload: dict[str, Any]) -> StrategyCandidate:
         candidate_id=str(payload["candidate_id"]).strip() or f"candidate-{int(time.time())}",
         hypothesis=str(payload["hypothesis"]).strip(),
         change_plan=str(payload["change_plan"]).strip(),
+        closest_failed_cluster=str(payload.get("closest_failed_cluster", "")).strip(),
+        novelty_proof=str(payload.get("novelty_proof", "")).strip(),
         change_tags=tuple(str(item).strip() for item in payload["change_tags"] if str(item).strip()),
         edited_regions=tuple(str(item).strip() for item in payload["edited_regions"] if str(item).strip()),
         expected_effects=tuple(str(item).strip() for item in payload["expected_effects"] if str(item).strip()),
@@ -197,6 +257,10 @@ def _candidate_from_payload(payload: dict[str, Any]) -> StrategyCandidate:
         raise StrategySourceError("candidate missing change_tags")
     if not candidate.edited_regions:
         raise StrategySourceError("candidate missing edited_regions")
+    if not candidate.closest_failed_cluster:
+        raise StrategySourceError("candidate missing closest_failed_cluster")
+    if not candidate.novelty_proof:
+        raise StrategySourceError("candidate missing novelty_proof")
     validate_strategy_source(candidate.strategy_code)
     return candidate
 
@@ -228,6 +292,59 @@ def _build_model_candidate(base_source: str, journal_entries: list[dict[str, Any
         ),
     )
     return _candidate_from_payload(payload)
+
+
+def _repair_model_candidate(
+    *,
+    base_source: str,
+    failed_candidate: StrategyCandidate,
+    error_message: str,
+    repair_attempt: int,
+) -> StrategyCandidate:
+    prompt = build_strategy_runtime_repair_prompt(
+        strategy_source=base_source,
+        failed_candidate_code=failed_candidate.strategy_code,
+        candidate_id=failed_candidate.candidate_id,
+        hypothesis=failed_candidate.hypothesis,
+        change_plan=failed_candidate.change_plan,
+        change_tags=failed_candidate.change_tags,
+        edited_regions=failed_candidate.edited_regions,
+        expected_effects=failed_candidate.expected_effects,
+        closest_failed_cluster=failed_candidate.closest_failed_cluster,
+        novelty_proof=failed_candidate.novelty_proof,
+        error_message=error_message,
+        repair_attempt=repair_attempt,
+    )
+    payload = generate_json_object(
+        prompt=prompt,
+        system_prompt=(
+            "你是严谨的量化研究员。"
+            "只输出 JSON，不要解释，不要 markdown。"
+            "你正在修复同一轮候选代码，不要切换研究方向。"
+            "除 candidate_id 与 change_tags 外，其余说明字段必须使用简体中文。"
+        ),
+        max_output_tokens=RUNTIME.prompt_max_output_tokens,
+        text_format=build_json_text_format(
+            schema=build_candidate_response_schema(),
+            schema_name="macd_aggressive_strategy_candidate_repair_v2",
+            strict=True,
+        ),
+    )
+    repaired = _candidate_from_payload(payload)
+    if not repaired.candidate_id:
+        repaired = StrategyCandidate(
+            candidate_id=failed_candidate.candidate_id,
+            hypothesis=repaired.hypothesis,
+            change_plan=repaired.change_plan,
+            closest_failed_cluster=repaired.closest_failed_cluster,
+            novelty_proof=repaired.novelty_proof,
+            change_tags=repaired.change_tags,
+            edited_regions=repaired.edited_regions,
+            expected_effects=repaired.expected_effects,
+            core_factors=repaired.core_factors,
+            strategy_code=repaired.strategy_code,
+        )
+    return repaired
 
 
 def build_strategy_candidate(base_source: str) -> StrategyCandidate:
@@ -348,6 +465,8 @@ def _build_journal_entry(
         "stop_stage": stop_stage,
         "hypothesis": candidate.hypothesis,
         "change_plan": candidate.change_plan,
+        "closest_failed_cluster": candidate.closest_failed_cluster,
+        "novelty_proof": candidate.novelty_proof,
         "change_tags": list(candidate.change_tags),
         "edited_regions": list(candidate.edited_regions),
         "expected_effects": list(candidate.expected_effects),
@@ -367,7 +486,69 @@ def _build_journal_entry(
         "note": note or "",
         "code_hash": source_hash(candidate.strategy_code),
         "diff_summary": diff_summary,
+        "score_regime": SCORE_REGIME,
     }
+
+
+def _activate_candidate(candidate: StrategyCandidate) -> None:
+    write_strategy_source(RUNTIME.paths.strategy_backup_file, candidate.strategy_code)
+    write_strategy_source(RUNTIME.paths.strategy_file, candidate.strategy_code)
+    reload_strategy_module()
+
+
+def _smoke_candidate(candidate: StrategyCandidate) -> None:
+    _activate_candidate(candidate)
+    try:
+        smoke_test_current_strategy()
+    except Exception as exc:
+        raise CandidateRuntimeFailure("smoke_test", exc) from exc
+
+
+def _evaluate_candidate(candidate: StrategyCandidate) -> EvaluationReport:
+    _activate_candidate(candidate)
+    try:
+        return evaluate_current_strategy(allow_early_reject=True)
+    except EarlyRejection:
+        raise
+    except Exception as exc:
+        raise CandidateRuntimeFailure("full_eval", exc) from exc
+
+
+def _candidate_with_repair(base_source: str, candidate: StrategyCandidate) -> tuple[StrategyCandidate, EvaluationReport]:
+    current = candidate
+    errors: list[str] = []
+    for attempt in range(0, max(0, RUNTIME.max_repair_attempts) + 1):
+        try:
+            _smoke_candidate(current)
+            report = _evaluate_candidate(current)
+            return current, report
+        except CandidateRuntimeFailure as exc:
+            error_message = "".join(
+                traceback.format_exception_only(type(exc.error), exc.error)
+            ).strip()
+            errors.append(f"{exc.stage}: {error_message}")
+            write_strategy_source(RUNTIME.paths.strategy_file, base_source)
+            reload_strategy_module()
+            if attempt >= RUNTIME.max_repair_attempts:
+                raise CandidateRepairExhausted(current, errors) from exc
+            write_heartbeat(
+                "candidate_repairing",
+                message=f"iteration {iteration_counter} repairing candidate",
+                repair_attempt=attempt + 1,
+                max_repair_attempts=RUNTIME.max_repair_attempts,
+                error=errors[-1],
+            )
+            log_info(
+                f"第 {iteration_counter} 轮候选运行失败，尝试同轮修复 "
+                f"{attempt + 1}/{RUNTIME.max_repair_attempts}: {errors[-1]}"
+            )
+            current = _repair_model_candidate(
+                base_source=base_source,
+                failed_candidate=current,
+                error_message="\n".join(errors[-3:]),
+                repair_attempt=attempt + 1,
+            )
+    raise CandidateRepairExhausted(current, errors)
 
 
 def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str:
@@ -409,12 +590,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         write_heartbeat("iteration_skipped", message=f"iteration {iteration_id} empty diff")
         return "duplicate_skipped"
 
-    write_strategy_source(RUNTIME.paths.strategy_backup_file, candidate.strategy_code)
-    write_strategy_source(RUNTIME.paths.strategy_file, candidate.strategy_code)
-    reload_strategy_module()
-
     try:
-        candidate_report = evaluate_current_strategy(allow_early_reject=True)
+        candidate, candidate_report = _candidate_with_repair(best_source, candidate)
     except EarlyRejection as exc:
         write_strategy_source(RUNTIME.paths.strategy_file, best_source)
         reload_strategy_module()
@@ -440,6 +617,31 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             gate="前段评估过差",
         )
         return "early_rejected"
+    except CandidateRepairExhausted as exc:
+        write_strategy_source(RUNTIME.paths.strategy_file, best_source)
+        reload_strategy_module()
+        append_journal_entry(
+            RUNTIME.paths.journal_file,
+            _build_journal_entry(
+                iteration_id=iteration_id,
+                candidate=exc.candidate,
+                base_source=best_source,
+                candidate_report=None,
+                outcome="runtime_failed",
+                stop_stage="runtime_error",
+                gate_reason="运行失败",
+                note="；".join(exc.errors),
+            ),
+        )
+        if maybe_compact(RUNTIME.paths.journal_file):
+            log_info("研究日志已压缩")
+        log_info(f"第 {iteration_id} 轮运行失败并已记录: {exc}")
+        write_heartbeat(
+            "iteration_runtime_failed",
+            message=f"iteration {iteration_id} runtime failed",
+            error=str(exc),
+        )
+        return "runtime_failed"
     except StrategyGenerationTransientError:
         raise
     except Exception:
@@ -589,7 +791,7 @@ def main() -> int:
             continue
 
         if args.once:
-            return 0 if outcome in {"accepted", "rejected", "duplicate_skipped"} else 1
+            return 0 if outcome in {"accepted", "rejected", "duplicate_skipped", "runtime_failed"} else 1
 
         write_heartbeat(
             "sleeping",

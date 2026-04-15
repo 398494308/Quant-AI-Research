@@ -12,7 +12,15 @@ from typing import Any
 
 
 COMPACT_INTERVAL = 20
-NEGATIVE_OUTCOMES = {"rejected", "early_rejected"}
+NEGATIVE_OUTCOMES = {"rejected", "early_rejected", "runtime_failed"}
+
+CLUSTER_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ownership_cluster", ("ownership", "acceptance", "handoff", "transfer", "reset_reclaim")),
+    ("participation_cluster", ("participation", "fourh_confirmation", "fourh_base_filter", "broadside")),
+    ("post_breakdown_cluster", ("breakdown_reset", "post_breakdown", "rebreak", "incremental_discovery", "fresh_discovery")),
+    ("sideways_cluster", ("sideways", "tighten_filter", "hourly_discount", "discounted_stall", "hourly_stretch")),
+    ("trigger_efficiency_cluster", ("trigger_efficiency", "breakdown_entry", "breakout_entry", "reduce_false_breakdown", "reduce_false_breakout")),
+)
 
 
 # ==================== 基础读写 ====================
@@ -88,6 +96,28 @@ def _truncate(text: Any, limit: int) -> str:
     return cleaned[: max(0, limit - 3)] + "..."
 
 
+def cluster_for_tags(tags: list[str] | tuple[str, ...]) -> str:
+    normalized = [str(tag).strip().lower() for tag in tags if str(tag).strip()]
+    for cluster_name, keywords in CLUSTER_KEYWORDS:
+        if any(keyword in tag for tag in normalized for keyword in keywords):
+            return cluster_name
+    return normalized[0] if normalized else "unclassified"
+
+
+def _risk_label(*, attempts: int, failures: int, zero_delta: int, runtime_errors: int, best_delta: float) -> str:
+    if runtime_errors > 0:
+        return "RUNTIME_RISK"
+    if failures >= 5 and zero_delta >= 4 and best_delta <= 1e-9:
+        return "EXHAUSTED"
+    if failures >= 3 and zero_delta >= 2 and best_delta <= 1e-9:
+        return "SATURATED"
+    if best_delta > 0.0:
+        return "ACTIVE_WINNER"
+    if attempts >= 2 and failures == attempts:
+        return "WARM"
+    return "OPEN"
+
+
 def _compact_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
     """把一批 journal 条目压缩成结构化的经验摘要。"""
     if not entries:
@@ -96,6 +126,7 @@ def _compact_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
     accepted = [e for e in entries if _outcome_bucket(str(e.get("outcome", ""))) == "accepted"]
     rejected = [e for e in entries if _outcome_bucket(str(e.get("outcome", ""))) == "rejected"]
     early_rejected_count = sum(1 for e in entries if e.get("outcome") == "early_rejected")
+    runtime_failed_count = sum(1 for e in entries if e.get("outcome") == "runtime_failed")
 
     # 标签统计：哪些方向有效 / 无效
     tag_stats: dict[str, dict[str, Any]] = defaultdict(
@@ -159,13 +190,41 @@ def _compact_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
             "avg_score": _mean(stats["scores"]),
         }
 
+    cluster_summary: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        cluster = cluster_for_tags(entry.get("change_tags", []))
+        outcome = _outcome_bucket(str(entry.get("outcome", "")))
+        promotion_delta = _score_value(entry.get("promotion_delta"))
+        bucket = cluster_summary.setdefault(
+            cluster,
+            {"attempts": 0, "failures": 0, "zero_delta": 0, "runtime_errors": 0, "best_delta": 0.0},
+        )
+        bucket["attempts"] += 1
+        if outcome == "rejected":
+            bucket["failures"] += 1
+        if abs(promotion_delta) <= 1e-9:
+            bucket["zero_delta"] += 1
+        if entry.get("outcome") == "runtime_failed":
+            bucket["runtime_errors"] += 1
+        bucket["best_delta"] = max(bucket["best_delta"], promotion_delta)
+    for stats in cluster_summary.values():
+        stats["label"] = _risk_label(
+            attempts=int(stats["attempts"]),
+            failures=int(stats["failures"]),
+            zero_delta=int(stats["zero_delta"]),
+            runtime_errors=int(stats["runtime_errors"]),
+            best_delta=float(stats["best_delta"]),
+        )
+
     return {
         "entry_count": len(entries),
         "accepted_count": len(accepted),
         "rejected_count": len(rejected),
         "early_rejected_count": early_rejected_count,
+        "runtime_failed_count": runtime_failed_count,
         "accept_rate": len(accepted) / len(entries) if entries else 0.0,
         "tag_summary": tag_summary,
+        "cluster_summary": cluster_summary,
         "region_summary": dict(region_stats),
         "top_failure_reasons": top_failures,
         "accepted_metric_ranges": accepted_metric_ranges,
@@ -232,13 +291,58 @@ def _format_compact_for_prompt(compact_data: dict[str, Any], limit: int) -> list
     total_accepted = sum(r.get("accepted_count", 0) for r in rounds)
     total_rejected = sum(r.get("rejected_count", 0) for r in rounds)
     total_early_rejected = sum(r.get("early_rejected_count", 0) for r in rounds)
+    total_runtime_failed = sum(r.get("runtime_failed_count", 0) for r in rounds)
     total_entries = sum(r.get("entry_count", 0) for r in rounds)
     lines.append(
         f"共 {total_entries} 轮历史，{total_accepted} 次通过，"
         f"{total_rejected} 次失败，其中提前淘汰 {total_early_rejected} 次，"
-        f"通过率 {total_accepted / total_entries:.0%}"
+        f"运行失败 {total_runtime_failed} 次，通过率 {total_accepted / total_entries:.0%}"
         if total_entries else "无历史"
     )
+
+    merged_clusters: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"attempts": 0, "failures": 0, "zero_delta": 0, "runtime_errors": 0, "best_delta": 0.0}
+    )
+    for round_data in rounds:
+        for cluster, stats in round_data.get("cluster_summary", {}).items():
+            merged = merged_clusters[cluster]
+            merged["attempts"] += int(stats.get("attempts", 0))
+            merged["failures"] += int(stats.get("failures", 0))
+            merged["zero_delta"] += int(stats.get("zero_delta", 0))
+            merged["runtime_errors"] += int(stats.get("runtime_errors", 0))
+            merged["best_delta"] = max(float(merged["best_delta"]), float(stats.get("best_delta", 0.0)))
+
+    if merged_clusters:
+        lines.append("历史方向簇摘要:")
+        ranked_clusters = sorted(
+            merged_clusters.items(),
+            key=lambda item: (
+                {"EXHAUSTED": 0, "SATURATED": 1, "RUNTIME_RISK": 2, "WARM": 3, "ACTIVE_WINNER": 4, "OPEN": 5}[
+                    _risk_label(
+                        attempts=int(item[1]["attempts"]),
+                        failures=int(item[1]["failures"]),
+                        zero_delta=int(item[1]["zero_delta"]),
+                        runtime_errors=int(item[1]["runtime_errors"]),
+                        best_delta=float(item[1]["best_delta"]),
+                    )
+                ],
+                -int(item[1]["attempts"]),
+                -int(item[1]["failures"]),
+            ),
+        )
+        for cluster, stats in ranked_clusters[:limit]:
+            label = _risk_label(
+                attempts=int(stats["attempts"]),
+                failures=int(stats["failures"]),
+                zero_delta=int(stats["zero_delta"]),
+                runtime_errors=int(stats["runtime_errors"]),
+                best_delta=float(stats["best_delta"]),
+            )
+            lines.append(
+                f"  {cluster}: 尝试{stats['attempts']}次 失败{stats['failures']}次 "
+                f"零增益{stats['zero_delta']}次 运行报错{stats['runtime_errors']}次 "
+                f"最佳delta={stats['best_delta']:.2f} 标签={label}"
+            )
 
     # 合并所有 round 的标签统计
     merged_tags: dict[str, dict[str, Any]] = defaultdict(
@@ -319,6 +423,88 @@ def _format_compact_for_prompt(compact_data: dict[str, Any], limit: int) -> list
     return lines
 
 
+def _latest_score_regime(entries: list[dict[str, Any]]) -> str:
+    for entry in reversed(entries):
+        regime = str(entry.get("score_regime", "")).strip()
+        if regime:
+            return regime
+    return ""
+
+
+def _direction_risk_board(entries: list[dict[str, Any]], limit: int) -> list[str]:
+    if not entries:
+        return []
+
+    buckets: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        cluster = cluster_for_tags(entry.get("change_tags", []))
+        outcome = _outcome_bucket(str(entry.get("outcome", "")))
+        promotion_delta = _score_value(entry.get("promotion_delta"))
+        bucket = buckets.setdefault(
+            cluster,
+            {
+                "attempts": 0,
+                "failures": 0,
+                "zero_delta": 0,
+                "runtime_errors": 0,
+                "best_delta": 0.0,
+                "tags": [],
+            },
+        )
+        bucket["attempts"] += 1
+        if outcome == "rejected":
+            bucket["failures"] += 1
+        if abs(promotion_delta) <= 1e-9:
+            bucket["zero_delta"] += 1
+        if str(entry.get("outcome", "")) == "runtime_failed":
+            bucket["runtime_errors"] += 1
+        bucket["best_delta"] = max(bucket["best_delta"], promotion_delta)
+        for tag in entry.get("change_tags", []):
+            tag_text = str(tag).strip()
+            if tag_text and tag_text not in bucket["tags"]:
+                bucket["tags"].append(tag_text)
+
+    ordered = sorted(
+        buckets.items(),
+        key=lambda item: (
+            {"EXHAUSTED": 0, "SATURATED": 1, "RUNTIME_RISK": 2, "WARM": 3, "ACTIVE_WINNER": 4, "OPEN": 5}[
+                _risk_label(
+                    attempts=int(item[1]["attempts"]),
+                    failures=int(item[1]["failures"]),
+                    zero_delta=int(item[1]["zero_delta"]),
+                    runtime_errors=int(item[1]["runtime_errors"]),
+                    best_delta=float(item[1]["best_delta"]),
+                )
+            ],
+            -int(item[1]["attempts"]),
+            -int(item[1]["failures"]),
+        ),
+    )
+
+    lines = [
+        "方向风险表（必须先读）:",
+        "| 方向簇 | 最近尝试 | 失败 | 零增益 | 运行报错 | 最佳delta | 标签 | 最近标签 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for cluster, stats in ordered[:limit]:
+        label = _risk_label(
+            attempts=int(stats["attempts"]),
+            failures=int(stats["failures"]),
+            zero_delta=int(stats["zero_delta"]),
+            runtime_errors=int(stats["runtime_errors"]),
+            best_delta=float(stats["best_delta"]),
+        )
+        tags = _truncate(",".join(stats["tags"][:4]) or "-", 48)
+        lines.append(
+            f"| {cluster} | {stats['attempts']} | {stats['failures']} | {stats['zero_delta']} | "
+            f"{stats['runtime_errors']} | {stats['best_delta']:.2f} | {label} | {tags} |"
+        )
+    lines.append(
+        "若某方向簇被标为 `SATURATED` / `EXHAUSTED` / `RUNTIME_RISK`，除非能明确说明会改变交易路径，否则不要继续把它当主方向。"
+    )
+    return lines
+
+
 # ==================== 摘要生成 ====================
 
 
@@ -348,6 +534,7 @@ def _display_outcome(raw_outcome: str) -> str:
         "accepted": "保留",
         "rejected": "未保留",
         "early_rejected": "提前淘汰",
+        "runtime_failed": "运行失败",
     }.get(raw_outcome, raw_outcome or "-")
 
 
@@ -355,6 +542,8 @@ def _display_stage(entry: dict[str, Any]) -> str:
     stage = str(entry.get("stop_stage") or "")
     if stage == "early_reject":
         return "提前淘汰"
+    if stage == "runtime_error":
+        return "运行失败"
     if stage == "full_eval":
         return "完整评估"
     if str(entry.get("outcome", "")) in {"accepted", "rejected"}:
@@ -458,22 +647,27 @@ def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int,
 def build_journal_prompt_summary(entries: list[dict[str, Any]], limit: int = 6, journal_path: Path | None = None) -> str:
     parts: list[str] = []
 
-    # 先放压缩的历史经验
-    if journal_path is not None:
-        compact_data = load_compact(journal_path)
-        compact_lines = _format_compact_for_prompt(compact_data, limit=min(8, limit))
-        if compact_lines:
-            parts.extend(compact_lines)
-            parts.append("")
-
     recent_entries, recent_start = _uncompacted_recent_entries(entries, journal_path)
     if recent_entries:
+        latest_regime = _latest_score_regime(entries)
+        same_regime_recent = [
+            entry for entry in recent_entries
+            if not latest_regime or str(entry.get("score_regime", "") or latest_regime) == latest_regime
+        ]
+        board_entries = same_regime_recent or recent_entries
+        board_lines = _direction_risk_board(board_entries, limit=min(8, limit))
+        if board_lines:
+            parts.extend(board_lines)
+            parts.append("")
+
         accepted_count = sum(1 for entry in recent_entries if entry.get("outcome") == "accepted")
         rejected_count = sum(1 for entry in recent_entries if entry.get("outcome") == "rejected")
         early_rejected_count = sum(1 for entry in recent_entries if entry.get("outcome") == "early_rejected")
+        runtime_failed_count = sum(1 for entry in recent_entries if entry.get("outcome") == "runtime_failed")
         parts.append(
             f"最近未压缩轮次共 {len(recent_entries)} 条："
-            f"保留 {accepted_count}，未保留 {rejected_count}，提前淘汰 {early_rejected_count}。"
+            f"保留 {accepted_count}，未保留 {rejected_count}，"
+            f"提前淘汰 {early_rejected_count}，运行失败 {runtime_failed_count}。"
         )
         failure_tag_lines = _recent_failure_tag_lines(recent_entries, limit=min(8, limit))
         if failure_tag_lines:
@@ -485,6 +679,15 @@ def build_journal_prompt_summary(entries: list[dict[str, Any]], limit: int = 6, 
             parts.extend(core_factor_lines)
         parts.append("最近未压缩轮次表:")
         parts.extend(_format_recent_rounds_table(recent_entries, recent_start, core_factor_columns))
+
+    # 压缩历史放在近期方向风险之后，避免长历史淹没最近连续失败。
+    if journal_path is not None:
+        compact_data = load_compact(journal_path)
+        compact_lines = _format_compact_for_prompt(compact_data, limit=min(8, limit))
+        if compact_lines:
+            if parts:
+                parts.append("")
+            parts.extend(compact_lines)
 
     return "\n".join(parts) if parts else "暂无研究历史。"
 

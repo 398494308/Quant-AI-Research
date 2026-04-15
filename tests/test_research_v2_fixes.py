@@ -9,6 +9,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 import backtest_macd_aggressive as backtest
 from research_v2.config import GateConfig
 from research_v2.evaluation import _annualized_sortino, _collect_daily_path, summarize_evaluation
+from research_v2.journal import _format_compact_for_prompt, build_journal_prompt_summary, cluster_for_tags
 from research_v2.strategy_code import StrategySourceError, validate_strategy_source
 
 
@@ -272,6 +273,66 @@ def strategy(*args, **kwargs):
 """
         with self.assertRaises(StrategySourceError):
             validate_strategy_source(source)
+
+
+class JournalPromptFixesTest(unittest.TestCase):
+    def test_cluster_for_tags_groups_ownership_variants(self):
+        self.assertEqual(cluster_for_tags(["acceptance_continuity", "ownership_transfer"]), "ownership_cluster")
+
+    def test_compact_prompt_includes_cluster_risk_summary(self):
+        compact_data = {
+            "rounds": [
+                {
+                    "entry_count": 20,
+                    "accepted_count": 0,
+                    "rejected_count": 20,
+                    "early_rejected_count": 0,
+                    "runtime_failed_count": 1,
+                    "cluster_summary": {
+                        "ownership_cluster": {
+                            "attempts": 6,
+                            "failures": 6,
+                            "zero_delta": 6,
+                            "runtime_errors": 0,
+                            "best_delta": 0.0,
+                            "label": "EXHAUSTED",
+                        }
+                    },
+                }
+            ]
+        }
+
+        summary = "\n".join(_format_compact_for_prompt(compact_data, limit=6))
+        self.assertIn("历史方向簇摘要", summary)
+        self.assertIn("ownership_cluster", summary)
+        self.assertIn("EXHAUSTED", summary)
+
+    def test_journal_summary_puts_direction_risk_board_first(self):
+        entries = []
+        for idx in range(5):
+            entries.append(
+                {
+                    "iteration": idx + 1,
+                    "candidate_id": f"candidate_{idx}",
+                    "outcome": "rejected",
+                    "stop_stage": "full_eval",
+                    "promotion_score": 1.0,
+                    "quality_score": 1.0,
+                    "promotion_delta": 0.0,
+                    "gate_reason": "通过",
+                    "change_tags": ["ownership_reset", "acceptance_continuity"],
+                    "edited_regions": ["strategy"],
+                    "hypothesis": "重复测试 ownership 方向",
+                    "score_regime": "non_overlapping_oos_v1",
+                }
+            )
+
+        summary = build_journal_prompt_summary(entries, limit=8)
+        first_line = summary.splitlines()[0]
+
+        self.assertIn("方向风险表", first_line)
+        self.assertIn("ownership_cluster", summary)
+        self.assertIn("EXHAUSTED", summary)
 
 
 if __name__ == "__main__":

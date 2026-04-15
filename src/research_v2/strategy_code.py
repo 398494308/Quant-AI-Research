@@ -28,6 +28,8 @@ class StrategyCandidate:
     candidate_id: str
     hypothesis: str
     change_plan: str
+    closest_failed_cluster: str
+    novelty_proof: str
     change_tags: tuple[str, ...]
     edited_regions: tuple[str, ...]
     expected_effects: tuple[str, ...]

@@ -86,6 +86,8 @@ class ResearchRuntimeConfig:
     max_recent_journal_entries: int
     early_reject_after_windows: int
     early_reject_sortino_threshold: float
+    smoke_window_count: int
+    max_repair_attempts: int
 
 
 # ==================== 对外入口 ====================
@@ -138,4 +140,6 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         max_recent_journal_entries=_env_int("MACD_V2_MAX_RECENT_JOURNAL_ENTRIES", 12),
         early_reject_after_windows=_env_int("MACD_V2_EARLY_REJECT_WINDOWS", 15),
         early_reject_sortino_threshold=_env_float("MACD_V2_EARLY_REJECT_SORTINO", -1.0),
+        smoke_window_count=_env_int("MACD_V2_SMOKE_WINDOW_COUNT", 3),
+        max_repair_attempts=_env_int("MACD_V2_MAX_REPAIR_ATTEMPTS", 2),
     )

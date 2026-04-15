@@ -15,10 +15,12 @@
 研究器每轮会做这几件事：
 
 1. 读取当前最优策略。
-2. 让模型生成一个新候选。
-3. 对候选跑整套 `eval + validation` 窗口回测。
-4. 只有 `gate` 通过且 `promotion_score` 提升，才晋级为新的最优。
-5. 把每轮结果写进 journal，供后续提示词复用。
+2. 先把“方向风险表 + 历史压缩摘要 + 最近轮次表”喂给模型，再生成一个新候选。
+3. 候选必须显式说明它最接近哪个失败方向簇，并给出 `novelty_proof` 证明这轮不是重复试错。
+4. 先对候选跑少量 `smoke` 窗口；若运行报错，会在同一轮把错误回传给模型修复，而不是直接进入下一轮。
+5. `smoke` 通过后再跑整套 `eval + validation` 窗口回测。
+6. 只有 `gate` 通过且 `promotion_score` 提升，才晋级为新的最优。
+7. 把每轮结果写进 journal，包含 `accepted / rejected / early_rejected / runtime_failed`，并按 20 轮做压缩记忆。
 
 当前评分口径：
 
@@ -33,6 +35,15 @@
 - `eval` 窗口：`28` 天
 - `eval` 步长：`21` 天
 - `validation`：末尾 `396` 天
+
+## 本次机制增强
+
+- 防重复探索仍然走 prompt 约束，不做系统层面的硬禁令。
+- prompt 第一屏现在会显示“方向风险表”，按方向簇聚合最近同评分口径下的失败、零增益和运行报错。
+- 模型必须输出 `closest_failed_cluster` 与 `novelty_proof`，先解释为什么不是继续围绕同一失败簇做近邻微调。
+- 每轮先跑 `smoke` 窗口，运行报错会在同一轮进入 repair loop，最多按配置尝试修复，再决定是否记为 `runtime_failed`。
+- `heartbeat` 会写出当前阶段和窗口进度，便于判断卡在 `smoke`、`full_eval` 还是修复。
+- `2026-04-15` 已按当前 `non_overlapping_oos_v1` 评分口径重新初始化 best state，避免旧分数挡住本该通过的候选。
 
 ## 当前策略轮廓
 
@@ -106,12 +117,25 @@ tests/             最小回归测试
 - 只跑研究器且不发 Discord 时，可以没有它
 - 需要 Discord 或 `real-money-test` 的 OKX 凭证时再补
 
+当前与运行保护直接相关的参数：
+
+- `MACD_V2_EARLY_REJECT_WINDOWS`
+- `MACD_V2_EARLY_REJECT_SORTINO`
+- `MACD_V2_SMOKE_WINDOW_COUNT`
+- `MACD_V2_MAX_REPAIR_ATTEMPTS`
+
 ## 快速开始
 
 只做一次评估，不生成候选：
 
 ```bash
 python3 scripts/research_macd_aggressive_v2.py --once --no-optimize
+```
+
+按当前评分口径重算现有基底，并把它写回新的 best state：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/research_macd_aggressive_v2.py --once --no-optimize --reset-best
 ```
 
 跑一轮研究：

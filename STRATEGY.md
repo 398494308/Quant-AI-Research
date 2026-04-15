@@ -108,6 +108,15 @@
 - `promotion_score` 看 `eval` 非重叠 OOS 主路径 + `validation`
 - rolling 窗口的 `Sortino` 均值、P25、最差值只做鲁棒性诊断，不直接重复加权到主分里
 
+当前研究器的研究记忆与修复链路：
+
+- prompt 第一屏先显示方向风险表，按方向簇聚合近期失败、零增益和运行报错。
+- 防重复探索主要靠 prompt 约束，不做系统层面的硬性方向封禁。
+- 候选必须输出 `closest_failed_cluster` 与 `novelty_proof`，说明本轮为什么不是重复试错。
+- 每轮先跑少量 `smoke` 窗口；若代码运行报错，会在同一轮把错误回传给模型做 repair，而不是直接开始下一轮。
+- 若 repair 次数耗尽，这轮会被记成 `runtime_failed`，同样进入 journal 和记忆压缩。
+- `heartbeat` 会持续写出当前阶段和窗口索引，便于定位是卡在 `smoke`、`full_eval` 还是 repair。
+
 参数校验除范围外，也会检查关键关系：
 
 - `breakout_rsi_min <= breakout_rsi_max`

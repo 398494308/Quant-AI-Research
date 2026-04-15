@@ -27,6 +27,8 @@ def build_candidate_response_schema() -> dict[str, Any]:
             "candidate_id": {"type": "string"},
             "hypothesis": {"type": "string"},
             "change_plan": {"type": "string"},
+            "closest_failed_cluster": {"type": "string"},
+            "novelty_proof": {"type": "string"},
             "change_tags": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -66,6 +68,8 @@ def build_candidate_response_schema() -> dict[str, Any]:
             "candidate_id",
             "hypothesis",
             "change_plan",
+            "closest_failed_cluster",
+            "novelty_proof",
             "change_tags",
             "edited_regions",
             "expected_effects",
@@ -127,7 +131,10 @@ def build_strategy_research_prompt(
 - 保留 `PARAMS`、`strategy()`、`_is_sideways_regime()`、`_trend_quality_ok()`、`_trend_followthrough_ok()` 这些符号。
 - 不要引入网络、文件、随机数、外部依赖。
 - 每轮只做一个明确假设，最多改 1 到 3 个区域。
-- 如果最近某个方向连续失败，不要继续重复。
+- 你必须先阅读最前面的方向风险表。
+- 不要把带有 `SATURATED` / `EXHAUSTED` 标签的方向簇作为本轮主方向。
+- 如果你仍选择接近该方向簇，必须在 `novelty_proof` 里明确说明这次为什么不是重复探索、会改变哪类交易路径、为什么不应再是零增益。
+- 如果最近多轮都零增益，优先切换方向簇或切换 edited region family，而不是继续围绕同一失败簇做近邻微调。
 - 最近研究表是动态的；如果你识别出具有跨轮次解释力、值得持续追踪的新核心因子/指标，可以附带 `core_factors`。
 - 只有当该因子有明确依据，且足以影响后续多轮研究取舍时，才添加 `core_factors`；不要把一次性的局部现象包装成核心因子。
 
@@ -141,7 +148,65 @@ def build_strategy_research_prompt(
 - 只输出 JSON。
 - `strategy_code` 字段里放完整的最新策略文件源码，不要 markdown。
 - `change_tags` 用简短标签描述方向，比如 `sideways_filter`, `breakout_entry`, `tighten_filter`, `reduce_false_breakout`。
+- `closest_failed_cluster` 必须填写你认为最接近的最近失败方向簇；如果确实是新方向，也要写出最接近的旧簇名。
+- `novelty_proof` 必须使用简体中文，明确说明“本轮与最近失败方向的差异、预计会改变的交易路径、为什么不属于重复试错”。
 - `core_factors` 字段必须输出；如果当前没有足够强的新核心因子，就输出空数组 `[]`。如果填写具体因子，`name` 使用 ASCII snake_case，`thesis` 与 `current_signal` 必须使用简体中文。
 - `hypothesis`、`change_plan`、`expected_effects` 必须使用简体中文。
 - `candidate_id` 与 `change_tags` 保持 ASCII 标识符，避免中文变量名或空格标签。
+"""
+
+
+def build_strategy_runtime_repair_prompt(
+    *,
+    strategy_source: str,
+    failed_candidate_code: str,
+    candidate_id: str,
+    hypothesis: str,
+    change_plan: str,
+    change_tags: tuple[str, ...],
+    edited_regions: tuple[str, ...],
+    expected_effects: tuple[str, ...],
+    closest_failed_cluster: str,
+    novelty_proof: str,
+    error_message: str,
+    repair_attempt: int,
+) -> str:
+    return f"""你正在修复同一轮候选代码，不是开始新一轮研究。
+
+这是第 {repair_attempt} 次修复尝试。目标是：保持原研究方向基本不变，优先修复运行错误，让代码先通过 smoke test，再进入完整评估。
+
+原候选元信息：
+- candidate_id: {candidate_id}
+- hypothesis: {hypothesis}
+- change_plan: {change_plan}
+- change_tags: {", ".join(change_tags)}
+- edited_regions: {", ".join(edited_regions)}
+- expected_effects: {"；".join(expected_effects)}
+- closest_failed_cluster: {closest_failed_cluster}
+- novelty_proof: {novelty_proof}
+
+当前基底策略源码：
+```python
+{strategy_source}
+```
+
+刚才失败的候选源码：
+```python
+{failed_candidate_code}
+```
+
+运行错误：
+{error_message}
+
+修复规则：
+- 这是同一轮 repair，不要换研究主题，不要大幅改 hypothesis。
+- 优先做最小必要修复，先保证代码可运行。
+- 除非原标签明显不准确，否则尽量保持 `change_tags`、`edited_regions`、`closest_failed_cluster` 不变。
+- 只允许修改 `src/strategy_macd_aggressive.py` 可编辑区域。
+- 不要引入网络、文件、随机数、外部依赖。
+
+输出要求：
+- 仍然只输出 JSON。
+- `strategy_code` 提供完整策略源码。
+- `novelty_proof` 可以在原说明基础上补一句“本次修复仅修正运行错误，不改变主假设”。
 """

@@ -37,6 +37,8 @@
 
 - 当前策略源码按最新评分口径重新评估
 
+`2026-04-15 16:07:46`（Asia/Shanghai）已按当前 `non_overlapping_oos_v1` 评分口径重算并写回 best state。
+
 截至 `2026-04-15`，当前最佳基底：
 
 - `eval_avg_return = 1.89%`
@@ -59,6 +61,24 @@
 - `eval_window_sortino_p25 = -1.43`
 - `eval_window_sortino_worst = -4.91`
 - `gate = 通过`
+
+## 当前研究器增强
+
+本次主线增强点已经落地：
+
+- prompt 第一屏现在先给模型看“方向风险表”，按方向簇聚合近期失败、零增益、运行报错和最佳 `promotion_delta`。
+- 方向簇标签分为 `OPEN / WARM / ACTIVE_WINNER / SATURATED / EXHAUSTED / RUNTIME_RISK`，用于提示模型哪些方向已经接近被试空。
+- 候选必须输出 `closest_failed_cluster` 与 `novelty_proof`，先解释与最近失败方向的差异，再允许进入评估。
+- 每轮先跑 `smoke` 窗口，运行报错会在同一轮走 repair loop；修复次数耗尽才记成 `runtime_failed`。
+- `heartbeat` 会带上当前阶段和窗口索引，方便排查是卡在 `smoke_test`、`full_eval` 还是 `candidate_repairing`。
+- 压缩历史除了标签统计外，也会保留方向簇摘要，避免 20 轮压缩后丢失长期失败记忆。
+
+当前本地显式运行参数：
+
+- `MACD_V2_EARLY_REJECT_WINDOWS=15`
+- `MACD_V2_EARLY_REJECT_SORTINO=-1.0`
+- `MACD_V2_SMOKE_WINDOW_COUNT=3`
+- `MACD_V2_MAX_REPAIR_ATTEMPTS=2`
 
 ## 当前已确认修复
 
