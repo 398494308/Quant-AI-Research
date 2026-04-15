@@ -24,9 +24,11 @@
 
 当前评分口径：
 
-- `quality_score` = `eval` 非重叠 OOS 主路径日收益的年化 Sortino
-- `promotion_score` = `eval` 非重叠 OOS 主路径 + `validation` 合并后的年化 Sortino
-- rolling `eval` 窗口继续保留，但只做稳定性诊断，不再重复加权同一天
+- `score_regime = trend_capture_v1`
+- `quality_score = 0.70 * eval_trend_capture_score + 0.30 * eval_return_score`
+- `promotion_score = 0.70 * combined_trend_capture_score + 0.30 * combined_return_score`
+- `trend_capture_score` 不看“平滑度”，而是看大趋势的 `到来 / 陪跑 / 掉头`
+- 切段用唯一 `4h` 市场路径，不重复加权重叠窗口里的同一时间点
 
 当前窗口配置默认是：
 
@@ -39,12 +41,14 @@
 ## 本次机制增强
 
 - 防重复探索仍然走 prompt 约束，不做系统层面的硬禁令。
+- prompt 开头会先明确说明：这是 `15m` 执行、`1h + 4h` 确认的 BTC 激进趋势策略，目标是抓大波段，而不是追求平滑收益。
 - prompt 第一屏现在会显示“方向风险表”，按方向簇聚合最近同评分口径下的失败、零增益和运行报错。
 - 模型必须输出 `closest_failed_cluster` 与 `novelty_proof`，先解释为什么不是继续围绕同一失败簇做近邻微调。
 - 若最近连续 3 轮都属于低变化轮次，prompt 会强制进入“探索轮”，要求切换因子家族或编辑区域家族，而不是继续做近邻改写。
 - 每轮先跑 `smoke` 窗口，运行报错会在同一轮进入 repair loop，最多按配置尝试修复，再决定是否记为 `runtime_failed`。
 - `heartbeat` 会写出当前阶段和窗口进度，便于判断卡在 `smoke`、`full_eval` 还是修复。
-- `2026-04-15` 已按当前 `non_overlapping_oos_v1` 评分口径重新初始化 best state，避免旧分数挡住本该通过的候选。
+- `2026-04-15` 已按当前 `trend_capture_v1` 评分口径重新初始化 best state，避免旧分数挡住本该通过的候选。
+- 提前淘汰从旧的 Sortino 逻辑改成了部分窗口趋势捕获快照：趋势段够多且趋势捕获分、命中率都很差时，会提前结束该轮。
 
 ## 当前策略轮廓
 
@@ -76,18 +80,24 @@
 
 研究器运行时会把最新最优状态写到 `state/research_macd_aggressive_v2_best.json`。
 
-截至 `2026-04-15`，按当前非重叠 OOS 评分口径重新评估，当前最佳快照为：
+截至 `2026-04-15 19:11:46`（Asia/Shanghai），按当前 `trend_capture_v1` 评分口径重新评估，当前基底快照为：
 
-- `quality_score = 2.04`
-- `promotion_score = 1.69`
+- `quality_score = 0.21`
+- `promotion_score = 0.28`
+- `eval_trend_capture_score = 0.11`
+- `validation_trend_capture_score = 0.22`
+- `combined_trend_capture_score = 0.14`
+- `combined_return_score = 0.60`
 - `eval_avg_return = 1.89%`
 - `validation_avg_return = 10.84%`
 - `worst_drawdown = 18.52%`
 - `total_trades = 98`
-- `eval_unique_days = 609`
-- `eval_window_sortino_p25 = -1.43`
-- `eval_window_sortino_worst = -4.91`
-- `gate = 通过`
+- `eval_major_segment_count = 11`
+- `validation_major_segment_count = 10`
+- `segment_hit_rate = 22.73%`
+- `bull_capture_score = 0.05`
+- `bear_capture_score = 0.27`
+- `gate = 评估命中率偏低；验证命中率偏低`
 
 ## 目录结构
 
@@ -121,7 +131,9 @@ tests/             最小回归测试
 当前与运行保护直接相关的参数：
 
 - `MACD_V2_EARLY_REJECT_WINDOWS`
-- `MACD_V2_EARLY_REJECT_SORTINO`
+- `MACD_V2_EARLY_REJECT_MIN_SEGMENTS`
+- `MACD_V2_EARLY_REJECT_TREND_SCORE`
+- `MACD_V2_EARLY_REJECT_HIT_RATE`
 - `MACD_V2_SMOKE_WINDOW_COUNT`
 - `MACD_V2_MAX_REPAIR_ATTEMPTS`
 

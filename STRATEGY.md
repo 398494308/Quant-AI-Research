@@ -100,16 +100,21 @@
 - 文件：`scripts/research_macd_aggressive_v2.py`
 - 允许模型直接改写策略源码
 - 但会经过源码校验、参数边界校验和研究历史去重
-- 评分核心是 `非重叠 OOS Sortino + gate`
+- 评分核心是 `trend_capture_v1 + gate`
 
 当前主评分口径：
 
-- `quality_score` 看 `eval` 非重叠 OOS 主路径
-- `promotion_score` 看 `eval` 非重叠 OOS 主路径 + `validation`
-- rolling 窗口的 `Sortino` 均值、P25、最差值只做鲁棒性诊断，不直接重复加权到主分里
+- 先在唯一 `4h` 市场路径上识别 BTC 的大趋势段
+- 每段拆成 `到来 / 陪跑 / 掉头`
+- `trend_capture_score` 看的是：能否及时跟上、能否陪跑主趋势、能否在掉头时跑掉或反手
+- `return_score` 看的是整条路径最终把资金放大了多少
+- `quality_score = 0.70 * eval_trend_capture_score + 0.30 * eval_return_score`
+- `promotion_score = 0.70 * combined_trend_capture_score + 0.30 * combined_return_score`
+- 爆仓和回撤保留为诊断项，但不再是主评分，也不再单独惩罚
 
 当前研究器的研究记忆与修复链路：
 
+- prompt 开头会先强调：这是一套 `15m` 执行、`1h + 4h` 确认的 BTC 激进趋势策略，目标是抓大行情，而不是做低波动收益平滑。
 - prompt 第一屏先显示方向风险表，按方向簇聚合近期失败、零增益和运行报错。
 - 防重复探索主要靠 prompt 约束，不做系统层面的硬性方向封禁。
 - 候选必须输出 `closest_failed_cluster` 与 `novelty_proof`，说明本轮为什么不是重复试错。
@@ -117,6 +122,7 @@
 - 每轮先跑少量 `smoke` 窗口；若代码运行报错，会在同一轮把错误回传给模型做 repair，而不是直接开始下一轮。
 - 若 repair 次数耗尽，这轮会被记成 `runtime_failed`，同样进入 journal 和记忆压缩。
 - `heartbeat` 会持续写出当前阶段和窗口索引，便于定位是卡在 `smoke`、`full_eval` 还是 repair。
+- 提前淘汰已从旧的 Sortino 门槛改成“部分窗口趋势捕获快照”：只有当趋势段数量已足够且趋势捕获分、命中率都很差时，才会提前结束这轮。
 
 参数校验除范围外，也会检查关键关系：
 

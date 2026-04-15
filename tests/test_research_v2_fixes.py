@@ -8,7 +8,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import backtest_macd_aggressive as backtest
 from research_v2.config import GateConfig
-from research_v2.evaluation import _annualized_sortino, _collect_daily_path, summarize_evaluation
+from research_v2.evaluation import _collect_daily_path, _collect_trend_path, _trend_score_report, summarize_evaluation
 from research_v2.journal import _format_compact_for_prompt, build_journal_prompt_summary, cluster_for_tags
 from research_v2.strategy_code import StrategySourceError, validate_strategy_source
 
@@ -132,10 +132,50 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertEqual(path.overlap_days, 1)
         self.assertEqual(path.dropped_points, 1)
 
-    def test_summarize_evaluation_scores_non_overlapping_oos_path(self):
-        eval_window1 = type("Window", (), {"group": "eval", "label": "评估1", "start_date": "2026-01-01", "end_date": "2026-01-05"})()
-        eval_window2 = type("Window", (), {"group": "eval", "label": "评估2", "start_date": "2026-01-04", "end_date": "2026-01-08"})()
-        validation_window = type("Window", (), {"group": "validation", "label": "验证1", "start_date": "2026-01-09", "end_date": "2026-01-10"})()
+    def test_summarize_evaluation_scores_unique_trend_capture_path(self):
+        eval_window1 = type("Window", (), {"group": "eval", "label": "评估1", "start_date": "2026-01-01", "end_date": "2026-01-12"})()
+        eval_window2 = type("Window", (), {"group": "eval", "label": "评估2", "start_date": "2026-01-10", "end_date": "2026-01-15"})()
+        validation_window = type("Window", (), {"group": "validation", "label": "验证1", "start_date": "2026-01-16", "end_date": "2026-01-23"})()
+        eval_points_1 = [
+            {"timestamp": idx, "label": f"t{idx}", "market_close": close, "atr_ratio": 0.01, "strategy_equity": equity}
+            for idx, close, equity in [
+                (1, 100.0, 100000.0),
+                (2, 103.0, 101000.0),
+                (3, 107.0, 104000.0),
+                (4, 112.0, 108000.0),
+                (5, 118.0, 115000.0),
+                (6, 116.0, 114000.0),
+                (7, 111.0, 112000.0),
+                (8, 103.0, 108000.0),
+                (9, 94.0, 114000.0),
+                (10, 90.0, 120000.0),
+                (11, 94.0, 121000.0),
+            ]
+        ]
+        eval_points_2 = [
+            {"timestamp": idx, "label": f"t{idx}", "market_close": close, "atr_ratio": 0.01, "strategy_equity": equity}
+            for idx, close, equity in [
+                (10, 90.0, 119500.0),
+                (11, 94.0, 122000.0),
+                (12, 102.0, 125000.0),
+                (13, 112.0, 132000.0),
+                (14, 121.0, 140000.0),
+                (15, 116.0, 139000.0),
+            ]
+        ]
+        validation_points = [
+            {"timestamp": idx, "label": f"t{idx}", "market_close": close, "atr_ratio": 0.01, "strategy_equity": equity}
+            for idx, close, equity in [
+                (16, 116.0, 139000.0),
+                (17, 112.0, 141000.0),
+                (18, 107.0, 143000.0),
+                (19, 100.0, 145000.0),
+                (20, 93.0, 148000.0),
+                (21, 90.0, 150000.0),
+                (22, 94.0, 149000.0),
+                (23, 101.0, 147000.0),
+            ]
+        ]
         results = [
             {
                 "window": eval_window1,
@@ -145,17 +185,7 @@ class EvaluationFixesTest(unittest.TestCase):
                     "trades": 8,
                     "fee_drag_pct": 0.5,
                     "liquidations": 0,
-                    "trades_detail": [
-                        {"pnl_amount": 30.0},
-                        {"pnl_amount": -10.0},
-                    ],
-                    "daily_return_points": [
-                        {"date": "2026-01-01", "return": 0.01},
-                        {"date": "2026-01-02", "return": 0.01},
-                        {"date": "2026-01-03", "return": -0.01},
-                        {"date": "2026-01-04", "return": 0.02},
-                        {"date": "2026-01-05", "return": 0.01},
-                    ],
+                    "trend_capture_points": eval_points_1,
                 },
             },
             {
@@ -166,17 +196,7 @@ class EvaluationFixesTest(unittest.TestCase):
                     "trades": 7,
                     "fee_drag_pct": 0.8,
                     "liquidations": 0,
-                    "trades_detail": [
-                        {"pnl_amount": 35.0},
-                        {"pnl_amount": -15.0},
-                    ],
-                    "daily_return_points": [
-                        {"date": "2026-01-04", "return": 0.03},
-                        {"date": "2026-01-05", "return": 0.04},
-                        {"date": "2026-01-06", "return": -0.02},
-                        {"date": "2026-01-07", "return": 0.01},
-                        {"date": "2026-01-08", "return": 0.00},
-                    ],
+                    "trend_capture_points": eval_points_2,
                 },
             },
             {
@@ -187,40 +207,43 @@ class EvaluationFixesTest(unittest.TestCase):
                     "trades": 6,
                     "fee_drag_pct": 0.2,
                     "liquidations": 0,
-                    "trades_detail": [
-                        {"pnl_amount": 20.0},
-                        {"pnl_amount": -5.0},
-                    ],
-                    "daily_return_points": [
-                        {"date": "2026-01-09", "return": 0.02},
-                        {"date": "2026-01-10", "return": 0.01},
-                    ],
+                    "trend_capture_points": validation_points,
                 },
             },
         ]
         gates = GateConfig(
-            min_total_trades=0,
-            min_eval_trades=0,
-            min_validation_trades=0,
-            min_positive_ratio=0.0,
-            max_drawdown_pct=100.0,
-            max_liquidations=0,
-            min_validation_return=-100.0,
-            max_eval_validation_gap=100.0,
+            min_eval_segments=0,
+            min_validation_segments=0,
+            min_eval_hit_rate=0.0,
+            min_validation_hit_rate=0.0,
+            min_eval_trend_score=-10.0,
+            min_validation_trend_score=-10.0,
+            max_capture_drop=100.0,
+            min_bull_capture=-10.0,
+            min_bear_capture=-10.0,
             max_fee_drag_pct=100.0,
         )
 
         report = summarize_evaluation(results, gates)
-        expected_eval_returns = [0.01, 0.01, -0.01, 0.03, 0.04, -0.02, 0.01, 0.00]
-        expected_all_returns = expected_eval_returns + [0.02, 0.01]
+        expected_eval_points = _collect_trend_path(results, "eval").points
+        expected_all_points = _collect_trend_path(results, None).points
+        expected_eval_report = _trend_score_report(expected_eval_points)
+        expected_all_report = _trend_score_report(expected_all_points)
 
-        self.assertAlmostEqual(report.metrics["daily_sortino"], _annualized_sortino(expected_eval_returns))
-        self.assertAlmostEqual(report.metrics["quality_score"], _annualized_sortino(expected_eval_returns))
-        self.assertAlmostEqual(report.metrics["promotion_score"], _annualized_sortino(expected_all_returns))
-        self.assertEqual(report.metrics["eval_unique_days"], 8.0)
-        self.assertEqual(report.metrics["eval_overlap_days"], 2.0)
-        self.assertEqual(report.metrics["eval_overlap_points_dropped"], 2.0)
-        self.assertEqual(report.metrics["validation_overlap_days"], 0.0)
+        self.assertAlmostEqual(report.metrics["eval_trend_capture_score"], expected_eval_report.trend_score)
+        self.assertAlmostEqual(report.metrics["combined_trend_capture_score"], expected_all_report.trend_score)
+        self.assertAlmostEqual(
+            report.metrics["quality_score"],
+            0.70 * expected_eval_report.trend_score + 0.30 * expected_eval_report.return_score,
+        )
+        self.assertAlmostEqual(
+            report.metrics["promotion_score"],
+            0.70 * expected_all_report.trend_score + 0.30 * expected_all_report.return_score,
+        )
+        self.assertEqual(report.metrics["eval_unique_trend_points"], 15.0)
+        self.assertEqual(report.metrics["eval_overlap_trend_points"], 2.0)
+        self.assertEqual(report.metrics["eval_overlap_trend_points_dropped"], 2.0)
+        self.assertEqual(report.metrics["validation_overlap_trend_points"], 0.0)
         self.assertTrue(report.gate_passed)
 
 
@@ -323,7 +346,7 @@ class JournalPromptFixesTest(unittest.TestCase):
                     "change_tags": ["ownership_reset", "acceptance_continuity"],
                     "edited_regions": ["strategy"],
                     "hypothesis": "重复测试 ownership 方向",
-                    "score_regime": "non_overlapping_oos_v1",
+                    "score_regime": "trend_capture_v1",
                 }
             )
 
@@ -343,8 +366,8 @@ class JournalPromptFixesTest(unittest.TestCase):
                     "candidate_id": f"candidate_{idx}",
                     "outcome": "rejected",
                     "stop_stage": "full_eval",
-                    "promotion_score": 1.69,
-                    "quality_score": 2.04,
+                    "promotion_score": 0.88,
+                    "quality_score": 0.84,
                     "promotion_delta": 0.0,
                     "gate_reason": "通过",
                     "change_tags": ["reload_impulse_filter", "short_trend_quality"],
@@ -361,9 +384,12 @@ class JournalPromptFixesTest(unittest.TestCase):
                     "metrics": {
                         "total_trades": 98.0,
                         "avg_fee_drag": 0.76,
-                        "eval_window_sortino_p25": -1.43,
+                        "combined_trend_capture_score": 0.81,
+                        "segment_hit_rate": 0.42,
+                        "bull_capture_score": 0.18,
+                        "bear_capture_score": 0.53,
                     },
-                    "score_regime": "non_overlapping_oos_v1",
+                    "score_regime": "trend_capture_v1",
                 }
             )
 
@@ -372,6 +398,13 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("探索触发（必须执行）", summary)
         self.assertIn("impulse_persistence", summary)
         self.assertIn("continuation_energy_decay", summary)
+
+    def test_journal_summary_keeps_empty_table_after_reset(self):
+        summary = build_journal_prompt_summary([], limit=8)
+
+        self.assertIn("方向风险表", summary)
+        self.assertIn("最近未压缩轮次表", summary)
+        self.assertIn("等待新历史", summary)
 
 
 if __name__ == "__main__":

@@ -21,15 +21,16 @@
 
 ## 当前 Gate
 
-- 总交易数 `>= 30`
-- `eval` 交易数 `>= 24`
-- `validation` 交易数 `>= 5`
-- `eval` 正收益窗口占比 `>= 30%`
-- 最大回撤 `<= 50%`
-- 爆仓次数 `<= 0`
-- `validation` 平均收益 `>= -10%`
-- `eval - validation` 落差 `<= 30`
-- 平均手续费拖累 `<= 6%`
+- `eval` 大趋势段数 `>= 8`
+- `validation` 大趋势段数 `>= 3`
+- `eval` 趋势段命中率 `>= 35%`
+- `validation` 趋势段命中率 `>= 25%`
+- `eval` 趋势捕获分 `>= 0.10`
+- `validation` 趋势捕获分 `>= 0.00`
+- `eval - validation` 趋势捕获落差 `<= 0.45`
+- 综合多头捕获分 `>= -0.10`
+- 综合空头捕获分 `>= -0.10`
+- 平均手续费拖累 `<= 8%`
 
 ## 当前最优快照
 
@@ -37,7 +38,7 @@
 
 - 当前策略源码按最新评分口径重新评估
 
-`2026-04-15 16:07:46`（Asia/Shanghai）已按当前 `non_overlapping_oos_v1` 评分口径重算并写回 best state。
+`2026-04-15 19:11:46`（Asia/Shanghai）已按当前 `trend_capture_v1` 评分口径重算并写回 best state。
 
 截至 `2026-04-15`，当前最佳基底：
 
@@ -50,22 +51,29 @@
 - `total_trades = 98`
 - `eval_trades = 64`
 - `validation_trades = 34`
-- `daily_sharpe = 0.96`
-- `daily_sortino = 2.04`
-- `quality_score = 2.04`
-- `promotion_score = 1.69`
-- `eval_unique_days = 609`
-- `eval_overlap_days = 203`
-- `eval_overlap_points_dropped = 203`
-- `eval_window_sortino_avg = 0.49`
-- `eval_window_sortino_p25 = -1.43`
-- `eval_window_sortino_worst = -4.91`
-- `gate = 通过`
+- `eval_trend_capture_score = 0.11`
+- `validation_trend_capture_score = 0.22`
+- `combined_trend_capture_score = 0.14`
+- `combined_return_score = 0.60`
+- `quality_score = 0.21`
+- `promotion_score = 0.28`
+- `eval_major_segment_count = 11`
+- `validation_major_segment_count = 10`
+- `major_segment_count = 22`
+- `segment_hit_rate = 22.73%`
+- `bull_capture_score = 0.05`
+- `bear_capture_score = 0.27`
+- `eval_unique_trend_points = 3655`
+- `eval_overlap_trend_points = 1246`
+- `gate = 评估命中率偏低；验证命中率偏低`
 
 ## 当前研究器增强
 
 本次主线增强点已经落地：
 
+- 主评分已经从 `Sortino` 切到 `trend_capture_v1`，核心目标改成抓大趋势，不再优化成“更平滑”。
+- prompt 开头会先强调这是 `15m` 执行、`1h + 4h` 确认的 BTC 激进趋势策略，要求模型优先理解策略目标而不是盲目微调参数。
+- 切段使用唯一 `4h` 时间轴，并在回测结果中直接输出市场路径与策略权益路径，避免为了评分重复加载市场数据。
 - prompt 第一屏现在先给模型看“方向风险表”，按方向簇聚合近期失败、零增益、运行报错和最佳 `promotion_delta`。
 - 方向簇标签分为 `OPEN / WARM / ACTIVE_WINNER / SATURATED / EXHAUSTED / RUNTIME_RISK`，用于提示模型哪些方向已经接近被试空。
 - 候选必须输出 `closest_failed_cluster` 与 `novelty_proof`，先解释与最近失败方向的差异，再允许进入评估。
@@ -73,11 +81,14 @@
 - 每轮先跑 `smoke` 窗口，运行报错会在同一轮走 repair loop；修复次数耗尽才记成 `runtime_failed`。
 - `heartbeat` 会带上当前阶段和窗口索引，方便排查是卡在 `smoke_test`、`full_eval` 还是 `candidate_repairing`。
 - 压缩历史除了标签统计外，也会保留方向簇摘要，避免 20 轮压缩后丢失长期失败记忆。
+- 提前淘汰改成了趋势捕获快照：窗口数足够、趋势段数足够且趋势捕获分和命中率都明显偏差时，才会提前结束这轮。
 
 当前本地显式运行参数：
 
-- `MACD_V2_EARLY_REJECT_WINDOWS=15`
-- `MACD_V2_EARLY_REJECT_SORTINO=-1.0`
+- `MACD_V2_EARLY_REJECT_WINDOWS=8`
+- `MACD_V2_EARLY_REJECT_MIN_SEGMENTS=4`
+- `MACD_V2_EARLY_REJECT_TREND_SCORE=-0.10`
+- `MACD_V2_EARLY_REJECT_HIT_RATE=0.15`
 - `MACD_V2_SMOKE_WINDOW_COUNT=3`
 - `MACD_V2_MAX_REPAIR_ATTEMPTS=2`
 
@@ -94,12 +105,14 @@
 
 ## 当前关注点
 
-当前策略还没有完全跳出 `short_breakdown` 的局部优化盆地。
+当前基底在新口径下的主要问题已经更直白地暴露出来：
 
-也就是说：
+- 评估期大趋势段数量是够的，但真正“命中”的比例仍然很低
+- 双向趋势捕获已经转正，但命中率仍明显低于当前门槛
+- 回测收益并不差，说明问题不在“完全抓不到行情”，而在于切到趋势段之后稳定性还不够
 
-- 已经能持续找到更优版本
-- 但研究方向仍然主要集中在做空破位质量、价格发现效率、4H 跟随确认这几个邻近主题
-- 主评分口径更干净后，窗口稳定性尾部仍偏弱，`eval_window_sortino_p25` 和最差窗口仍明显为负
+后续研究重点应该继续放在：
 
-如果后续要继续推进，重点不该是回到旧版参数扫，而是继续提升研究器的方向多样性与记忆表达质量。
+- 多头大趋势的到来识别和陪跑能力
+- 掉头时的退出/反手机制
+- 通过 prompt 和记忆让模型减少在单一做空近邻方向里打转

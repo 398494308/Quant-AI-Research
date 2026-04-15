@@ -63,14 +63,15 @@ class WindowConfig:
 
 @dataclass(frozen=True)
 class GateConfig:
-    min_total_trades: int
-    min_eval_trades: int
-    min_validation_trades: int
-    min_positive_ratio: float
-    max_drawdown_pct: float
-    max_liquidations: int
-    min_validation_return: float
-    max_eval_validation_gap: float
+    min_eval_segments: int
+    min_validation_segments: int
+    min_eval_hit_rate: float
+    min_validation_hit_rate: float
+    min_eval_trend_score: float
+    min_validation_trend_score: float
+    max_capture_drop: float
+    min_bull_capture: float
+    min_bear_capture: float
     max_fee_drag_pct: float
 
 
@@ -85,7 +86,9 @@ class ResearchRuntimeConfig:
     prompt_max_output_tokens: int
     max_recent_journal_entries: int
     early_reject_after_windows: int
-    early_reject_sortino_threshold: float
+    early_reject_min_segments: int
+    early_reject_trend_score_threshold: float
+    early_reject_hit_rate_threshold: float
     smoke_window_count: int
     max_repair_attempts: int
 
@@ -118,15 +121,16 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
     )
 
     gates = GateConfig(
-        min_total_trades=_env_int("MACD_V2_MIN_TOTAL_TRADES", 30),
-        min_eval_trades=_env_int("MACD_V2_MIN_EVAL_TRADES", 24),
-        min_validation_trades=_env_int("MACD_V2_MIN_VALIDATION_TRADES", 5),
-        min_positive_ratio=_env_float("MACD_V2_MIN_POSITIVE_RATIO", 0.30),
-        max_drawdown_pct=_env_float("MACD_V2_MAX_DRAWDOWN_PCT", 50.0),
-        max_liquidations=_env_int("MACD_V2_MAX_LIQUIDATIONS", 0),
-        min_validation_return=_env_float("MACD_V2_MIN_VALIDATION_RETURN", -10.0),
-        max_eval_validation_gap=_env_float("MACD_V2_MAX_EVAL_VALIDATION_GAP", 30.0),
-        max_fee_drag_pct=_env_float("MACD_V2_MAX_FEE_DRAG_PCT", 6.0),
+        min_eval_segments=_env_int("MACD_V2_MIN_EVAL_SEGMENTS", 8),
+        min_validation_segments=_env_int("MACD_V2_MIN_VALIDATION_SEGMENTS", 3),
+        min_eval_hit_rate=_env_float("MACD_V2_MIN_EVAL_HIT_RATE", 0.35),
+        min_validation_hit_rate=_env_float("MACD_V2_MIN_VALIDATION_HIT_RATE", 0.25),
+        min_eval_trend_score=_env_float("MACD_V2_MIN_EVAL_TREND_SCORE", 0.10),
+        min_validation_trend_score=_env_float("MACD_V2_MIN_VALIDATION_TREND_SCORE", 0.00),
+        max_capture_drop=_env_float("MACD_V2_MAX_CAPTURE_DROP", 0.45),
+        min_bull_capture=_env_float("MACD_V2_MIN_BULL_CAPTURE", -0.10),
+        min_bear_capture=_env_float("MACD_V2_MIN_BEAR_CAPTURE", -0.10),
+        max_fee_drag_pct=_env_float("MACD_V2_MAX_FEE_DRAG_PCT", 8.0),
     )
 
     return ResearchRuntimeConfig(
@@ -139,7 +143,9 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         prompt_max_output_tokens=_env_int("MACD_V2_PROMPT_MAX_OUTPUT_TOKENS", 12000),
         max_recent_journal_entries=_env_int("MACD_V2_MAX_RECENT_JOURNAL_ENTRIES", 12),
         early_reject_after_windows=_env_int("MACD_V2_EARLY_REJECT_WINDOWS", 15),
-        early_reject_sortino_threshold=_env_float("MACD_V2_EARLY_REJECT_SORTINO", -1.0),
+        early_reject_min_segments=_env_int("MACD_V2_EARLY_REJECT_MIN_SEGMENTS", 4),
+        early_reject_trend_score_threshold=_env_float("MACD_V2_EARLY_REJECT_TREND_SCORE", -0.10),
+        early_reject_hit_rate_threshold=_env_float("MACD_V2_EARLY_REJECT_HIT_RATE", 0.15),
         smoke_window_count=_env_int("MACD_V2_SMOKE_WINDOW_COUNT", 3),
         max_repair_attempts=_env_int("MACD_V2_MAX_REPAIR_ATTEMPTS", 2),
     )

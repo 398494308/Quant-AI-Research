@@ -715,6 +715,45 @@ def _append_daily_equity_point(points, timestamp_ms, equity):
         points.append(payload)
 
 
+def _beijing_time_label(timestamp_ms):
+    return _beijing_dt(timestamp_ms).strftime("%Y-%m-%d %H:%M")
+
+
+def _append_four_hour_snapshot(points, timestamp_ms, equity, market_state_row):
+    payload = {
+        "label": _beijing_time_label(timestamp_ms),
+        "timestamp": timestamp_ms,
+        "market_close": round(float(market_state_row["close"]), 8),
+        "atr_ratio": float(market_state_row.get("atr_ratio", 0.0)),
+        "strategy_equity": round(equity, 8),
+    }
+    if points and points[-1]["timestamp"] == timestamp_ms:
+        points[-1] = payload
+    else:
+        points.append(payload)
+
+
+def _trend_capture_points_from_equity_curve(four_hour_equity_curve):
+    points = []
+    for idx, point in enumerate(four_hour_equity_curve):
+        strategy_return = 0.0
+        if idx > 0:
+            prev_equity = four_hour_equity_curve[idx - 1]["strategy_equity"]
+            if prev_equity > 1e-9:
+                strategy_return = point["strategy_equity"] / prev_equity - 1.0
+        points.append(
+            {
+                "label": point["label"],
+                "timestamp": point["timestamp"],
+                "market_close": point["market_close"],
+                "atr_ratio": point["atr_ratio"],
+                "strategy_equity": point["strategy_equity"],
+                "strategy_return": strategy_return,
+            }
+        )
+    return points
+
+
 def _daily_returns_from_equity_curve(daily_equity_curve):
     returns = []
     for idx in range(1, len(daily_equity_curve)):
@@ -947,10 +986,23 @@ def backtest_macd_aggressive(
     funding_event_count = 0
     funding_idx = 0
     daily_equity_curve = []
+    four_hour_equity_curve = []
     next_trade_id = 1
     delay_minutes = int(exit_p.get("entry_delay_minutes", 1))
     taker_fee_rate = float(exit_p["okx_taker_fee_rate"]) if int(exit_p.get("trading_fee_enabled", 1)) > 0 else 0.0
     slippage_pct = float(exit_p.get("slippage_pct", 0.0003))
+    four_hour_window_state = []
+    four_hour_window_close_timestamps = []
+    next_four_hour_sample_idx = 0
+    if include_diagnostics:
+        full_four_hour_close_timestamps = prepared_context["four_hour_close_timestamps"]
+        four_hour_start_idx, four_hour_end_idx = _timestamp_window_indices_inclusive(
+            full_four_hour_close_timestamps,
+            start_ts,
+            end_ts,
+        )
+        four_hour_window_state = four_hour_state[four_hour_start_idx:four_hour_end_idx]
+        four_hour_window_close_timestamps = full_four_hour_close_timestamps[four_hour_start_idx:four_hour_end_idx]
 
     def record_trade(trade):
         trades.append(trade)
@@ -1322,6 +1374,18 @@ def backtest_macd_aggressive(
             for position in positions
         )
         _append_daily_equity_point(daily_equity_curve, bar_close_ts, equity)
+        while (
+            include_diagnostics
+            and next_four_hour_sample_idx < len(four_hour_window_close_timestamps)
+            and four_hour_window_close_timestamps[next_four_hour_sample_idx] <= bar_close_ts
+        ):
+            _append_four_hour_snapshot(
+                four_hour_equity_curve,
+                four_hour_window_close_timestamps[next_four_hour_sample_idx],
+                equity,
+                four_hour_window_state[next_four_hour_sample_idx],
+            )
+            next_four_hour_sample_idx += 1
         max_equity = max(max_equity, equity)
         if max_equity > 0:
             max_drawdown = max(max_drawdown, (max_equity - equity) / max_equity * 100.0)
@@ -1355,6 +1419,18 @@ def backtest_macd_aggressive(
         record_trade(_build_closed_trade(position))
 
     _append_daily_equity_point(daily_equity_curve, end_ts, capital)
+    while (
+        include_diagnostics
+        and next_four_hour_sample_idx < len(four_hour_window_close_timestamps)
+        and four_hour_window_close_timestamps[next_four_hour_sample_idx] <= end_ts
+    ):
+        _append_four_hour_snapshot(
+            four_hour_equity_curve,
+            four_hour_window_close_timestamps[next_four_hour_sample_idx],
+            capital,
+            four_hour_window_state[next_four_hour_sample_idx],
+        )
+        next_four_hour_sample_idx += 1
     total_return = (capital - initial_capital) / initial_capital * 100.0
     fee_drag_pct = total_trading_fees / initial_capital * 100.0
     fee_penalty = fee_drag_pct * 0.35
@@ -1396,6 +1472,7 @@ def backtest_macd_aggressive(
         result["daily_equity_curve"] = daily_equity_curve
         result["daily_returns"] = _daily_returns_from_equity_curve(daily_equity_curve)
         result["daily_return_points"] = _daily_return_points_from_equity_curve(daily_equity_curve)
+        result["trend_capture_points"] = _trend_capture_points_from_equity_curve(four_hour_equity_curve)
         result["trade_reason_stats"] = _trade_reason_stats(settlement_legs)
         result["trades_detail"] = trades
         result["trade_legs_detail"] = settlement_legs

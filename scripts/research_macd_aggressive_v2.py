@@ -29,7 +29,7 @@ import backtest_macd_aggressive as backtest_module
 import strategy_macd_aggressive as strategy_module
 from codex_exec_client import StrategyGenerationTransientError, build_json_text_format, generate_json_object
 from research_v2.config import ResearchRuntimeConfig, load_research_runtime_config
-from research_v2.evaluation import EvaluationReport, summarize_evaluation, _annualized_sortino, _collect_daily_path
+from research_v2.evaluation import EvaluationReport, partial_eval_gate_snapshot, summarize_evaluation
 from research_v2.journal import append_journal_entry, build_journal_prompt_summary, has_recent_code_hash, load_journal_entries, maybe_compact
 from research_v2.notifications import build_discord_summary_message, load_discord_config, send_discord_message
 from research_v2.prompting import build_candidate_response_schema, build_strategy_research_prompt
@@ -56,7 +56,7 @@ WINDOWS = build_research_windows(RUNTIME.windows)
 DISCORD_CONFIG = load_discord_config()
 EVAL_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "eval")
 VALIDATION_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "validation")
-SCORE_REGIME = "non_overlapping_oos_v1"
+SCORE_REGIME = "trend_capture_v1"
 
 best_source = ""
 best_report: EvaluationReport | None = None
@@ -119,7 +119,7 @@ def reload_strategy_module() -> None:
 
 
 class EarlyRejection(Exception):
-    """前 N 个 eval 窗口的非重叠 OOS Sortino 太差，提前终止回测。"""
+    """前若干 eval 窗口的大趋势捕获太差，提前终止回测。"""
 
 
 class CandidateRuntimeFailure(Exception):
@@ -165,7 +165,6 @@ def _run_base_backtests(
     results: list[dict[str, Any]] = []
     eval_count = 0
     check_at = RUNTIME.early_reject_after_windows
-    threshold = RUNTIME.early_reject_sortino_threshold
     active_windows = windows or WINDOWS
     prepared_context = backtest_module.prepare_backtest_context(
         strategy_module.PARAMS,
@@ -198,12 +197,16 @@ def _run_base_backtests(
 
         if allow_early_reject and window.group == "eval":
             eval_count += 1
-            if eval_count == check_at and check_at > 0:
-                eval_path = _collect_daily_path(results, "eval")
-                sortino = _annualized_sortino(eval_path.returns)
-                if sortino < threshold:
+            if eval_count >= check_at and check_at > 0:
+                snapshot = partial_eval_gate_snapshot(results)
+                if (
+                    snapshot["segment_count"] >= float(RUNTIME.early_reject_min_segments)
+                    and snapshot["trend_score"] < RUNTIME.early_reject_trend_score_threshold
+                    and snapshot["hit_rate"] < RUNTIME.early_reject_hit_rate_threshold
+                ):
                     raise EarlyRejection(
-                        f"前{check_at}个eval窗口非重叠OOS Sortino={sortino:.2f} < {threshold}, 提前淘汰"
+                        f"前{eval_count}个eval窗口趋势捕获分={snapshot['trend_score']:.2f}，"
+                        f"命中率={snapshot['hit_rate']:.0%}，趋势段={int(snapshot['segment_count'])}，提前淘汰"
                     )
     return results
 
@@ -365,6 +368,7 @@ def _persist_best_state(source: str, report: EvaluationReport) -> None:
     payload = {
         "updated_at": datetime.now(UTC).isoformat(),
         "code_hash": source_hash(source),
+        "score_regime": SCORE_REGIME,
         "metrics": report.metrics,
         "gate_passed": report.gate_passed,
         "gate_reason": report.gate_reason,
@@ -604,7 +608,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 candidate_report=None,
                 outcome="early_rejected",
                 stop_stage="early_reject",
-                gate_reason="前段评估过差",
+                gate_reason="前段趋势捕获过差",
                 note=str(exc),
             ),
         )
@@ -614,7 +618,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         write_heartbeat(
             "iteration_early_rejected",
             message=f"iteration {iteration_id} early rejected: {exc}",
-            gate="前段评估过差",
+            gate="前段趋势捕获过差",
         )
         return "early_rejected"
     except CandidateRepairExhausted as exc:

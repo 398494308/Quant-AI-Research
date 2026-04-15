@@ -92,7 +92,12 @@ def build_strategy_research_prompt(
 ) -> str:
     return f"""你是 BTC 合约激进趋势策略研究员。
 
-你的目标不是机械拨参数，而是围绕一个清晰假设，修改 `src/strategy_macd_aggressive.py`，让评估质量分与晋级分提升。
+这套策略不是低波动理财策略，而是：
+- `15m` 执行，`1h + 4h` 做趋势确认。
+- 目标是尽快抓到 BTC 的大上涨或大下跌，尽量陪跑主趋势，并在掉头时退出或反手。
+- 允许较大波动、较大回撤，甚至允许个别阶段爆仓；不要为了“看起来更平滑”而牺牲大趋势捕获能力。
+
+你的目标不是机械拨参数，而是围绕一个清晰假设，修改 `src/strategy_macd_aggressive.py`，提升这套策略对大趋势的捕获能力。
 
 当前最优晋级分：{previous_best_score:.2f}
 
@@ -108,22 +113,26 @@ def build_strategy_research_prompt(
 ```
 
 门禁规则（触碰即淘汰）：
-- 总交易数 >= 30
-- eval 交易数 >= 24
-- 验证集交易数 >= 5
-- eval 正收益窗口占比 >= 30%
-- 最大回撤 <= 50%
-- 爆仓次数 = 0
-- 验证集平均收益 >= -10%
-- eval 与验证集落差 <= 30
-- 手续费拖累 <= 6%
+- eval 大趋势段数 >= 8
+- validation 大趋势段数 >= 3
+- eval 趋势段命中率 >= 35%
+- validation 趋势段命中率 >= 25%
+- eval 趋势捕获分 >= 0.10
+- validation 趋势捕获分 >= 0.00
+- eval 与 validation 的趋势捕获落差 <= 0.45
+- 综合多头捕获分 >= -0.10
+- 综合空头捕获分 >= -0.10
+- 手续费拖累 <= 8%
 
 评分方式：
-- `quality_score` = eval 非重叠 OOS 主路径的年化 Sortino Ratio
-- `promotion_score` = eval 非重叠 OOS 主路径 + 验证集日收益率合并后的年化 Sortino Ratio
-- rolling eval 窗口只用于稳定性诊断，不会重复加权同一天
-- Sortino 只惩罚下行波动，不惩罚向上的大波动
-- 你看不到验证集的具体数字，但门禁会告诉你是否通过
+- 主评分口径是 `trend_capture_v1`
+- 先在唯一时间轴上识别 BTC 的大趋势段，再把每段拆成“到来 / 陪跑 / 掉头”三部分
+- `trend_capture_score` 衡量：是否及时跟上、是否陪跑主趋势、是否在掉头时跑掉或反手
+- `return_score` 衡量：整段路径最后把资金放大了多少
+- `quality_score` = `0.70 * eval_trend_capture_score + 0.30 * eval_return_score`
+- `promotion_score` = `0.70 * combined_trend_capture_score + 0.30 * combined_return_score`
+- 爆仓和回撤现在是诊断项，不是主评分，也不是单独惩罚项
+- 你看不到 validation 的逐项细节，但 gate 会告诉你是否通过
 
 硬约束：
 - 只允许修改 `src/strategy_macd_aggressive.py`。
@@ -137,15 +146,15 @@ def build_strategy_research_prompt(
 - 如果最近多轮都零增益，优先切换方向簇或切换 edited region family，而不是继续围绕同一失败簇做近邻微调。
 - 如果历史记忆里出现 `探索触发（必须执行）`，你必须把本轮当作探索轮，而不是继续做同簇微调。
 - 探索轮优先切换核心因子家族或 edited region family；允许结果变差，但不允许只做措辞替换、标签换名或近邻改写。
-- 探索轮应尽量让 `total_trades`、`avg_fee_drag`、`eval_window_sortino_p25` 这类关键诊断至少两项出现明显变化。
+- 探索轮应尽量让 `segment_hit_rate`、`bull_capture_score`、`bear_capture_score`、`avg_fee_drag`、`total_trades` 这类关键诊断至少两项出现明显变化。
 - 最近研究表是动态的；如果你识别出具有跨轮次解释力、值得持续追踪的新核心因子/指标，可以附带 `core_factors`。
 - 只有当该因子有明确依据，且足以影响后续多轮研究取舍时，才添加 `core_factors`；不要把一次性的局部现象包装成核心因子。
 
 你要优先解决：
-- 提高 Sortino（减少下行波动、提高收益）
-- 横盘假突破导致的无效交易
-- 手续费拖累过高
-- 高回撤
+- 提高大趋势到来阶段的上车能力
+- 提高主趋势中段的陪跑能力
+- 在趋势掉头时更早退出，必要时更快反手
+- 少把仓位浪费在横盘假突破、弱延续和手续费噪声上
 
 输出要求：
 - 只输出 JSON。

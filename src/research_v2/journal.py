@@ -25,9 +25,11 @@ LOW_CHANGE_STREAK = 3
 LOW_CHANGE_PROMOTION_DELTA_EPS = 0.02
 LOW_CHANGE_PROMOTION_SCORE_SPAN = 0.05
 LOW_CHANGE_QUALITY_SCORE_SPAN = 0.08
+LOW_CHANGE_TREND_SCORE_SPAN = 0.08
+LOW_CHANGE_HIT_RATE_SPAN = 0.08
+LOW_CHANGE_SIDE_CAPTURE_SPAN = 0.12
 LOW_CHANGE_TOTAL_TRADES_SPAN = 6.0
 LOW_CHANGE_FEE_DRAG_SPAN = 0.20
-LOW_CHANGE_WINDOW_P25_SPAN = 0.50
 
 
 # ==================== 基础读写 ====================
@@ -170,9 +172,9 @@ def _compact_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
 
     # 参数有效区间（从 accepted 中提取 metrics 范围）
     metric_keys = [
-        "eval_avg_return", "validation_avg_return", "worst_drawdown",
-        "avg_fee_drag", "daily_sharpe", "daily_sortino", "profit_factor",
-        "eval_window_sortino_p25", "eval_window_sortino_worst",
+        "eval_trend_capture_score", "validation_trend_capture_score",
+        "segment_hit_rate", "bull_capture_score", "bear_capture_score",
+        "avg_fee_drag", "quality_score", "promotion_score",
     ]
     accepted_metric_ranges: dict[str, dict[str, float]] = {}
     if accepted:
@@ -539,11 +541,17 @@ def _low_change_tail(entries: list[dict[str, Any]], streak: int = LOW_CHANGE_STR
         return []
     if _span([_score_value(entry.get("quality_score")) for entry in tail]) > LOW_CHANGE_QUALITY_SCORE_SPAN:
         return []
+    if _span([_metric_from_entry(entry, "combined_trend_capture_score") for entry in tail]) > LOW_CHANGE_TREND_SCORE_SPAN:
+        return []
+    if _span([_metric_from_entry(entry, "segment_hit_rate") for entry in tail]) > LOW_CHANGE_HIT_RATE_SPAN:
+        return []
+    if _span([_metric_from_entry(entry, "bull_capture_score") for entry in tail]) > LOW_CHANGE_SIDE_CAPTURE_SPAN:
+        return []
+    if _span([_metric_from_entry(entry, "bear_capture_score") for entry in tail]) > LOW_CHANGE_SIDE_CAPTURE_SPAN:
+        return []
     if _span([_metric_from_entry(entry, "total_trades") for entry in tail]) > LOW_CHANGE_TOTAL_TRADES_SPAN:
         return []
     if _span([_metric_from_entry(entry, "avg_fee_drag") for entry in tail]) > LOW_CHANGE_FEE_DRAG_SPAN:
-        return []
-    if _span([_metric_from_entry(entry, "eval_window_sortino_p25") for entry in tail]) > LOW_CHANGE_WINDOW_P25_SPAN:
         return []
     return tail
 
@@ -578,14 +586,14 @@ def _exploration_trigger_lines(entries: list[dict[str, Any]], limit: int) -> lis
 
     lines = [
         "探索触发（必须执行）:",
-        f"最近 {LOW_CHANGE_STREAK} 轮都属于低变化轮次：晋级分没有实质提升，且 quality / trades / fee_drag / 窗口P25 基本不变。",
+        f"最近 {LOW_CHANGE_STREAK} 轮都属于低变化轮次：晋级分没有实质提升，且 trend_score / hit_rate / bull_bear_capture / fee_drag 基本不变。",
         f"- 近期近邻方向簇：{', '.join(clusters[:limit]) or '-'}",
         f"- 近期近邻标签：{', '.join(tags[:limit]) or '-'}",
         f"- 近期近邻核心因子：{', '.join(factors[:limit]) or '-'}",
         f"- 近期高频编辑区域：{', '.join(regions[:limit]) or '-'}",
         "- 下一轮必须作为探索轮，不要继续沿用上述主因子解释或其近邻改写。",
         "- 探索轮必须至少做到以下之一：切换到不同核心因子家族；切换到不同 edited region family；若继续相近方向，必须明确说明将改变哪类交易路径。",
-        "- 探索轮允许结果变差，但不能只是换措辞；应尽量让 total_trades、avg_fee_drag、eval_window_sortino_p25 这类关键诊断至少两项出现明显变化。",
+        "- 探索轮允许结果变差，但不能只是换措辞；应尽量让 segment_hit_rate、bull_capture_score、bear_capture_score、avg_fee_drag、total_trades 这类关键诊断至少两项出现明显变化。",
     ]
     return lines
 
@@ -688,11 +696,11 @@ def _recent_core_factor_lines(entries: list[dict[str, Any]], columns: list[str])
 def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int, core_factor_columns: list[str]) -> list[str]:
     factor_headers = [_truncate(name, 18) for name in core_factor_columns]
     lines = [
-        "| 轮次 | 候选 | 结果 | 阶段 | promotion | quality | gate | tags | regions | "
+        "| 轮次 | 候选 | 结果 | 阶段 | promotion | quality | trend | return | hit | seg | bull | bear | gate | tags | regions | "
         + " | ".join(factor_headers)
         + (" | " if factor_headers else "")
         + "摘要 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | "
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | "
         + " | ".join("---" for _ in factor_headers)
         + (" | " if factor_headers else "")
         + "--- |",
@@ -706,6 +714,12 @@ def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int,
         stage = _display_stage(entry)
         promotion = _format_metric(entry.get("promotion_score"))
         quality = _format_metric(entry.get("quality_score"))
+        trend = _format_metric(_metric_from_entry(entry, "combined_trend_capture_score"))
+        return_score = _format_metric(_metric_from_entry(entry, "combined_return_score"))
+        hit_rate = _format_metric(_metric_from_entry(entry, "segment_hit_rate"))
+        segment_count = _format_metric(_metric_from_entry(entry, "major_segment_count"))
+        bull = _format_metric(_metric_from_entry(entry, "bull_capture_score"))
+        bear = _format_metric(_metric_from_entry(entry, "bear_capture_score"))
         gate = _truncate(entry.get("gate_reason", "-"), 20) or "-"
         tags = _truncate(",".join(entry.get("change_tags", [])) or "-", 42)
         regions = _truncate(",".join(entry.get("edited_regions", [])) or "-", 22)
@@ -721,7 +735,8 @@ def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int,
         factor_cells = [factor_map.get(name, "-") for name in core_factor_columns]
         lines.append(
             f"| {round_label} | {candidate_id} | {outcome} | {stage} | {promotion} | "
-            f"{quality} | {gate} | {tags} | {regions} | "
+            f"{quality} | {trend} | {return_score} | {hit_rate} | {segment_count} | {bull} | {bear} | "
+            f"{gate} | {tags} | {regions} | "
             + " | ".join(factor_cells)
             + (" | " if factor_cells else "")
             + f"{summary} |"
@@ -729,8 +744,26 @@ def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int,
     return lines
 
 
+def _empty_prompt_tables() -> list[str]:
+    return [
+        "方向风险表（必须先读）:",
+        "| 方向簇 | 最近尝试 | 失败 | 零增益 | 运行报错 | 最佳delta | 标签 | 最近标签 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| - | 0 | 0 | 0 | 0 | 0.00 | OPEN | - |",
+        "",
+        "最近未压缩轮次共 0 条：保留 0，未保留 0，提前淘汰 0，运行失败 0。",
+        "最近未压缩轮次表:",
+        "| 轮次 | 候选 | 结果 | 阶段 | promotion | quality | trend | return | hit | seg | bull | bear | gate | tags | regions | 摘要 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | 新评分口径已重置，等待新历史。 |",
+    ]
+
+
 def build_journal_prompt_summary(entries: list[dict[str, Any]], limit: int = 6, journal_path: Path | None = None) -> str:
     parts: list[str] = []
+    if not entries:
+        parts.extend(_empty_prompt_tables())
+        return "\n".join(parts)
 
     recent_entries, recent_start = _uncompacted_recent_entries(entries, journal_path)
     if recent_entries:

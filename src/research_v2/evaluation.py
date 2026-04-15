@@ -8,7 +8,6 @@ from statistics import median
 from typing import Any
 
 from research_v2.config import GateConfig
-from research_v2.windows import ResearchWindow
 
 
 # ==================== 数据结构 ====================
@@ -29,6 +28,37 @@ class DailyReturnPath:
     unique_days: int
     overlap_days: int
     dropped_points: int
+
+
+@dataclass(frozen=True)
+class PointSeriesPath:
+    points: list[dict[str, Any]]
+    unique_points: int
+    overlap_points: int
+    dropped_points: int
+
+
+@dataclass(frozen=True)
+class TrendSegment:
+    direction: int
+    start_idx: int
+    end_idx: int
+    move_pct: float
+    weight: float
+
+
+@dataclass(frozen=True)
+class TrendScoreReport:
+    trend_score: float
+    return_score: float
+    arrival_score: float
+    escort_score: float
+    turn_score: float
+    bull_score: float
+    bear_score: float
+    hit_rate: float
+    segment_count: int
+    path_return_pct: float
 
 
 # ==================== 基础统计 ====================
@@ -94,7 +124,9 @@ def _annualized_sortino(daily_returns: list[float]) -> float:
 # ==================== 聚合诊断 ====================
 
 
-def _window_payloads(results: list[dict[str, Any]], group: str) -> list[dict[str, Any]]:
+def _window_payloads(results: list[dict[str, Any]], group: str | None) -> list[dict[str, Any]]:
+    if group is None:
+        return list(results)
     return [item for item in results if item["window"].group == group]
 
 
@@ -134,16 +166,63 @@ def _collect_daily_path(results: list[dict[str, Any]], group: str) -> DailyRetur
     )
 
 
-def _collect_daily_returns(results: list[dict[str, Any]], group: str) -> list[float]:
-    return _collect_daily_path(results, group).returns
+def _result_trend_capture_points(result: dict[str, Any]) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    for point in result.get("trend_capture_points", []):
+        timestamp = point.get("timestamp")
+        if timestamp in (None, ""):
+            continue
+        try:
+            normalized_timestamp = int(timestamp)
+        except (TypeError, ValueError):
+            continue
+        points.append(
+            {
+                "timestamp": normalized_timestamp,
+                "label": str(point.get("label", normalized_timestamp)),
+                "market_close": float(point.get("market_close", 0.0)),
+                "atr_ratio": float(point.get("atr_ratio", 0.0)),
+                "strategy_equity": float(point.get("strategy_equity", 0.0)),
+                "strategy_return": point.get("strategy_return"),
+            }
+        )
+    return points
 
 
-def _window_sortino_scores(results: list[dict[str, Any]], group: str) -> list[float]:
-    scores: list[float] = []
+def _collect_trend_path(results: list[dict[str, Any]], group: str | None) -> PointSeriesPath:
+    assigned_points: dict[int, dict[str, Any]] = {}
+    seen_counts: dict[int, int] = {}
+    point_count = 0
     for item in _window_payloads(results, group):
-        returns = [value for _, value in _result_daily_return_points(item["result"], item["window"].label)]
-        scores.append(_annualized_sortino(returns))
-    return scores
+        for point in _result_trend_capture_points(item["result"]):
+            timestamp = int(point["timestamp"])
+            assigned_points[timestamp] = point
+            seen_counts[timestamp] = seen_counts.get(timestamp, 0) + 1
+            point_count += 1
+
+    ordered_keys = sorted(assigned_points)
+    overlap_points = sum(1 for count in seen_counts.values() if count > 1)
+    ordered_points = [assigned_points[key] for key in ordered_keys]
+    normalized_points: list[dict[str, Any]] = []
+    for idx, point in enumerate(ordered_points):
+        strategy_return = point.get("strategy_return")
+        if strategy_return is None:
+            if idx == 0:
+                strategy_return = 0.0
+            else:
+                prev_equity = float(ordered_points[idx - 1].get("strategy_equity", 0.0))
+                current_equity = float(point.get("strategy_equity", 0.0))
+                strategy_return = _simple_return(prev_equity, current_equity)
+        normalized = dict(point)
+        normalized["strategy_return"] = float(strategy_return)
+        normalized_points.append(normalized)
+
+    return PointSeriesPath(
+        points=normalized_points,
+        unique_points=len(ordered_keys),
+        overlap_points=overlap_points,
+        dropped_points=max(0, point_count - len(ordered_keys)),
+    )
 
 
 def _aggregate_signal_stats(results: list[dict[str, Any]], group: str) -> list[str]:
@@ -181,6 +260,312 @@ def _build_window_lines(results: list[dict[str, Any]], include_validation: bool)
     return lines
 
 
+# ==================== 趋势切段评分 ====================
+
+
+def _simple_return(start_value: float, end_value: float) -> float:
+    if start_value <= 1e-9:
+        return 0.0
+    return end_value / start_value - 1.0
+
+
+def _move_pct(start_price: float, end_price: float) -> float:
+    if start_price <= 1e-9:
+        return 0.0
+    return abs(end_price / start_price - 1.0)
+
+
+def _log_weight(start_price: float, end_price: float) -> float:
+    if start_price <= 1e-9 or end_price <= 1e-9:
+        return 0.0
+    return abs(math.log(end_price / start_price))
+
+
+def _trend_threshold(multiplier: float, floor: float, atr_ratio: float) -> float:
+    return max(floor, multiplier * max(0.0, atr_ratio))
+
+
+def _detect_major_trend_segments(points: list[dict[str, Any]]) -> list[TrendSegment]:
+    if len(points) < 6:
+        return []
+
+    closes = [float(point.get("market_close", 0.0)) for point in points]
+    atrs = [float(point.get("atr_ratio", 0.0)) for point in points]
+    segments: list[TrendSegment] = []
+
+    initial_high_idx = 0
+    initial_low_idx = 0
+    direction = 0
+    pivot_idx = 0
+    extreme_idx = 0
+    for idx in range(1, len(closes)):
+        if closes[idx] >= closes[initial_high_idx]:
+            initial_high_idx = idx
+        if closes[idx] <= closes[initial_low_idx]:
+            initial_low_idx = idx
+
+        up_move = _move_pct(closes[initial_low_idx], closes[initial_high_idx]) if initial_high_idx > initial_low_idx else 0.0
+        down_move = _move_pct(closes[initial_high_idx], closes[initial_low_idx]) if initial_low_idx > initial_high_idx else 0.0
+        if up_move >= _trend_threshold(4.0, 0.06, max(atrs[initial_low_idx], atrs[initial_high_idx])):
+            pivot_idx = initial_low_idx
+            extreme_idx = initial_high_idx
+            direction = 1
+            break
+        if down_move >= _trend_threshold(4.0, 0.06, max(atrs[initial_low_idx], atrs[initial_high_idx])):
+            pivot_idx = initial_high_idx
+            extreme_idx = initial_low_idx
+            direction = -1
+            break
+
+    if direction == 0:
+        return []
+
+    for idx in range(max(pivot_idx, extreme_idx) + 1, len(closes)):
+        price = closes[idx]
+        if direction > 0:
+            if price >= closes[extreme_idx]:
+                extreme_idx = idx
+                continue
+            pullback = _move_pct(closes[extreme_idx], price)
+            move_pct = _move_pct(closes[pivot_idx], closes[extreme_idx])
+            atr_ratio = max(atrs[pivot_idx], atrs[extreme_idx])
+            min_segment = _trend_threshold(6.0, 0.08, atr_ratio)
+            min_reversal = _trend_threshold(3.0, 0.04, max(atrs[extreme_idx], atrs[idx]))
+            if move_pct < min_segment:
+                if price <= closes[pivot_idx]:
+                    direction = -1
+                    extreme_idx = idx
+                continue
+            if pullback >= min_reversal and move_pct >= min_segment and extreme_idx - pivot_idx >= 4:
+                weight = _log_weight(closes[pivot_idx], closes[extreme_idx])
+                if weight > 1e-9:
+                    segments.append(
+                        TrendSegment(
+                            direction=1,
+                            start_idx=pivot_idx,
+                            end_idx=extreme_idx,
+                            move_pct=move_pct,
+                            weight=weight,
+                        )
+                    )
+                pivot_idx = extreme_idx
+                extreme_idx = idx
+                direction = -1
+        else:
+            if price <= closes[extreme_idx]:
+                extreme_idx = idx
+                continue
+            rebound = _move_pct(closes[extreme_idx], price)
+            move_pct = _move_pct(closes[pivot_idx], closes[extreme_idx])
+            atr_ratio = max(atrs[pivot_idx], atrs[extreme_idx])
+            min_segment = _trend_threshold(6.0, 0.08, atr_ratio)
+            min_reversal = _trend_threshold(3.0, 0.04, max(atrs[extreme_idx], atrs[idx]))
+            if move_pct < min_segment:
+                if price >= closes[pivot_idx]:
+                    direction = 1
+                    extreme_idx = idx
+                continue
+            if rebound >= min_reversal and move_pct >= min_segment and extreme_idx - pivot_idx >= 4:
+                weight = _log_weight(closes[pivot_idx], closes[extreme_idx])
+                if weight > 1e-9:
+                    segments.append(
+                        TrendSegment(
+                            direction=-1,
+                            start_idx=pivot_idx,
+                            end_idx=extreme_idx,
+                            move_pct=move_pct,
+                            weight=weight,
+                        )
+                    )
+                pivot_idx = extreme_idx
+                extreme_idx = idx
+                direction = 1
+
+    final_move = _move_pct(closes[pivot_idx], closes[extreme_idx])
+    final_threshold = _trend_threshold(6.0, 0.08, max(atrs[pivot_idx], atrs[extreme_idx]))
+    if extreme_idx - pivot_idx >= 4 and final_move >= final_threshold:
+        weight = _log_weight(closes[pivot_idx], closes[extreme_idx])
+        if weight > 1e-9:
+            segments.append(
+                TrendSegment(
+                    direction=1 if closes[extreme_idx] >= closes[pivot_idx] else -1,
+                    start_idx=pivot_idx,
+                    end_idx=extreme_idx,
+                    move_pct=final_move,
+                    weight=weight,
+                )
+            )
+    return segments
+
+
+def _capture_ratio(
+    *,
+    start_market: float,
+    end_market: float,
+    strategy_return: float,
+    direction: int,
+) -> float:
+    market_return = _simple_return(start_market, end_market)
+    return _clamp(direction * _safe_ratio(strategy_return, abs(market_return), default=0.0), -1.0, 3.0)
+
+
+def _segment_split_indices(segment: TrendSegment) -> tuple[int, int]:
+    span = segment.end_idx - segment.start_idx
+    arrival_end = min(segment.end_idx - 1, segment.start_idx + max(1, int(math.ceil(span * 0.25))))
+    escort_end = min(segment.end_idx, segment.start_idx + max(arrival_end - segment.start_idx + 1, int(math.ceil(span * 0.75))))
+    escort_end = max(arrival_end + 1, escort_end)
+    escort_end = min(segment.end_idx, escort_end)
+    return arrival_end, escort_end
+
+
+def _weighted_average(pairs: list[tuple[float, float]]) -> float:
+    total_weight = sum(weight for _, weight in pairs if weight > 0.0)
+    if total_weight <= 1e-9:
+        return 0.0
+    return sum(value * weight for value, weight in pairs if weight > 0.0) / total_weight
+
+
+def _compound_strategy_return(points: list[dict[str, Any]], start_idx: int, end_idx: int) -> float:
+    if end_idx <= start_idx:
+        return 0.0
+    growth = 1.0
+    for idx in range(start_idx + 1, end_idx + 1):
+        step_return = float(points[idx].get("strategy_return", 0.0))
+        growth *= max(1e-9, 1.0 + step_return)
+    return growth - 1.0
+
+
+def _return_score(points: list[dict[str, Any]]) -> tuple[float, float]:
+    if len(points) < 2:
+        return 0.0, 0.0
+    growth = 1.0
+    for idx in range(1, len(points)):
+        growth *= max(1e-9, 1.0 + float(points[idx].get("strategy_return", 0.0)))
+    path_return_pct = (growth - 1.0) * 100.0
+    score = _clamp(math.log(max(growth, 1e-9), 2.0), -2.0, 3.0)
+    return score, path_return_pct
+
+
+def _trend_score_report(points: list[dict[str, Any]]) -> TrendScoreReport:
+    if len(points) < 6:
+        return TrendScoreReport(
+            trend_score=0.0,
+            return_score=0.0,
+            arrival_score=0.0,
+            escort_score=0.0,
+            turn_score=0.0,
+            bull_score=0.0,
+            bear_score=0.0,
+            hit_rate=0.0,
+            segment_count=0,
+            path_return_pct=0.0,
+        )
+
+    segments = _detect_major_trend_segments(points)
+    return_score, path_return_pct = _return_score(points)
+    if not segments:
+        return TrendScoreReport(
+            trend_score=0.0,
+            return_score=return_score,
+            arrival_score=0.0,
+            escort_score=0.0,
+            turn_score=0.0,
+            bull_score=0.0,
+            bear_score=0.0,
+            hit_rate=0.0,
+            segment_count=0,
+            path_return_pct=path_return_pct,
+        )
+
+    arrival_pairs: list[tuple[float, float]] = []
+    escort_pairs: list[tuple[float, float]] = []
+    turn_pairs: list[tuple[float, float]] = []
+    bull_pairs: list[tuple[float, float]] = []
+    bear_pairs: list[tuple[float, float]] = []
+    segment_pairs: list[tuple[float, float]] = []
+    hit_count = 0
+
+    for idx, segment in enumerate(segments):
+        arrival_end, escort_end = _segment_split_indices(segment)
+        start_point = points[segment.start_idx]
+        arrival_point = points[arrival_end]
+        escort_point = points[escort_end]
+        end_point = points[segment.end_idx]
+
+        arrival_score = _capture_ratio(
+            start_market=float(start_point["market_close"]),
+            end_market=float(arrival_point["market_close"]),
+            strategy_return=_compound_strategy_return(points, segment.start_idx, arrival_end),
+            direction=segment.direction,
+        )
+        escort_score = _capture_ratio(
+            start_market=float(arrival_point["market_close"]),
+            end_market=float(escort_point["market_close"]),
+            strategy_return=_compound_strategy_return(points, arrival_end, escort_end),
+            direction=segment.direction,
+        )
+
+        weighted_score = 0.30 * arrival_score + 0.50 * escort_score
+        weighted_sum = 0.80
+
+        arrival_pairs.append((arrival_score, segment.weight))
+        escort_pairs.append((escort_score, segment.weight))
+
+        next_segment = segments[idx + 1] if idx + 1 < len(segments) else None
+        if next_segment is not None and next_segment.direction != segment.direction:
+            next_arrival_end, _ = _segment_split_indices(next_segment)
+            turn_start = segment.end_idx
+            turn_end = max(turn_start + 1, next_arrival_end)
+            turn_end = min(next_segment.end_idx, turn_end)
+            if turn_end > turn_start:
+                turn_start_point = points[turn_start]
+                turn_end_point = points[turn_end]
+                turn_score = _capture_ratio(
+                    start_market=float(turn_start_point["market_close"]),
+                    end_market=float(turn_end_point["market_close"]),
+                    strategy_return=_compound_strategy_return(points, turn_start, turn_end),
+                    direction=next_segment.direction,
+                )
+                weighted_score += 0.20 * turn_score
+                weighted_sum += 0.20
+                turn_pairs.append((turn_score, segment.weight))
+
+        segment_score = weighted_score / max(weighted_sum, 1e-9)
+        segment_pairs.append((segment_score, segment.weight))
+        if segment_score >= 0.25:
+            hit_count += 1
+        if segment.direction > 0:
+            bull_pairs.append((segment_score, segment.weight))
+        else:
+            bear_pairs.append((segment_score, segment.weight))
+
+    trend_score = _weighted_average(segment_pairs)
+    return TrendScoreReport(
+        trend_score=trend_score,
+        return_score=return_score,
+        arrival_score=_weighted_average(arrival_pairs),
+        escort_score=_weighted_average(escort_pairs),
+        turn_score=_weighted_average(turn_pairs),
+        bull_score=_weighted_average(bull_pairs),
+        bear_score=_weighted_average(bear_pairs),
+        hit_rate=_safe_ratio(hit_count, len(segments)),
+        segment_count=len(segments),
+        path_return_pct=path_return_pct,
+    )
+
+
+def partial_eval_gate_snapshot(results: list[dict[str, Any]]) -> dict[str, float]:
+    eval_path = _collect_trend_path(results, "eval")
+    report = _trend_score_report(eval_path.points)
+    return {
+        "segment_count": float(report.segment_count),
+        "trend_score": report.trend_score,
+        "hit_rate": report.hit_rate,
+        "path_return_pct": report.path_return_pct,
+        "unique_points": float(eval_path.unique_points),
+    }
+
+
 # ==================== 总分计算 ====================
 
 
@@ -200,8 +585,6 @@ def summarize_evaluation(
     eval_worst_return = min(eval_returns) if eval_returns else 0.0
     validation_avg_return = _mean(validation_returns)
     validation_worst_return = min(validation_returns) if validation_returns else 0.0
-    eval_positive_ratio = _safe_ratio(sum(1 for value in eval_returns if value > 0.0), len(eval_returns))
-    eval_std = _std(eval_returns)
 
     worst_drawdown = max((item["result"]["max_drawdown"] for item in results), default=0.0)
     avg_fee_drag = _mean([item["result"].get("fee_drag_pct", 0.0) for item in results])
@@ -210,51 +593,37 @@ def summarize_evaluation(
     eval_trades = sum(int(item["result"]["trades"]) for item in eval_results)
     validation_trades = sum(int(item["result"]["trades"]) for item in validation_results)
 
-    eval_path = _collect_daily_path(results, "eval")
-    validation_path = _collect_daily_path(results, "validation")
-    eval_daily_returns = eval_path.returns
-    validation_daily_returns = validation_path.returns
-    all_daily_returns = eval_daily_returns + validation_daily_returns
-    daily_sharpe = _annualized_sharpe(eval_daily_returns)
-    daily_sortino = _annualized_sortino(eval_daily_returns)
-    eval_window_sortinos = _window_sortino_scores(results, "eval")
-    eval_window_sortino_avg = _mean(eval_window_sortinos)
-    eval_window_sortino_median = median(eval_window_sortinos) if eval_window_sortinos else 0.0
-    eval_window_sortino_p25 = _quantile(eval_window_sortinos, 0.25)
-    eval_window_sortino_worst = min(eval_window_sortinos) if eval_window_sortinos else 0.0
+    eval_path = _collect_trend_path(results, "eval")
+    validation_path = _collect_trend_path(results, "validation")
+    combined_path = _collect_trend_path(results, None)
 
-    profit_factor = _safe_ratio(
-        sum(max(0.0, trade["pnl_amount"]) for item in eval_results for trade in item["result"].get("trades_detail", [])),
-        abs(sum(min(0.0, trade["pnl_amount"]) for item in eval_results for trade in item["result"].get("trades_detail", []))),
-        default=0.0,
-    )
+    eval_trend_report = _trend_score_report(eval_path.points)
+    validation_trend_report = _trend_score_report(validation_path.points)
+    combined_trend_report = _trend_score_report(combined_path.points)
 
-    validation_gap = eval_avg_return - validation_avg_return
-
-    # ==================== 评分：非重叠 OOS 主路径 ====================
-    # quality_score = eval 非重叠 OOS 路径的年化 Sortino
-    # promotion_score = eval 非重叠 OOS + validation 的年化 Sortino
-    #   rolling windows 继续保留，但只作为鲁棒性诊断，不再重复加权同一天
-    quality_score = daily_sortino
-    promotion_score = _annualized_sortino(all_daily_returns)
+    quality_score = 0.70 * eval_trend_report.trend_score + 0.30 * eval_trend_report.return_score
+    promotion_score = 0.70 * combined_trend_report.trend_score + 0.30 * combined_trend_report.return_score
+    capture_drop = eval_trend_report.trend_score - validation_trend_report.trend_score
 
     gate_reasons: list[str] = []
-    if total_trades < gates.min_total_trades:
-        gate_reasons.append(f"总交易不足({total_trades})")
-    if eval_trades < gates.min_eval_trades:
-        gate_reasons.append(f"评估交易不足({eval_trades})")
-    if validation_trades < gates.min_validation_trades:
-        gate_reasons.append(f"验证交易不足({validation_trades})")
-    if eval_positive_ratio < gates.min_positive_ratio:
-        gate_reasons.append(f"正收益窗比例偏低({eval_positive_ratio:.0%})")
-    if worst_drawdown > gates.max_drawdown_pct:
-        gate_reasons.append(f"最大回撤过大({worst_drawdown:.1f}%)")
-    if liquidations > gates.max_liquidations:
-        gate_reasons.append(f"爆仓次数过多({liquidations})")
-    if validation_avg_return < gates.min_validation_return:
-        gate_reasons.append(f"验证收益不足({validation_avg_return:.2f}%)")
-    if validation_gap > gates.max_eval_validation_gap:
-        gate_reasons.append(f"评估/验证落差过大({validation_gap:.2f})")
+    if eval_trend_report.segment_count < gates.min_eval_segments:
+        gate_reasons.append(f"评估大趋势段不足({eval_trend_report.segment_count})")
+    if validation_trend_report.segment_count < gates.min_validation_segments:
+        gate_reasons.append(f"验证大趋势段不足({validation_trend_report.segment_count})")
+    if eval_trend_report.hit_rate < gates.min_eval_hit_rate:
+        gate_reasons.append(f"评估命中率偏低({eval_trend_report.hit_rate:.0%})")
+    if validation_trend_report.hit_rate < gates.min_validation_hit_rate:
+        gate_reasons.append(f"验证命中率偏低({validation_trend_report.hit_rate:.0%})")
+    if eval_trend_report.trend_score < gates.min_eval_trend_score:
+        gate_reasons.append(f"评估趋势捕获分偏低({eval_trend_report.trend_score:.2f})")
+    if validation_trend_report.trend_score < gates.min_validation_trend_score:
+        gate_reasons.append(f"验证趋势捕获分偏低({validation_trend_report.trend_score:.2f})")
+    if capture_drop > gates.max_capture_drop:
+        gate_reasons.append(f"评估/验证捕获落差过大({capture_drop:.2f})")
+    if combined_trend_report.bull_score < gates.min_bull_capture:
+        gate_reasons.append(f"多头捕获偏低({combined_trend_report.bull_score:.2f})")
+    if combined_trend_report.bear_score < gates.min_bear_capture:
+        gate_reasons.append(f"空头捕获偏低({combined_trend_report.bear_score:.2f})")
     if avg_fee_drag > gates.max_fee_drag_pct:
         gate_reasons.append(f"手续费拖累过高({avg_fee_drag:.2f}%)")
 
@@ -264,15 +633,18 @@ def summarize_evaluation(
     weakest_signals = _aggregate_signal_stats(results, "eval")
     summary_lines = [
         "研究评估摘要",
-        f"评估平均收益: {eval_avg_return:.2f}%",
-        f"评估中位收益: {eval_median_return:.2f}%",
-        f"评估P25收益: {eval_p25_return:.2f}%",
-        f"验证收益: {validation_avg_return:.2f}%",
-        f"主评分路径 Sortino / Sharpe: {daily_sortino:.2f} / {daily_sharpe:.2f}",
-        f"窗口 Sortino 均值 / P25 / 最差: {eval_window_sortino_avg:.2f} / {eval_window_sortino_p25:.2f} / {eval_window_sortino_worst:.2f}",
-        f"评估唯一路径日期 / 重叠日期 / 被覆盖点: {eval_path.unique_days} / {eval_path.overlap_days} / {eval_path.dropped_points}",
-        f"最大回撤: {worst_drawdown:.2f}%",
-        f"手续费拖累: {avg_fee_drag:.2f}%",
+        f"评估趋势捕获分 / 绝对收益分: {eval_trend_report.trend_score:.2f} / {eval_trend_report.return_score:.2f}",
+        f"验证趋势捕获分 / 绝对收益分: {validation_trend_report.trend_score:.2f} / {validation_trend_report.return_score:.2f}",
+        f"综合趋势捕获分 / 综合收益分: {combined_trend_report.trend_score:.2f} / {combined_trend_report.return_score:.2f}",
+        f"到来 / 陪跑 / 掉头: {combined_trend_report.arrival_score:.2f} / {combined_trend_report.escort_score:.2f} / {combined_trend_report.turn_score:.2f}",
+        f"多头 / 空头捕获: {combined_trend_report.bull_score:.2f} / {combined_trend_report.bear_score:.2f}",
+        f"评估趋势段 / 命中率: {eval_trend_report.segment_count} / {eval_trend_report.hit_rate:.0%}",
+        f"验证趋势段 / 命中率: {validation_trend_report.segment_count} / {validation_trend_report.hit_rate:.0%}",
+        f"评估路径收益 / 综合路径收益: {eval_trend_report.path_return_pct:.2f}% / {combined_trend_report.path_return_pct:.2f}%",
+        f"评估平均收益 / 验证收益: {eval_avg_return:.2f}% / {validation_avg_return:.2f}%",
+        f"评估中位收益 / P25 / 最差: {eval_median_return:.2f}% / {eval_p25_return:.2f}% / {eval_worst_return:.2f}%",
+        f"评估4h唯一路径点 / 重叠点 / 被覆盖点: {eval_path.unique_points} / {eval_path.overlap_points} / {eval_path.dropped_points}",
+        f"最大回撤 / 手续费拖累: {worst_drawdown:.2f}% / {avg_fee_drag:.2f}%",
         f"总交易 / 爆仓: {total_trades} / {liquidations}",
         f"质量分 / 晋级分: {quality_score:.2f} / {promotion_score:.2f}",
         f"Gate: {gate_reason}",
@@ -284,11 +656,13 @@ def summarize_evaluation(
         summary_lines.extend(["", "拖累较大的信号:", *weakest_signals])
 
     prompt_lines = [
-        f"当前基底主评分Sortino={quality_score:.2f}，综合晋级Sortino={promotion_score:.2f}，gate={gate_reason}",
-        f"评估平均收益={eval_avg_return:.2f}%，中位数={eval_median_return:.2f}%，P25={eval_p25_return:.2f}%",
-        f"主评分口径=eval非重叠OOS路径；日度Sortino={daily_sortino:.2f}，Sharpe={daily_sharpe:.2f}，最大回撤={worst_drawdown:.2f}%",
-        f"窗口Sortino均值={eval_window_sortino_avg:.2f}，P25={eval_window_sortino_p25:.2f}，最差={eval_window_sortino_worst:.2f}",
-        f"eval唯一路径日期={eval_path.unique_days}，重叠日期={eval_path.overlap_days}，被覆盖点={eval_path.dropped_points}",
+        f"当前策略是 BTC 激进趋势策略：15m 执行，1h/4h 确认，目标是抓大行情的到来、陪跑主趋势、在掉头时退出或反手。",
+        f"当前基底主评分={quality_score:.2f}，综合晋级分={promotion_score:.2f}，gate={gate_reason}",
+        f"评估趋势捕获分={eval_trend_report.trend_score:.2f}，收益分={eval_trend_report.return_score:.2f}，趋势段={eval_trend_report.segment_count}，命中率={eval_trend_report.hit_rate:.0%}",
+        f"综合到来/陪跑/掉头={combined_trend_report.arrival_score:.2f}/{combined_trend_report.escort_score:.2f}/{combined_trend_report.turn_score:.2f}",
+        f"综合多头/空头捕获={combined_trend_report.bull_score:.2f}/{combined_trend_report.bear_score:.2f}，评估/验证捕获落差={capture_drop:.2f}",
+        f"评估路径收益={eval_trend_report.path_return_pct:.2f}%，综合路径收益={combined_trend_report.path_return_pct:.2f}%，最大回撤={worst_drawdown:.2f}%",
+        f"评估4h唯一路径点={eval_path.unique_points}，重叠点={eval_path.overlap_points}，被覆盖点={eval_path.dropped_points}",
         f"手续费拖累={avg_fee_drag:.2f}%，eval交易={eval_trades}，爆仓={liquidations}",
     ]
     if weakest_signals:
@@ -301,28 +675,44 @@ def summarize_evaluation(
         "eval_worst_return": eval_worst_return,
         "validation_avg_return": validation_avg_return,
         "validation_worst_return": validation_worst_return,
-        "eval_positive_ratio": eval_positive_ratio,
-        "eval_std": eval_std,
         "worst_drawdown": worst_drawdown,
         "avg_fee_drag": avg_fee_drag,
         "liquidations": float(liquidations),
         "total_trades": float(total_trades),
         "eval_trades": float(eval_trades),
         "validation_trades": float(validation_trades),
-        "daily_sharpe": daily_sharpe,
-        "daily_sortino": daily_sortino,
-        "eval_unique_days": float(eval_path.unique_days),
-        "eval_overlap_days": float(eval_path.overlap_days),
-        "eval_overlap_points_dropped": float(eval_path.dropped_points),
-        "validation_unique_days": float(validation_path.unique_days),
-        "validation_overlap_days": float(validation_path.overlap_days),
-        "validation_overlap_points_dropped": float(validation_path.dropped_points),
-        "eval_window_sortino_avg": eval_window_sortino_avg,
-        "eval_window_sortino_median": eval_window_sortino_median,
-        "eval_window_sortino_p25": eval_window_sortino_p25,
-        "eval_window_sortino_worst": eval_window_sortino_worst,
-        "profit_factor": profit_factor,
-        "validation_gap": validation_gap,
+        "eval_unique_trend_points": float(eval_path.unique_points),
+        "eval_overlap_trend_points": float(eval_path.overlap_points),
+        "eval_overlap_trend_points_dropped": float(eval_path.dropped_points),
+        "validation_unique_trend_points": float(validation_path.unique_points),
+        "validation_overlap_trend_points": float(validation_path.overlap_points),
+        "validation_overlap_trend_points_dropped": float(validation_path.dropped_points),
+        "eval_trend_capture_score": eval_trend_report.trend_score,
+        "validation_trend_capture_score": validation_trend_report.trend_score,
+        "combined_trend_capture_score": combined_trend_report.trend_score,
+        "eval_return_score": eval_trend_report.return_score,
+        "validation_return_score": validation_trend_report.return_score,
+        "combined_return_score": combined_trend_report.return_score,
+        "eval_arrival_capture_score": eval_trend_report.arrival_score,
+        "eval_escort_capture_score": eval_trend_report.escort_score,
+        "eval_turn_adaptation_score": eval_trend_report.turn_score,
+        "arrival_capture_score": combined_trend_report.arrival_score,
+        "escort_capture_score": combined_trend_report.escort_score,
+        "turn_adaptation_score": combined_trend_report.turn_score,
+        "eval_bull_capture_score": eval_trend_report.bull_score,
+        "eval_bear_capture_score": eval_trend_report.bear_score,
+        "bull_capture_score": combined_trend_report.bull_score,
+        "bear_capture_score": combined_trend_report.bear_score,
+        "eval_segment_hit_rate": eval_trend_report.hit_rate,
+        "validation_segment_hit_rate": validation_trend_report.hit_rate,
+        "segment_hit_rate": combined_trend_report.hit_rate,
+        "eval_major_segment_count": float(eval_trend_report.segment_count),
+        "validation_major_segment_count": float(validation_trend_report.segment_count),
+        "major_segment_count": float(combined_trend_report.segment_count),
+        "eval_path_return_pct": eval_trend_report.path_return_pct,
+        "validation_path_return_pct": validation_trend_report.path_return_pct,
+        "combined_path_return_pct": combined_trend_report.path_return_pct,
+        "capture_drop": capture_drop,
         "quality_score": quality_score,
         "promotion_score": promotion_score,
     }

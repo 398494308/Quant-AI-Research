@@ -207,7 +207,7 @@ def _candidate_effect_text(candidate: StrategyCandidate) -> str:
     zh_effects = [_single_line(effect, limit=80) for effect in candidate.expected_effects if _contains_cjk(effect)]
     if zh_effects:
         return _single_line("；".join(zh_effects), limit=220)
-    return "预期减少无效交易，改善 Sortino、手续费拖累和回撤。"
+    return "预期改善大趋势到来捕获、主趋势陪跑和掉头退出效率。"
 
 
 def build_discord_summary_message(
@@ -230,10 +230,12 @@ def build_discord_summary_message(
             + (f" / {metrics['validation_avg_return']:.2f}%" if validation_window_count > 0 else ""),
         ),
         ("评分(主/晋)", f"{metrics['quality_score']:.2f} / {metrics['promotion_score']:.2f}"),
-        ("窗口Sortino", f"{metrics['eval_window_sortino_p25']:.2f} / {metrics['eval_window_sortino_worst']:.2f}"),
-        ("评估唯一路径", f"{int(metrics['eval_unique_days'])} 天"),
+        ("趋势/收益分", f"{metrics['combined_trend_capture_score']:.2f} / {metrics['combined_return_score']:.2f}"),
+        ("到来/陪跑/掉头", f"{metrics['arrival_capture_score']:.2f} / {metrics['escort_capture_score']:.2f} / {metrics['turn_adaptation_score']:.2f}"),
+        ("多/空捕获", f"{metrics['bull_capture_score']:.2f} / {metrics['bear_capture_score']:.2f}"),
+        ("命中率/趋势段", f"{metrics['segment_hit_rate']:.0%} / {int(metrics['major_segment_count'])}"),
+        ("评估唯一路径", f"{int(metrics['eval_unique_trend_points'])} 个4h点"),
         ("最大回撤", f"{metrics['worst_drawdown']:.2f}%"),
-        ("正收益窗", f"{metrics['eval_positive_ratio']:.0%}"),
         ("总交易", str(int(metrics["total_trades"]))),
         ("手续费拖累", f"{metrics['avg_fee_drag']:.2f}%"),
     ]
