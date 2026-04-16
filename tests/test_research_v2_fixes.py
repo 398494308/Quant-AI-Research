@@ -10,7 +10,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 import backtest_macd_aggressive as backtest
 from scripts.research_macd_aggressive_v2 import select_smoke_windows
 from research_v2.config import GateConfig
-from research_v2.evaluation import _collect_daily_path, _collect_trend_path, _trend_score_report, summarize_evaluation
+from research_v2.evaluation import EvaluationReport, _collect_daily_path, _collect_trend_path, _trend_score_report, summarize_evaluation
 from research_v2.journal import (
     _format_compact_for_prompt,
     build_journal_prompt_summary,
@@ -18,6 +18,7 @@ from research_v2.journal import (
     cluster_key_for_components,
     cluster_key_for_entry,
 )
+from research_v2.notifications import build_discord_summary_message
 from research_v2.strategy_code import StrategySourceError, validate_strategy_source
 
 
@@ -610,6 +611,62 @@ class SmokeWindowSelectionTest(unittest.TestCase):
         selected = select_smoke_windows(windows, 3)
 
         self.assertEqual([window.label for window in selected], ["评估1", "验证1", "评估3"])
+
+
+class DiscordSummaryFormattingTest(unittest.TestCase):
+    def test_discord_summary_uses_comparable_eval_validation_rows(self):
+        report = EvaluationReport(
+            metrics={
+                "eval_trend_capture_score": 0.61,
+                "validation_trend_capture_score": 0.35,
+                "eval_segment_hit_rate": 0.58,
+                "validation_segment_hit_rate": 0.41,
+                "eval_major_segment_count": 11.0,
+                "validation_major_segment_count": 10.0,
+                "capture_drop": 0.26,
+                "quality_score": 0.55,
+                "promotion_score": 0.71,
+                "combined_trend_capture_score": 0.48,
+                "combined_return_score": 1.22,
+                "arrival_capture_score": 0.08,
+                "escort_capture_score": 0.73,
+                "turn_adaptation_score": 0.31,
+                "bull_capture_score": 0.28,
+                "bear_capture_score": 0.66,
+                "segment_hit_rate": 0.50,
+                "major_segment_count": 22.0,
+                "eval_avg_return": 1.23,
+                "validation_avg_return": 45.67,
+                "combined_path_return_pct": 88.9,
+                "overfit_risk_score": 20.0,
+                "overfit_hard_fail": 0.0,
+                "overfit_top1_positive_share": 0.12,
+                "overfit_chain_positive_share": 0.19,
+                "overfit_coverage_ratio": 1.0,
+                "eval_unique_trend_points": 3655.0,
+                "worst_drawdown": 18.2,
+                "total_trades": 123.0,
+                "avg_fee_drag": 1.8,
+            },
+            gate_passed=True,
+            gate_reason="通过",
+            summary_text="",
+            prompt_summary_text="",
+        )
+
+        message = build_discord_summary_message(
+            title="test",
+            report=report,
+            eval_window_count=29,
+            validation_window_count=1,
+        )
+
+        self.assertIn("评/验趋势分", message)
+        self.assertIn("评/验命中率", message)
+        self.assertIn("评/验趋势段", message)
+        self.assertIn("评估窗口均值收益", message)
+        self.assertIn("验证整段收益", message)
+        self.assertNotIn("| 收益 | 1.23% / 45.67% |", message)
 
 
 if __name__ == "__main__":

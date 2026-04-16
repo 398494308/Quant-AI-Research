@@ -228,15 +228,37 @@ def build_discord_summary_message(
     rows = [
         ("窗口", window_text),
         (
-            "收益",
-            f"{metrics['eval_avg_return']:.2f}%"
-            + (f" / {metrics['validation_avg_return']:.2f}%" if validation_window_count > 0 else ""),
+            "评/验趋势分",
+            f"{metrics['eval_trend_capture_score']:.2f}"
+            + (f" / {metrics['validation_trend_capture_score']:.2f}" if validation_window_count > 0 else ""),
+        ),
+        (
+            "评/验命中率",
+            f"{metrics['eval_segment_hit_rate']:.0%}"
+            + (f" / {metrics['validation_segment_hit_rate']:.0%}" if validation_window_count > 0 else ""),
+        ),
+        (
+            "评/验趋势段",
+            f"{int(metrics['eval_major_segment_count'])}"
+            + (f" / {int(metrics['validation_major_segment_count'])}" if validation_window_count > 0 else ""),
+        ),
+        (
+            "评/验捕获落差",
+            f"{metrics['capture_drop']:.2f}"
+            if validation_window_count > 0 else "-",
         ),
         ("评分(主/晋)", f"{metrics['quality_score']:.2f} / {metrics['promotion_score']:.2f}"),
         ("趋势/收益分", f"{metrics['combined_trend_capture_score']:.2f} / {metrics['combined_return_score']:.2f}"),
         ("到来/陪跑/掉头", f"{metrics['arrival_capture_score']:.2f} / {metrics['escort_capture_score']:.2f} / {metrics['turn_adaptation_score']:.2f}"),
         ("多/空捕获", f"{metrics['bull_capture_score']:.2f} / {metrics['bear_capture_score']:.2f}"),
-        ("命中率/趋势段", f"{metrics['segment_hit_rate']:.0%} / {int(metrics['major_segment_count'])}"),
+        ("综合命中率/趋势段", f"{metrics['segment_hit_rate']:.0%} / {int(metrics['major_segment_count'])}"),
+        ("评估窗口均值收益", f"{metrics['eval_avg_return']:.2f}%"),
+        (
+            "验证整段收益",
+            f"{metrics['validation_avg_return']:.2f}%"
+            if validation_window_count > 0 else "-",
+        ),
+        ("综合路径收益", f"{metrics['combined_path_return_pct']:.2f}%"),
         ("过拟合风险", f"{overfit_level} / {overfit_score:.0f}"),
         (
             "集中度/覆盖率",
