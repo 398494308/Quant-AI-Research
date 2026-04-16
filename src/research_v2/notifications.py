@@ -219,6 +219,8 @@ def build_discord_summary_message(
     candidate: StrategyCandidate | None = None,
 ) -> str:
     metrics = report.metrics
+    full_period_return_pct = float(metrics.get("full_period_return_pct", metrics.get("combined_path_return_pct", 0.0)))
+    stitched_path_return_pct = float(metrics.get("combined_path_return_pct", 0.0))
     overfit_score = float(metrics.get("overfit_risk_score", 0.0))
     overfit_hard_fail = float(metrics.get("overfit_hard_fail", 0.0)) > 0.5
     overfit_level = "严重" if overfit_hard_fail else overfit_risk_level_from_score(overfit_score)
@@ -227,6 +229,14 @@ def build_discord_summary_message(
         window_text += f" / {validation_window_count} 个验证窗口"
     rows = [
         ("窗口", window_text),
+        ("全段连续收益", f"{full_period_return_pct:.2f}%"),
+        ("评估窗口均值收益", f"{metrics['eval_avg_return']:.2f}%"),
+        (
+            "验证整段收益",
+            f"{metrics['validation_avg_return']:.2f}%"
+            if validation_window_count > 0 else "-",
+        ),
+        ("拼接路径收益", f"{stitched_path_return_pct:.2f}%"),
         (
             "评/验趋势分",
             f"{metrics['eval_trend_capture_score']:.2f}"
@@ -252,13 +262,6 @@ def build_discord_summary_message(
         ("到来/陪跑/掉头", f"{metrics['arrival_capture_score']:.2f} / {metrics['escort_capture_score']:.2f} / {metrics['turn_adaptation_score']:.2f}"),
         ("多/空捕获", f"{metrics['bull_capture_score']:.2f} / {metrics['bear_capture_score']:.2f}"),
         ("综合命中率/趋势段", f"{metrics['segment_hit_rate']:.0%} / {int(metrics['major_segment_count'])}"),
-        ("评估窗口均值收益", f"{metrics['eval_avg_return']:.2f}%"),
-        (
-            "验证整段收益",
-            f"{metrics['validation_avg_return']:.2f}%"
-            if validation_window_count > 0 else "-",
-        ),
-        ("综合路径收益", f"{metrics['combined_path_return_pct']:.2f}%"),
         ("过拟合风险", f"{overfit_level} / {overfit_score:.0f}"),
         (
             "集中度/覆盖率",

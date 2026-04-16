@@ -175,23 +175,36 @@ def _selected_smoke_windows() -> list[Any]:
     return select_smoke_windows(WINDOWS, RUNTIME.smoke_window_count)
 
 
+def _prepare_backtest_context() -> dict[str, Any]:
+    return backtest_module.prepare_backtest_context(
+        strategy_module.PARAMS,
+        intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
+        hourly_file=backtest_module.DEFAULT_HOURLY_FILE,
+        exit_params=backtest_module.EXIT_PARAMS,
+    )
+
+
+def _full_period_bounds(windows: list[Any]) -> tuple[str, str]:
+    if not windows:
+        raise ValueError("missing research windows")
+    start_date = min(window.start_date for window in windows)
+    end_date = max(window.end_date for window in windows)
+    return start_date, end_date
+
+
 def _run_base_backtests(
     allow_early_reject: bool = False,
     *,
     windows: list[Any] | None = None,
     include_diagnostics: bool = True,
     heartbeat_phase: str = "full_eval",
+    prepared_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     eval_count = 0
     check_at = RUNTIME.early_reject_after_windows
     active_windows = windows or WINDOWS
-    prepared_context = backtest_module.prepare_backtest_context(
-        strategy_module.PARAMS,
-        intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
-        hourly_file=backtest_module.DEFAULT_HOURLY_FILE,
-        exit_params=backtest_module.EXIT_PARAMS,
-    )
+    runtime_context = prepared_context or _prepare_backtest_context()
 
     for index, window in enumerate(active_windows, start=1):
         write_heartbeat(
@@ -211,7 +224,7 @@ def _run_base_backtests(
             strategy_params=strategy_module.PARAMS,
             exit_params=backtest_module.EXIT_PARAMS,
             include_diagnostics=include_diagnostics,
-            prepared_context=prepared_context,
+            prepared_context=runtime_context,
         )
         results.append({"window": window, "result": result})
 
@@ -231,16 +244,50 @@ def _run_base_backtests(
     return results
 
 
+def _run_full_period_backtest(prepared_context: dict[str, Any]) -> dict[str, Any]:
+    start_date, end_date = _full_period_bounds(WINDOWS)
+    write_heartbeat(
+        "iteration_running",
+        message=f"iteration {iteration_counter} full_period_eval",
+        phase="full_period_eval",
+        current_window="全段连续",
+        window_index=len(WINDOWS) + 1,
+        window_count=len(WINDOWS) + 1,
+    )
+    return backtest_module.backtest_macd_aggressive(
+        strategy_func=strategy_module.strategy,
+        intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
+        hourly_file=backtest_module.DEFAULT_HOURLY_FILE,
+        start_date=start_date,
+        end_date=end_date,
+        strategy_params=strategy_module.PARAMS,
+        exit_params=backtest_module.EXIT_PARAMS,
+        include_diagnostics=False,
+        prepared_context=prepared_context,
+    )
+
+
 def evaluate_current_strategy(allow_early_reject: bool = False) -> EvaluationReport:
-    base_results = _run_base_backtests(allow_early_reject=allow_early_reject)
-    return summarize_evaluation(base_results, RUNTIME.gates)
+    prepared_context = _prepare_backtest_context()
+    base_results = _run_base_backtests(
+        allow_early_reject=allow_early_reject,
+        prepared_context=prepared_context,
+    )
+    full_period_result = _run_full_period_backtest(prepared_context)
+    return summarize_evaluation(
+        base_results,
+        RUNTIME.gates,
+        full_period_result=full_period_result,
+    )
 
 
 def smoke_test_current_strategy() -> None:
+    prepared_context = _prepare_backtest_context()
     _run_base_backtests(
         windows=_selected_smoke_windows(),
         include_diagnostics=False,
         heartbeat_phase="smoke_test",
+        prepared_context=prepared_context,
     )
 
 

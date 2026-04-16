@@ -783,10 +783,12 @@ def partial_eval_gate_snapshot(results: list[dict[str, Any]]) -> dict[str, float
 def summarize_evaluation(
     results: list[dict[str, Any]],
     gates: GateConfig,
+    full_period_result: dict[str, Any] | None = None,
     **_kwargs: Any,
 ) -> EvaluationReport:
     eval_results = _window_payloads(results, "eval")
     validation_results = _window_payloads(results, "validation")
+    full_period_return = float((full_period_result or {}).get("return", 0.0))
 
     eval_returns = [item["result"]["return"] for item in eval_results]
     validation_returns = [item["result"]["return"] for item in validation_results]
@@ -866,7 +868,12 @@ def summarize_evaluation(
             f"覆盖率={overfit_report.coverage_ratio:.0%}，"
             f"多空落差={overfit_report.bull_bear_gap:.2f}"
         ),
-        f"评估路径收益 / 综合路径收益: {eval_trend_report.path_return_pct:.2f}% / {combined_trend_report.path_return_pct:.2f}%",
+        (
+            "评估路径收益 / 全段连续收益 / 拼接路径收益: "
+            f"{eval_trend_report.path_return_pct:.2f}% / "
+            f"{full_period_return:.2f}% / "
+            f"{combined_trend_report.path_return_pct:.2f}%"
+        ),
         f"评估平均收益 / 验证收益: {eval_avg_return:.2f}% / {validation_avg_return:.2f}%",
         f"评估中位收益 / P25 / 最差: {eval_median_return:.2f}% / {eval_p25_return:.2f}% / {eval_worst_return:.2f}%",
         f"评估4h唯一路径点 / 重叠点 / 被覆盖点: {eval_path.unique_points} / {eval_path.overlap_points} / {eval_path.dropped_points}",
@@ -894,7 +901,12 @@ def summarize_evaluation(
             f"覆盖率={overfit_report.coverage_ratio:.0%}，"
             f"多空落差={overfit_report.bull_bear_gap:.2f}"
         ),
-        f"评估路径收益={eval_trend_report.path_return_pct:.2f}%，综合路径收益={combined_trend_report.path_return_pct:.2f}%，最大回撤={worst_drawdown:.2f}%",
+        (
+            f"评估路径收益={eval_trend_report.path_return_pct:.2f}%，"
+            f"全段连续收益={full_period_return:.2f}%，"
+            f"拼接路径收益={combined_trend_report.path_return_pct:.2f}%，"
+            f"最大回撤={worst_drawdown:.2f}%"
+        ),
         f"评估4h唯一路径点={eval_path.unique_points}，重叠点={eval_path.overlap_points}，被覆盖点={eval_path.dropped_points}",
         f"手续费拖累={avg_fee_drag:.2f}%，eval交易={eval_trades}，爆仓={liquidations}",
     ]
@@ -945,6 +957,7 @@ def summarize_evaluation(
         "eval_path_return_pct": eval_trend_report.path_return_pct,
         "validation_path_return_pct": validation_trend_report.path_return_pct,
         "combined_path_return_pct": combined_trend_report.path_return_pct,
+        "full_period_return_pct": full_period_return,
         "capture_drop": capture_drop,
         "overfit_risk_score": overfit_report.risk_score,
         "overfit_top1_positive_share": overfit_report.top1_positive_share,

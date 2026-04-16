@@ -233,7 +233,11 @@ class EvaluationFixesTest(unittest.TestCase):
             max_fee_drag_pct=100.0,
         )
 
-        report = summarize_evaluation(results, gates)
+        report = summarize_evaluation(
+            results,
+            gates,
+            full_period_result={"return": 12.34, "max_drawdown": 7.8},
+        )
         expected_eval_points = _collect_trend_path(results, "eval").points
         expected_all_points = _collect_trend_path(results, None).points
         expected_eval_report = _trend_score_report(expected_eval_points)
@@ -253,6 +257,7 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertEqual(report.metrics["eval_overlap_trend_points"], 2.0)
         self.assertEqual(report.metrics["eval_overlap_trend_points_dropped"], 2.0)
         self.assertEqual(report.metrics["validation_overlap_trend_points"], 0.0)
+        self.assertEqual(report.metrics["full_period_return_pct"], 12.34)
         self.assertTrue(report.gate_passed)
 
     def test_summarize_evaluation_rejects_severe_overfit_concentration(self):
@@ -635,6 +640,7 @@ class DiscordSummaryFormattingTest(unittest.TestCase):
                 "bear_capture_score": 0.66,
                 "segment_hit_rate": 0.50,
                 "major_segment_count": 22.0,
+                "full_period_return_pct": 123.4,
                 "eval_avg_return": 1.23,
                 "validation_avg_return": 45.67,
                 "combined_path_return_pct": 88.9,
@@ -664,9 +670,16 @@ class DiscordSummaryFormattingTest(unittest.TestCase):
         self.assertIn("评/验趋势分", message)
         self.assertIn("评/验命中率", message)
         self.assertIn("评/验趋势段", message)
+        self.assertIn("全段连续收益", message)
         self.assertIn("评估窗口均值收益", message)
         self.assertIn("验证整段收益", message)
+        self.assertIn("拼接路径收益", message)
+        self.assertNotIn("综合路径收益", message)
         self.assertNotIn("| 收益 | 1.23% / 45.67% |", message)
+        self.assertLess(message.index("全段连续收益"), message.index("评/验趋势分"))
+        self.assertLess(message.index("评估窗口均值收益"), message.index("评/验趋势分"))
+        self.assertLess(message.index("验证整段收益"), message.index("评/验趋势分"))
+        self.assertLess(message.index("拼接路径收益"), message.index("评/验趋势分"))
 
 
 if __name__ == "__main__":
