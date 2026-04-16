@@ -706,9 +706,14 @@ def _apply_funding(position, funding_rate, settlement_price, leverage):
     return funding_pnl
 
 
-def _append_daily_equity_point(points, timestamp_ms, equity):
+def _append_daily_equity_point(points, timestamp_ms, equity, market_close):
     day = _beijing_day_label(timestamp_ms)
-    payload = {"date": day, "timestamp": timestamp_ms, "equity": round(equity, 8)}
+    payload = {
+        "date": day,
+        "timestamp": timestamp_ms,
+        "equity": round(equity, 8),
+        "market_close": round(float(market_close), 8),
+    }
     if points and points[-1]["date"] == day:
         points[-1] = payload
     else:
@@ -1373,7 +1378,7 @@ def backtest_macd_aggressive(
             + position.get("funding_pnl", 0.0)
             for position in positions
         )
-        _append_daily_equity_point(daily_equity_curve, bar_close_ts, equity)
+        _append_daily_equity_point(daily_equity_curve, bar_close_ts, equity, bar["close"])
         while (
             include_diagnostics
             and next_four_hour_sample_idx < len(four_hour_window_close_timestamps)
@@ -1418,7 +1423,7 @@ def backtest_macd_aggressive(
         _apply_trade_leg_rollup(position, trade)
         record_trade(_build_closed_trade(position))
 
-    _append_daily_equity_point(daily_equity_curve, end_ts, capital)
+    _append_daily_equity_point(daily_equity_curve, end_ts, capital, last_close)
     while (
         include_diagnostics
         and next_four_hour_sample_idx < len(four_hour_window_close_timestamps)

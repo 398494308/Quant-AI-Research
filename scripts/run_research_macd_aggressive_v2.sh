@@ -10,8 +10,13 @@ OUT_FILE="${REPO_ROOT}/logs/macd_aggressive_research_v2.out"
 STOP_FILE="${REPO_ROOT}/state/research_macd_aggressive_v2.stop"
 LOCAL_ENV="${REPO_ROOT}/config/research_v2.env"
 RESTART_DELAY_SECONDS="${MACD_V2_SUPERVISOR_RESTART_SECONDS:-10}"
+PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
 mkdir -p "${REPO_ROOT}/logs" "${REPO_ROOT}/state"
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="$(command -v python3)"
+fi
 
 exec 9>"${LOCK_FILE}"
 if ! flock -n 9; then
@@ -45,7 +50,7 @@ cd "${REPO_ROOT}"
 rm -f "${STOP_FILE}"
 
 while true; do
-  python3 -u scripts/research_macd_aggressive_v2.py >> "${OUT_FILE}" 2>&1 &
+  "${PYTHON_BIN}" -u scripts/research_macd_aggressive_v2.py >> "${OUT_FILE}" 2>&1 &
   child_pid=$!
   set +e
   wait "${child_pid}"

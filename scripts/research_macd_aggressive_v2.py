@@ -13,6 +13,7 @@ import importlib
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 import traceback
@@ -29,6 +30,7 @@ import backtest_macd_aggressive as backtest_module
 import strategy_macd_aggressive as strategy_module
 from codex_exec_client import StrategyGenerationTransientError, build_json_text_format, generate_json_object
 from research_v2.config import ResearchRuntimeConfig, load_research_runtime_config
+from research_v2.charting import PerformanceChartPaths, charts_available, render_performance_chart
 from research_v2.evaluation import EvaluationReport, partial_eval_gate_snapshot, summarize_evaluation
 from research_v2.journal import (
     append_journal_entry,
@@ -89,11 +91,11 @@ def log_exception(message: str) -> None:
     logging.error("%s\n%s", message, traceback.format_exc())
 
 
-def maybe_send_discord(message: str, *, context: str) -> None:
+def maybe_send_discord(message: str, *, context: str, attachments: list[Path] | None = None) -> None:
     if not DISCORD_CONFIG.enabled:
         return
     try:
-        send_discord_message(message, DISCORD_CONFIG)
+        send_discord_message(message, DISCORD_CONFIG, attachments=attachments)
     except Exception as exc:
         log_info(f"Discord 发送失败({context}): {exc}")
         logging.exception("Discord 发送失败(%s)", context)
@@ -192,6 +194,13 @@ def _full_period_bounds(windows: list[Any]) -> tuple[str, str]:
     return start_date, end_date
 
 
+def _validation_window() -> Any:
+    for window in WINDOWS:
+        if window.group == "validation":
+            return window
+    raise ValueError("missing validation window")
+
+
 def _run_base_backtests(
     allow_early_reject: bool = False,
     *,
@@ -244,12 +253,17 @@ def _run_base_backtests(
     return results
 
 
-def _run_full_period_backtest(prepared_context: dict[str, Any]) -> dict[str, Any]:
+def _run_full_period_backtest(
+    prepared_context: dict[str, Any],
+    *,
+    include_diagnostics: bool = False,
+    heartbeat_phase: str = "full_period_eval",
+) -> dict[str, Any]:
     start_date, end_date = _full_period_bounds(WINDOWS)
     write_heartbeat(
         "iteration_running",
-        message=f"iteration {iteration_counter} full_period_eval",
-        phase="full_period_eval",
+        message=f"iteration {iteration_counter} {heartbeat_phase}",
+        phase=heartbeat_phase,
         current_window="全段连续",
         window_index=len(WINDOWS) + 1,
         window_count=len(WINDOWS) + 1,
@@ -262,8 +276,92 @@ def _run_full_period_backtest(prepared_context: dict[str, Any]) -> dict[str, Any
         end_date=end_date,
         strategy_params=strategy_module.PARAMS,
         exit_params=backtest_module.EXIT_PARAMS,
-        include_diagnostics=False,
+        include_diagnostics=include_diagnostics,
         prepared_context=prepared_context,
+    )
+
+
+def _chart_output_dir() -> Path:
+    path = RUNTIME.paths.repo_root / "reports" / "research_v2_charts"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _write_chart_copy(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+
+
+def _build_chart_note(message: str) -> str:
+    return (
+        f"{message}\n"
+        "图表：上图蓝线=策略累计增长，橙线=BTC累计增长；下图红区=策略相对自身峰值的回撤。"
+    )
+
+
+def _generate_new_best_charts(iteration_id: int) -> PerformanceChartPaths:
+    if not charts_available():
+        log_info("跳过新最优图表：matplotlib 不可用")
+        return PerformanceChartPaths(validation_chart=None, full_period_chart=None)
+
+    chart_dir = _chart_output_dir()
+    validation_window = _validation_window()
+    prepared_context = _prepare_backtest_context()
+
+    write_heartbeat(
+        "new_best_charting",
+        message=f"iteration {iteration_id} charting validation",
+        phase="new_best_charting",
+        current_window=validation_window.label,
+        window_index=1,
+        window_count=2,
+    )
+    validation_result = backtest_module.backtest_macd_aggressive(
+        strategy_func=strategy_module.strategy,
+        intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
+        hourly_file=backtest_module.DEFAULT_HOURLY_FILE,
+        start_date=validation_window.start_date,
+        end_date=validation_window.end_date,
+        strategy_params=strategy_module.PARAMS,
+        exit_params=backtest_module.EXIT_PARAMS,
+        include_diagnostics=True,
+        prepared_context=prepared_context,
+    )
+    full_period_result = _run_full_period_backtest(
+        prepared_context,
+        include_diagnostics=True,
+        heartbeat_phase="new_best_charting",
+    )
+
+    validation_chart = chart_dir / (
+        f"new_best_{iteration_id:04d}_validation_{validation_window.start_date}_{validation_window.end_date}.png"
+    )
+    full_start, full_end = _full_period_bounds(WINDOWS)
+    full_period_chart = chart_dir / (
+        f"new_best_{iteration_id:04d}_full_period_{full_start}_{full_end}.png"
+    )
+
+    validation_chart = render_performance_chart(
+        daily_equity_curve=validation_result.get("daily_equity_curve", []),
+        output_path=validation_chart,
+        title=f"New Best #{iteration_id} Validation",
+        subtitle=f"{validation_window.start_date} to {validation_window.end_date}",
+    )
+    full_period_chart = render_performance_chart(
+        daily_equity_curve=full_period_result.get("daily_equity_curve", []),
+        output_path=full_period_chart,
+        title=f"New Best #{iteration_id} Full Period",
+        subtitle=f"{full_start} to {full_end}",
+    )
+
+    if validation_chart is not None:
+        _write_chart_copy(validation_chart, chart_dir / "latest_validation.png")
+    if full_period_chart is not None:
+        _write_chart_copy(full_period_chart, chart_dir / "latest_full_period.png")
+
+    return PerformanceChartPaths(
+        validation_chart=validation_chart,
+        full_period_chart=full_period_chart,
     )
 
 
@@ -753,15 +851,30 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             quality=best_report.metrics["quality_score"],
             gate=best_report.gate_reason,
         )
+        chart_paths = PerformanceChartPaths(validation_chart=None, full_period_chart=None)
+        try:
+            chart_paths = _generate_new_best_charts(iteration_id)
+            if chart_paths.full_period_chart is not None:
+                log_info(f"全段图已保存: {chart_paths.full_period_chart}")
+            if chart_paths.validation_chart is not None:
+                log_info(f"验证图已保存: {chart_paths.validation_chart}")
+        except Exception as exc:
+            log_info(f"新最优图表生成失败: {exc}")
+            logging.exception("新最优图表生成失败(iteration=%s)", iteration_id)
+        discord_message = build_discord_summary_message(
+            title=f"🚀 研究器 v2 新最优 #{iteration_id}",
+            report=best_report,
+            eval_window_count=EVAL_WINDOW_COUNT,
+            validation_window_count=VALIDATION_WINDOW_COUNT,
+            candidate=candidate,
+        )
+        attachments = [chart_paths.validation_chart] if chart_paths.validation_chart is not None else None
+        if attachments:
+            discord_message = _build_chart_note(discord_message)
         maybe_send_discord(
-            build_discord_summary_message(
-                title=f"🚀 研究器 v2 新最优 #{iteration_id}",
-                report=best_report,
-                eval_window_count=EVAL_WINDOW_COUNT,
-                validation_window_count=VALIDATION_WINDOW_COUNT,
-                candidate=candidate,
-            ),
+            discord_message,
             context=f"accepted_iteration_{iteration_id}",
+            attachments=attachments,
         )
         return "accepted"
 

@@ -2,8 +2,10 @@
 """研究器 v2 的 Discord 通知。"""
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import requests
 
@@ -97,16 +99,35 @@ def resolve_discord_channel_id(config: DiscordConfig) -> str:
     return ""
 
 
-def send_discord_message(message: str, config: DiscordConfig) -> None:
+def send_discord_message(message: str, config: DiscordConfig, attachments: list[Path] | None = None) -> None:
     channel_id = resolve_discord_channel_id(config)
     if not config.bot_token or not channel_id:
         raise RuntimeError("missing DISCORD_BOT_TOKEN or Discord channel id")
-    response = requests.post(
-        f"{DISCORD_API_BASE}/channels/{channel_id}/messages",
-        headers={"Authorization": f"Bot {config.bot_token}"},
-        json={"content": message},
-        timeout=15,
-    )
+    if attachments:
+        opened_files = []
+        files = {}
+        try:
+            for index, path in enumerate(attachments):
+                handle = path.open("rb")
+                opened_files.append(handle)
+                files[f"files[{index}]"] = (path.name, handle, "image/png")
+            response = requests.post(
+                f"{DISCORD_API_BASE}/channels/{channel_id}/messages",
+                headers={"Authorization": f"Bot {config.bot_token}"},
+                data={"payload_json": json.dumps({"content": message}, ensure_ascii=False)},
+                files=files,
+                timeout=30,
+            )
+        finally:
+            for handle in opened_files:
+                handle.close()
+    else:
+        response = requests.post(
+            f"{DISCORD_API_BASE}/channels/{channel_id}/messages",
+            headers={"Authorization": f"Bot {config.bot_token}"},
+            json={"content": message},
+            timeout=15,
+        )
     response.raise_for_status()
 
 

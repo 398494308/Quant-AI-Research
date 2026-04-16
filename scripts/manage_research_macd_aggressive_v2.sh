@@ -58,7 +58,7 @@ PY
 }
 
 list_running_pids() {
-  pgrep -f "python3 -u scripts/research_macd_aggressive_v2.py|python3 scripts/research_macd_aggressive_v2.py" || true
+  pgrep -f "scripts/research_macd_aggressive_v2.py" || true
 }
 
 kill_pid_or_group() {

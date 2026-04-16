@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import backtest_macd_aggressive as backtest
 from scripts.research_macd_aggressive_v2 import select_smoke_windows
 from research_v2.config import GateConfig
 from research_v2.evaluation import EvaluationReport, _collect_daily_path, _collect_trend_path, _trend_score_report, summarize_evaluation
+from research_v2.charting import charts_available, render_performance_chart
 from research_v2.journal import (
     _format_compact_for_prompt,
     build_journal_prompt_summary,
@@ -23,6 +25,16 @@ from research_v2.strategy_code import StrategySourceError, validate_strategy_sou
 
 
 class BacktestFixesTest(unittest.TestCase):
+    def test_daily_equity_point_keeps_latest_market_close(self):
+        points = []
+
+        backtest._append_daily_equity_point(points, 1_700_000_000_000, 100000.0, 35000.0)
+        backtest._append_daily_equity_point(points, 1_700_000_100_000, 101000.0, 35250.0)
+
+        self.assertEqual(len(points), 1)
+        self.assertAlmostEqual(points[0]["equity"], 101000.0)
+        self.assertAlmostEqual(points[0]["market_close"], 35250.0)
+
     def test_closed_trade_rollup_treats_tp1_and_final_exit_as_one_trade(self):
         position = {
             "trade_id": 7,
@@ -680,6 +692,33 @@ class DiscordSummaryFormattingTest(unittest.TestCase):
         self.assertLess(message.index("评估窗口均值收益"), message.index("评/验趋势分"))
         self.assertLess(message.index("验证整段收益"), message.index("评/验趋势分"))
         self.assertLess(message.index("拼接路径收益"), message.index("评/验趋势分"))
+
+
+class ChartRenderingTest(unittest.TestCase):
+    def test_render_performance_chart_writes_png(self):
+        if not charts_available():
+            self.skipTest("matplotlib not installed for current interpreter")
+
+        curve = [
+            {"date": "2026-01-01", "equity": 100000.0, "market_close": 50000.0},
+            {"date": "2026-01-02", "equity": 103000.0, "market_close": 51000.0},
+            {"date": "2026-01-03", "equity": 101000.0, "market_close": 50800.0},
+            {"date": "2026-01-04", "equity": 108000.0, "market_close": 52000.0},
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "chart.png"
+            result = render_performance_chart(
+                daily_equity_curve=curve,
+                output_path=output_path,
+                title="Test",
+                subtitle="Window",
+            )
+
+            self.assertEqual(result, output_path)
+            self.assertTrue(output_path.exists())
+            self.assertGreater(output_path.stat().st_size, 0)
+            self.assertEqual(output_path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
 
 if __name__ == "__main__":
