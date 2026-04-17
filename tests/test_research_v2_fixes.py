@@ -975,6 +975,35 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("trend_capture_v1", summary)
         self.assertIn("legacy_breakout", summary)
 
+    def test_journal_summary_emits_hot_cluster_warning_when_one_cluster_overdominates(self):
+        entries = []
+        for idx in range(10):
+            entries.append(
+                {
+                    "iteration": idx + 1,
+                    "candidate_id": f"hot_cluster_{idx}",
+                    "outcome": "rejected",
+                    "stop_stage": "full_eval",
+                    "promotion_score": 0.40,
+                    "quality_score": 0.50,
+                    "promotion_delta": 0.01 if idx == 0 else 0.0,
+                    "gate_reason": "通过",
+                    "change_tags": ["breakout_entry", "reduce_false_breakout"],
+                    "edited_regions": ["strategy"],
+                    "closest_failed_cluster": "trigger_efficiency_cluster",
+                    "hypothesis": "同一方向簇持续占据最近轮次。",
+                    "score_regime": "trend_capture_v4",
+                }
+            )
+
+        summary = build_journal_prompt_summary(entries, limit=8, current_score_regime="trend_capture_v4")
+
+        self.assertIn("主簇过热（必须先读）", summary)
+        self.assertIn("trigger_efficiency_cluster", summary)
+        self.assertIn("占比 100%", summary)
+        self.assertNotIn("ACTIVE_WINNER", summary)
+        self.assertIn("WARM", summary)
+
 
 class SmokeWindowSelectionTest(unittest.TestCase):
     def test_select_smoke_windows_includes_validation_when_count_is_three(self):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,9 @@ LOW_CHANGE_FEE_DRAG_SPAN = 0.20
 LEGACY_REFERENCE_REGIME_LIMIT = 3
 LEGACY_REFERENCE_TAG_LIMIT = 3
 LEGACY_REFERENCE_CLUSTER_LIMIT = 2
+CLUSTER_OVERHEAT_LOOKBACK = 10
+CLUSTER_OVERHEAT_MIN_ROUNDS = 6
+CLUSTER_OVERHEAT_SHARE = 0.60
 
 
 # ==================== 基础读写 ====================
@@ -166,8 +169,10 @@ def _risk_label(*, attempts: int, failures: int, zero_delta: int, runtime_errors
         return "EXHAUSTED"
     if failures >= 3 and zero_delta >= 2 and best_delta <= 1e-9:
         return "SATURATED"
-    if best_delta > 0.0:
+    if best_delta > LOW_CHANGE_PROMOTION_DELTA_EPS:
         return "ACTIVE_WINNER"
+    if best_delta > 0.0:
+        return "WARM"
     if attempts >= 2 and failures == attempts:
         return "WARM"
     return "OPEN"
@@ -726,6 +731,7 @@ def _exploration_trigger_lines(entries: list[dict[str, Any]], limit: int) -> lis
             f"- 近期高频编辑区域：{', '.join(regions[:limit]) or '-'}",
             "- 下一轮必须先产生有效 diff，不允许再次直接回传原文件或近乎等价的空改动。",
             "- 若继续沿用相近方向，必须切换核心因子解释或 edited region family，并明确说明会改变哪类交易路径。",
+            "- 仅换 tag 说法、仅换轻微阈值或只在同一 edited region family 里做小修补，仍算重复探索。",
         ]
 
     tail = _low_change_tail(entries)
@@ -763,10 +769,71 @@ def _exploration_trigger_lines(entries: list[dict[str, Any]], limit: int) -> lis
         f"- 近期近邻核心因子：{', '.join(factors[:limit]) or '-'}",
         f"- 近期高频编辑区域：{', '.join(regions[:limit]) or '-'}",
         "- 下一轮必须作为探索轮，不要继续沿用上述主因子解释或其近邻改写。",
-        "- 探索轮必须至少做到以下之一：切换到不同核心因子家族；切换到不同 edited region family；若继续相近方向，必须明确说明将改变哪类交易路径。",
-        "- 探索轮允许结果变差，但不能只是换措辞；应尽量让 segment_hit_rate、bull_capture_score、bear_capture_score、avg_fee_drag、total_trades 这类关键诊断至少两项出现明显变化。",
+        "- 探索轮优先切换方向簇；若无法切换，至少切换 edited region family、long-short target 或核心因子家族中的一项。",
+        "- 若仍停留在相近方向，必须明确说明将改变哪类交易路径，并点名至少两个预计会明显变化的关键诊断。",
+        "- 仅换措辞、仅换 tag、仅换轻微阈值或只在同一 edited region family 里做小修补，仍算重复探索。",
+        "- 探索轮允许结果变差，但应尽量让 segment_hit_rate、bull_capture_score、bear_capture_score、avg_fee_drag、total_trades 这类关键诊断至少两项出现明显变化。",
     ]
     return lines
+
+
+def _cluster_overheat_lines(entries: list[dict[str, Any]], limit: int) -> list[str]:
+    eligible = [
+        entry for entry in entries
+        if _outcome_bucket(str(entry.get("outcome", ""))) in {"accepted", "rejected"}
+    ]
+    recent = eligible[-CLUSTER_OVERHEAT_LOOKBACK:]
+    if len(recent) < CLUSTER_OVERHEAT_MIN_ROUNDS:
+        return []
+
+    cluster_counts = Counter(
+        cluster_key_for_entry(entry)
+        for entry in recent
+        if cluster_key_for_entry(entry)
+    )
+    if not cluster_counts:
+        return []
+
+    hot_cluster, hot_count = cluster_counts.most_common(1)[0]
+    hot_share = hot_count / len(recent)
+    hot_entries = [
+        entry for entry in recent
+        if cluster_key_for_entry(entry) == hot_cluster
+    ]
+    best_delta = max((_score_value(entry.get("promotion_delta")) for entry in hot_entries), default=0.0)
+    if hot_share < CLUSTER_OVERHEAT_SHARE or best_delta > LOW_CHANGE_PROMOTION_DELTA_EPS:
+        return []
+
+    tags: list[str] = []
+    factors: list[str] = []
+    regions: list[str] = []
+    for entry in hot_entries:
+        for tag in entry.get("change_tags", []):
+            tag_text = str(tag).strip()
+            if tag_text and tag_text not in tags:
+                tags.append(tag_text)
+        for factor in entry.get("core_factors", []):
+            if not isinstance(factor, dict):
+                continue
+            factor_name = str(factor.get("name", "")).strip()
+            if factor_name and factor_name not in factors:
+                factors.append(factor_name)
+        for region in entry.get("edited_regions", []):
+            region_text = str(region).strip()
+            if region_text and region_text not in regions:
+                regions.append(region_text)
+
+    return [
+        "主簇过热（必须先读）:",
+        f"最近 {len(recent)} 轮里，`{hot_cluster}` 占比 {hot_share:.0%}（{hot_count}/{len(recent)}），且最佳 promotion_delta 仅 {best_delta:.2f}，继续留在该簇大概率仍是近邻试错。",
+        f"- 过热方向簇：{hot_cluster}",
+        f"- 近期近邻标签：{', '.join(tags[:limit]) or '-'}",
+        f"- 近期近邻核心因子：{', '.join(factors[:limit]) or '-'}",
+        f"- 近期高频编辑区域：{', '.join(regions[:limit]) or '-'}",
+        "- 下一轮默认必须切换到不同方向簇；若仍留在该簇，novelty_proof 必须同时说明：改的是哪条交易路径、至少两个会明显变化的关键诊断、以及为什么这不是只换标签或轻微阈值。",
+        "- 仅换 tag 说法、仅换轻微阈值、仅在同一 edited region family 内做小修补，仍算重复探索。",
+        "- 若无法跨簇，至少切换以下一项：edited region family / long-short target / core factor family。",
+    ]
 
 
 # ==================== 摘要生成 ====================
@@ -1092,6 +1159,11 @@ def build_journal_prompt_summary(
             board_lines = _direction_risk_board(board_entries, limit=min(8, limit))
             if board_lines:
                 parts.extend(board_lines)
+                parts.append("")
+
+            overheat_lines = _cluster_overheat_lines(board_entries, limit=min(8, limit))
+            if overheat_lines:
+                parts.extend(overheat_lines)
                 parts.append("")
 
             overfit_lines = _overfit_risk_board(board_entries, limit=min(8, limit))
