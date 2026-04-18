@@ -67,6 +67,8 @@ class TrendScoreReport:
     bear_score: float
     hit_rate: float
     segment_count: int
+    bull_segment_count: int
+    bear_segment_count: int
     path_return_pct: float
     segment_details: tuple[SegmentScoreDetail, ...]
 
@@ -564,6 +566,8 @@ def _trend_score_report(points: list[dict[str, Any]]) -> TrendScoreReport:
             bear_score=0.0,
             hit_rate=0.0,
             segment_count=0,
+            bull_segment_count=0,
+            bear_segment_count=0,
             path_return_pct=0.0,
             segment_details=(),
         )
@@ -581,6 +585,8 @@ def _trend_score_report(points: list[dict[str, Any]]) -> TrendScoreReport:
             bear_score=0.0,
             hit_rate=0.0,
             segment_count=0,
+            bull_segment_count=0,
+            bear_segment_count=0,
             path_return_pct=path_return_pct,
             segment_details=(),
         )
@@ -593,6 +599,8 @@ def _trend_score_report(points: list[dict[str, Any]]) -> TrendScoreReport:
     segment_pairs: list[tuple[float, float]] = []
     segment_details: list[SegmentScoreDetail] = []
     hit_count = 0
+    bull_segment_count = 0
+    bear_segment_count = 0
 
     for idx, segment in enumerate(segments):
         arrival_end, escort_end = _segment_split_indices(segment)
@@ -658,8 +666,10 @@ def _trend_score_report(points: list[dict[str, Any]]) -> TrendScoreReport:
             hit_count += 1
         if segment.direction > 0:
             bull_pairs.append((segment_score, segment.weight))
+            bull_segment_count += 1
         else:
             bear_pairs.append((segment_score, segment.weight))
+            bear_segment_count += 1
 
     trend_score = _weighted_average(segment_pairs)
     return TrendScoreReport(
@@ -672,6 +682,8 @@ def _trend_score_report(points: list[dict[str, Any]]) -> TrendScoreReport:
         bear_score=_weighted_average(bear_pairs),
         hit_rate=_safe_ratio(hit_count, len(segments)),
         segment_count=len(segments),
+        bull_segment_count=bull_segment_count,
+        bear_segment_count=bear_segment_count,
         path_return_pct=path_return_pct,
         segment_details=tuple(segment_details),
     )
@@ -900,23 +912,87 @@ def partial_eval_gate_snapshot(result: dict[str, Any] | None) -> dict[str, float
     }
 
 
+def _period_score(trend_report: TrendScoreReport) -> float:
+    return 0.70 * trend_report.trend_score + 0.30 * trend_report.return_score
+
+
+def _trade_side_counts(result: dict[str, Any] | None) -> tuple[int, int]:
+    trades = list((result or {}).get("trades_detail", []))
+    long_count = 0
+    short_count = 0
+    for trade in trades:
+        signal = str(trade.get("entry_signal", "")).strip().lower()
+        if signal.startswith("long_"):
+            long_count += 1
+        elif signal.startswith("short_"):
+            short_count += 1
+    return long_count, short_count
+
+
+def _validation_weakest_axis(
+    trend_report: TrendScoreReport,
+    block_report: ValidationBlockReport,
+) -> str:
+    if block_report.used_block_count >= 2 and block_report.block_scores:
+        tail_score = float(block_report.block_scores[-1])
+        if tail_score < block_report.mean_score - 0.15:
+            return "验证后半段明显偏弱"
+
+    candidates = [
+        ("到来能力", trend_report.arrival_score),
+        ("陪跑能力", trend_report.escort_score),
+        ("掉头处理", trend_report.turn_score),
+        ("多头捕获", trend_report.bull_score),
+        ("空头捕获", trend_report.bear_score),
+    ]
+    weakest_label, _ = min(candidates, key=lambda item: item[1])
+    return f"验证短板={weakest_label}"
+
+
+def summarize_hidden_test_result(result: dict[str, Any] | None) -> dict[str, float]:
+    trend_report = _trend_report_from_result(result)
+    long_trades, short_trades = _trade_side_counts(result)
+    return {
+        "shadow_test_score": _period_score(trend_report),
+        "shadow_test_trend_capture_score": trend_report.trend_score,
+        "shadow_test_return_score": trend_report.return_score,
+        "shadow_test_arrival_score": trend_report.arrival_score,
+        "shadow_test_escort_score": trend_report.escort_score,
+        "shadow_test_turn_score": trend_report.turn_score,
+        "shadow_test_bull_capture_score": trend_report.bull_score,
+        "shadow_test_bear_capture_score": trend_report.bear_score,
+        "shadow_test_hit_rate": trend_report.hit_rate,
+        "shadow_test_segment_count": float(trend_report.segment_count),
+        "shadow_test_path_return_pct": trend_report.path_return_pct,
+        "shadow_test_total_return_pct": float((result or {}).get("return", 0.0)),
+        "shadow_test_max_drawdown": float((result or {}).get("max_drawdown", 0.0)),
+        "shadow_test_long_closed_trades": float(long_trades),
+        "shadow_test_short_closed_trades": float(short_trades),
+    }
+
+
 # ==================== 总分计算 ====================
 
 
 def summarize_evaluation(
     results: list[dict[str, Any]],
     gates: GateConfig,
-    eval_continuous_result: dict[str, Any] | None = None,
+    selection_period_result: dict[str, Any] | None = None,
     validation_continuous_result: dict[str, Any] | None = None,
-    full_period_result: dict[str, Any] | None = None,
     **_kwargs: Any,
 ) -> EvaluationReport:
+    if selection_period_result is None:
+        selection_period_result = _kwargs.get("full_period_result")
     eval_results = _window_payloads(results, "eval")
     validation_results = _window_payloads(results, "validation")
-    full_period_return = float((full_period_result or {}).get("return", 0.0))
+    validation_source = validation_continuous_result
+    if validation_source is None and len(validation_results) == 1:
+        validation_source = validation_results[0]["result"]
+    validation_source = validation_source or {}
+    selection_source = selection_period_result or {}
 
-    eval_returns = [item["result"]["return"] for item in eval_results]
-    validation_returns = [item["result"]["return"] for item in validation_results]
+    eval_returns = [float(item["result"].get("return", 0.0)) for item in eval_results]
+    validation_returns = [float(item["result"].get("return", 0.0)) for item in validation_results]
     eval_avg_return = _mean(eval_returns)
     eval_median_return = median(eval_returns) if eval_returns else 0.0
     eval_p25_return = _quantile(eval_returns, 0.25)
@@ -924,55 +1000,73 @@ def summarize_evaluation(
     validation_avg_return = _mean(validation_returns)
     validation_worst_return = min(validation_returns) if validation_returns else 0.0
 
-    worst_drawdown = max((item["result"]["max_drawdown"] for item in results), default=0.0)
-    avg_fee_drag = _mean([item["result"].get("fee_drag_pct", 0.0) for item in results])
+    worst_drawdown = max((float(item["result"].get("max_drawdown", 0.0)) for item in results), default=0.0)
+    avg_fee_drag = _mean([float(item["result"].get("fee_drag_pct", 0.0)) for item in results])
     liquidations = sum(int(item["result"].get("liquidations", 0)) for item in results)
-    total_trades = sum(int(item["result"]["trades"]) for item in results)
-    eval_trades = sum(int(item["result"]["trades"]) for item in eval_results)
-    validation_trades = sum(int(item["result"]["trades"]) for item in validation_results)
+    total_trades = sum(int(item["result"].get("trades", 0)) for item in results)
+    eval_trades = sum(int(item["result"].get("trades", 0)) for item in eval_results)
+    validation_trades = int(validation_source.get("trades", validation_results[0]["result"].get("trades", 0) if validation_results else 0))
 
     eval_path = _collect_trend_path(results, "eval")
     validation_path = _collect_trend_path(results, "validation")
 
-    eval_trend_report = _trend_report_from_result(eval_continuous_result)
-    validation_source = validation_continuous_result
-    if validation_source is None and len(validation_results) == 1:
-        validation_source = validation_results[0]["result"]
-    validation_trend_report = _trend_report_from_result(validation_source)
-    full_period_trend_report = _trend_report_from_result(full_period_result)
+    development_window_reports = [
+        _trend_report_from_result(item["result"])
+        for item in eval_results
+    ]
+    development_window_scores = [_period_score(report) for report in development_window_reports]
+    development_mean_score = _mean(development_window_scores)
+    development_median_score = median(development_window_scores) if development_window_scores else 0.0
+    development_score_std = _std(development_window_scores)
+    profitable_window_ratio = _safe_ratio(
+        sum(1 for score in development_window_scores if score > 0.0),
+        len(development_window_scores),
+        default=0.0,
+    )
+    development_mean_trend_score = _mean([report.trend_score for report in development_window_reports])
+    development_mean_return_score = _mean([report.return_score for report in development_window_reports])
+    development_mean_hit_rate = _mean([report.hit_rate for report in development_window_reports])
+    development_mean_segment_count = _mean([float(report.segment_count) for report in development_window_reports])
 
-    quality_score = 0.70 * eval_trend_report.trend_score + 0.30 * eval_trend_report.return_score
-    promotion_score = 0.70 * validation_trend_report.trend_score + 0.30 * validation_trend_report.return_score
+    validation_trend_report = _trend_report_from_result(validation_source)
+    selection_trend_report = _trend_report_from_result(selection_source)
+
+    quality_score = development_mean_score
+    promotion_score = _period_score(validation_trend_report)
     validation_block_report = _validation_block_report(
         validation_source,
         block_count=gates.validation_block_count,
         fallback_score=promotion_score,
     )
-    capture_drop = eval_trend_report.trend_score - validation_trend_report.trend_score
+    capture_drop = development_mean_trend_score - validation_trend_report.trend_score
     promotion_gap = quality_score - promotion_score
-    overfit_report = _overfit_risk_report(full_period_trend_report, capture_drop)
+    overfit_report = _overfit_risk_report(selection_trend_report, promotion_gap)
+    validation_long_trades, validation_short_trades = _trade_side_counts(validation_source)
+    selection_long_trades, selection_short_trades = _trade_side_counts(selection_source)
+    validation_weakest_axis = _validation_weakest_axis(validation_trend_report, validation_block_report)
+    selection_total_return = float(selection_source.get("return", 0.0))
 
     gate_reasons: list[str] = []
-    if eval_trend_report.segment_count < gates.min_eval_segments:
-        gate_reasons.append(f"评估大趋势段不足({eval_trend_report.segment_count})")
+    if development_mean_score < gates.min_development_mean_score:
+        gate_reasons.append(f"开发期均值分偏低({development_mean_score:.2f})")
+    if development_median_score < gates.min_development_median_score:
+        gate_reasons.append(f"开发期中位分偏低({development_median_score:.2f})")
+    if development_score_std > gates.max_development_score_std:
+        gate_reasons.append(f"开发期滚动波动过大({development_score_std:.2f})")
+    if profitable_window_ratio < gates.min_profitable_window_ratio:
+        gate_reasons.append(f"开发期盈利窗口占比偏低({profitable_window_ratio:.0%})")
     if validation_trend_report.segment_count < gates.min_validation_segments:
         gate_reasons.append(f"验证大趋势段不足({validation_trend_report.segment_count})")
-    if eval_trend_report.hit_rate < gates.min_eval_hit_rate:
-        gate_reasons.append(f"评估命中率偏低({eval_trend_report.hit_rate:.0%})")
     if validation_trend_report.hit_rate < gates.min_validation_hit_rate:
         gate_reasons.append(f"验证命中率偏低({validation_trend_report.hit_rate:.0%})")
-    if eval_trend_report.trend_score < gates.min_eval_trend_score:
-        gate_reasons.append(f"评估趋势捕获分偏低({eval_trend_report.trend_score:.2f})")
     if validation_trend_report.trend_score < gates.min_validation_trend_score:
         gate_reasons.append(f"验证趋势捕获分偏低({validation_trend_report.trend_score:.2f})")
-    if capture_drop > gates.max_capture_drop:
-        gate_reasons.append(f"评估/验证捕获落差过大({capture_drop:.2f})")
-    if promotion_gap > gates.max_promotion_gap:
-        gate_reasons.append(f"评估/验证综合分落差过大({promotion_gap:.2f})")
-    if full_period_trend_report.bull_score < gates.min_bull_capture:
-        gate_reasons.append(f"多头捕获偏低({full_period_trend_report.bull_score:.2f})")
-    if full_period_trend_report.bear_score < gates.min_bear_capture:
-        gate_reasons.append(f"空头捕获偏低({full_period_trend_report.bear_score:.2f})")
+    if promotion_gap > gates.max_dev_validation_gap:
+        gate_reasons.append(f"开发/验证分数落差过大({promotion_gap:.2f})")
+    if validation_trend_report.bull_score < gates.min_validation_bull_capture:
+        gate_reasons.append(f"验证多头捕获偏低({validation_trend_report.bull_score:.2f})")
+    if validation_trend_report.bear_score < gates.min_validation_bear_capture:
+        gate_reasons.append(f"验证空头捕获偏低({validation_trend_report.bear_score:.2f})")
     if avg_fee_drag > gates.max_fee_drag_pct:
         gate_reasons.append(f"手续费拖累过高({avg_fee_drag:.2f}%)")
     if validation_block_report.used_block_count >= 2:
@@ -991,11 +1085,21 @@ def summarize_evaluation(
                 "验证负分块过多"
                 f"({validation_block_report.fail_count})"
             )
-    if overfit_report.hard_fail:
-        gate_reasons.append("严重过拟合风险(" + "；".join(overfit_report.hard_reasons) + ")")
-    elif overfit_report.risk_score >= OVERFIT_GATE_SCORE:
+    if (
+        validation_trend_report.bull_segment_count >= gates.min_side_segment_count_for_trade_gate
+        and validation_long_trades < gates.min_trade_support_per_side
+    ):
         gate_reasons.append(
-            f"过拟合风险过高({overfit_report.risk_level} {overfit_report.risk_score:.0f})"
+            "验证多头交易支持不足"
+            f"({validation_long_trades} < {gates.min_trade_support_per_side})"
+        )
+    if (
+        validation_trend_report.bear_segment_count >= gates.min_side_segment_count_for_trade_gate
+        and validation_short_trades < gates.min_trade_support_per_side
+    ):
+        gate_reasons.append(
+            "验证空头交易支持不足"
+            f"({validation_short_trades} < {gates.min_trade_support_per_side})"
         )
 
     gate_passed = not gate_reasons
@@ -1004,13 +1108,17 @@ def summarize_evaluation(
     weakest_signals = _aggregate_signal_stats(results, "eval")
     summary_lines = [
         "研究评估摘要",
-        f"评估趋势捕获分 / 绝对收益分: {eval_trend_report.trend_score:.2f} / {eval_trend_report.return_score:.2f}",
-        f"验证趋势捕获分 / 绝对收益分: {validation_trend_report.trend_score:.2f} / {validation_trend_report.return_score:.2f}",
-        f"全段连续趋势捕获分 / 绝对收益分: {full_period_trend_report.trend_score:.2f} / {full_period_trend_report.return_score:.2f}",
-        f"全段连续到来 / 陪跑 / 掉头: {full_period_trend_report.arrival_score:.2f} / {full_period_trend_report.escort_score:.2f} / {full_period_trend_report.turn_score:.2f}",
-        f"全段连续多头 / 空头捕获: {full_period_trend_report.bull_score:.2f} / {full_period_trend_report.bear_score:.2f}",
-        f"评估趋势段 / 命中率: {eval_trend_report.segment_count} / {eval_trend_report.hit_rate:.0%}",
+        (
+            "开发期滚动分(均值/中位/std/盈利窗比): "
+            f"{development_mean_score:.2f} / {development_median_score:.2f} / "
+            f"{development_score_std:.2f} / {profitable_window_ratio:.0%}"
+        ),
+        f"验证晋级分 / 趋势分 / 收益分: {promotion_score:.2f} / {validation_trend_report.trend_score:.2f} / {validation_trend_report.return_score:.2f}",
+        f"验证到来 / 陪跑 / 掉头: {validation_trend_report.arrival_score:.2f} / {validation_trend_report.escort_score:.2f} / {validation_trend_report.turn_score:.2f}",
+        f"验证多头 / 空头捕获: {validation_trend_report.bull_score:.2f} / {validation_trend_report.bear_score:.2f}",
         f"验证趋势段 / 命中率: {validation_trend_report.segment_count} / {validation_trend_report.hit_rate:.0%}",
+        f"验证多 / 空平仓数: {validation_long_trades} / {validation_short_trades}",
+        f"验证短板: {validation_weakest_axis}",
         (
             "验证分块晋级分(均值/std/最差/负分块): "
             f"{validation_block_report.mean_score:.2f} / "
@@ -1023,24 +1131,23 @@ def summarize_evaluation(
             )
         ),
         (
-            "过拟合风险: "
+            "选择期集中度诊断: "
             f"{overfit_report.risk_level}({overfit_report.risk_score:.0f})，"
             f"单段正向贡献={overfit_report.top1_positive_share:.0%}，"
             f"同向链贡献={overfit_report.max_chain_positive_share:.0%}，"
             f"覆盖率={overfit_report.coverage_ratio:.0%}，"
             f"多空落差={overfit_report.bull_bear_gap:.2f}"
         ),
-        (
-            "评估连续路径收益 / 验证连续路径收益 / 全段连续收益: "
-            f"{eval_trend_report.path_return_pct:.2f}% / "
-            f"{validation_trend_report.path_return_pct:.2f}% / "
-            f"{full_period_return:.2f}%"
-        ),
-        f"评估平均收益 / 验证收益: {eval_avg_return:.2f}% / {validation_avg_return:.2f}%",
-        f"评估中位收益 / P25 / 最差: {eval_median_return:.2f}% / {eval_p25_return:.2f}% / {eval_worst_return:.2f}%",
-        f"评估4h唯一路径点 / 重叠点 / 被覆盖点: {eval_path.unique_points} / {eval_path.overlap_points} / {eval_path.dropped_points}",
+        f"选择期连续趋势捕获分 / 收益分: {selection_trend_report.trend_score:.2f} / {selection_trend_report.return_score:.2f}",
+        f"选择期连续到来 / 陪跑 / 掉头: {selection_trend_report.arrival_score:.2f} / {selection_trend_report.escort_score:.2f} / {selection_trend_report.turn_score:.2f}",
+        f"选择期连续多头 / 空头捕获: {selection_trend_report.bull_score:.2f} / {selection_trend_report.bear_score:.2f}",
+        f"选择期连续收益 / 路径收益: {selection_total_return:.2f}% / {selection_trend_report.path_return_pct:.2f}%",
+        f"开发期窗口收益均值 / 中位 / P25 / 最差: {eval_avg_return:.2f}% / {eval_median_return:.2f}% / {eval_p25_return:.2f}% / {eval_worst_return:.2f}%",
+        f"验证窗口收益均值 / 最差: {validation_avg_return:.2f}% / {validation_worst_return:.2f}%",
+        f"开发/验证分数落差: {promotion_gap:.2f}",
+        f"开发期4h唯一路径点 / 重叠点 / 被覆盖点: {eval_path.unique_points} / {eval_path.overlap_points} / {eval_path.dropped_points}",
         f"最大回撤 / 手续费拖累: {worst_drawdown:.2f}% / {avg_fee_drag:.2f}%",
-        f"总交易 / 爆仓: {total_trades} / {liquidations}",
+        f"总交易 / 开发期交易 / 验证交易 / 爆仓: {total_trades} / {eval_trades} / {validation_trades} / {liquidations}",
         f"质量分 / 晋级分: {quality_score:.2f} / {promotion_score:.2f}",
         f"Gate: {gate_reason}",
         "",
@@ -1052,11 +1159,30 @@ def summarize_evaluation(
 
     prompt_lines = [
         f"当前策略是 BTC 激进趋势策略：15m 执行，1h/4h 确认，目标是抓大行情的到来、陪跑主趋势、在掉头时退出或反手。",
-        f"当前基底主评分={quality_score:.2f}，综合晋级分={promotion_score:.2f}，gate={gate_reason}",
-        f"评估趋势捕获分={eval_trend_report.trend_score:.2f}，收益分={eval_trend_report.return_score:.2f}，趋势段={eval_trend_report.segment_count}，命中率={eval_trend_report.hit_rate:.0%}",
+        f"当前基底质量分={quality_score:.2f}，晋级分={promotion_score:.2f}，gate={gate_reason}",
+        (
+            f"开发期滚动分均值/中位/std/盈利窗比="
+            f"{development_mean_score:.2f}/{development_median_score:.2f}/"
+            f"{development_score_std:.2f}/{profitable_window_ratio:.0%}"
+        ),
         (
             f"验证晋级分={promotion_score:.2f}，"
-            f"验证分块均值/std/最差/负分块="
+            f"验证趋势分/收益分={validation_trend_report.trend_score:.2f}/{validation_trend_report.return_score:.2f}，"
+            f"趋势段/命中率={validation_trend_report.segment_count}/{validation_trend_report.hit_rate:.0%}"
+        ),
+        (
+            f"验证到来/陪跑/掉头={validation_trend_report.arrival_score:.2f}/"
+            f"{validation_trend_report.escort_score:.2f}/"
+            f"{validation_trend_report.turn_score:.2f}，"
+            f"多头/空头捕获={validation_trend_report.bull_score:.2f}/"
+            f"{validation_trend_report.bear_score:.2f}"
+        ),
+        (
+            f"验证多/空平仓数={validation_long_trades}/{validation_short_trades}，"
+            f"{validation_weakest_axis}"
+        ),
+        (
+            "验证分块均值/std/最差/负分块="
             f"{validation_block_report.mean_score:.2f}/"
             f"{validation_block_report.std_score:.2f}/"
             f"{validation_block_report.min_score:.2f}/"
@@ -1066,31 +1192,47 @@ def summarize_evaluation(
                 if validation_block_report.used_block_count > 0 else "，分块稳健性未启用"
             )
         ),
-        f"全段连续到来/陪跑/掉头={full_period_trend_report.arrival_score:.2f}/{full_period_trend_report.escort_score:.2f}/{full_period_trend_report.turn_score:.2f}",
         (
-            f"全段连续多头/空头捕获={full_period_trend_report.bull_score:.2f}/{full_period_trend_report.bear_score:.2f}，"
-            f"评估/验证捕获落差={capture_drop:.2f}，综合分落差={promotion_gap:.2f}"
+            f"选择期连续趋势分/收益分={selection_trend_report.trend_score:.2f}/"
+            f"{selection_trend_report.return_score:.2f}，"
+            f"到来/陪跑/掉头={selection_trend_report.arrival_score:.2f}/"
+            f"{selection_trend_report.escort_score:.2f}/"
+            f"{selection_trend_report.turn_score:.2f}"
         ),
         (
-            f"过拟合风险={overfit_report.risk_level}({overfit_report.risk_score:.0f})，"
+            f"选择期连续多头/空头捕获={selection_trend_report.bull_score:.2f}/"
+            f"{selection_trend_report.bear_score:.2f}，"
+            f"开发均值趋势分={development_mean_trend_score:.2f}，开发/验证分差={promotion_gap:.2f}"
+        ),
+        (
+            f"开发期窗口收益均值/中位/P25/最差={eval_avg_return:.2f}%/"
+            f"{eval_median_return:.2f}%/{eval_p25_return:.2f}%/{eval_worst_return:.2f}%"
+        ),
+        (
+            f"选择期连续收益={selection_total_return:.2f}%，"
+            f"验证连续收益={float(validation_source.get('return', validation_avg_return)):.2f}%，"
+            f"最大回撤={worst_drawdown:.2f}%"
+        ),
+        (
+            f"选择期集中度诊断={overfit_report.risk_level}({overfit_report.risk_score:.0f})，"
             f"单段正向贡献={overfit_report.top1_positive_share:.0%}，"
             f"同向链贡献={overfit_report.max_chain_positive_share:.0%}，"
             f"覆盖率={overfit_report.coverage_ratio:.0%}，"
             f"多空落差={overfit_report.bull_bear_gap:.2f}"
         ),
-        (
-            f"评估连续路径收益={eval_trend_report.path_return_pct:.2f}%，"
-            f"验证连续路径收益={validation_trend_report.path_return_pct:.2f}%，"
-            f"全段连续收益={full_period_return:.2f}%，"
-            f"最大回撤={worst_drawdown:.2f}%"
-        ),
-        f"评估4h唯一路径点={eval_path.unique_points}，重叠点={eval_path.overlap_points}，被覆盖点={eval_path.dropped_points}",
-        f"手续费拖累={avg_fee_drag:.2f}%，eval交易={eval_trades}，爆仓={liquidations}",
+        f"开发期4h唯一路径点={eval_path.unique_points}，重叠点={eval_path.overlap_points}，被覆盖点={eval_path.dropped_points}",
+        f"手续费拖累={avg_fee_drag:.2f}%，开发期交易={eval_trades}，验证交易={validation_trades}，爆仓={liquidations}",
     ]
     if weakest_signals:
-        prompt_lines.append("拖累信号: " + " | ".join(weakest_signals))
+        prompt_lines.append("开发期拖累信号: " + " | ".join(weakest_signals))
 
     metrics = {
+        "development_mean_score": development_mean_score,
+        "development_median_score": development_median_score,
+        "development_score_std": development_score_std,
+        "development_profitable_window_ratio": profitable_window_ratio,
+        "development_window_count": float(len(development_window_scores)),
+        "development_mean_trend_capture_score": development_mean_trend_score,
         "eval_avg_return": eval_avg_return,
         "eval_median_return": eval_median_return,
         "eval_p25_return": eval_p25_return,
@@ -1109,37 +1251,56 @@ def summarize_evaluation(
         "validation_unique_trend_points": float(validation_path.unique_points),
         "validation_overlap_trend_points": float(validation_path.overlap_points),
         "validation_overlap_trend_points_dropped": float(validation_path.dropped_points),
-        "eval_trend_capture_score": eval_trend_report.trend_score,
+        "validation_score": promotion_score,
+        "eval_trend_capture_score": development_mean_trend_score,
+        "eval_return_score": development_mean_return_score,
+        "eval_segment_hit_rate": development_mean_hit_rate,
+        "eval_major_segment_count": development_mean_segment_count,
         "validation_trend_capture_score": validation_trend_report.trend_score,
-        "combined_trend_capture_score": full_period_trend_report.trend_score,
-        "full_period_trend_capture_score": full_period_trend_report.trend_score,
-        "eval_return_score": eval_trend_report.return_score,
+        "selection_trend_capture_score": selection_trend_report.trend_score,
+        "combined_trend_capture_score": selection_trend_report.trend_score,
+        "full_period_trend_capture_score": selection_trend_report.trend_score,
         "validation_return_score": validation_trend_report.return_score,
-        "combined_return_score": full_period_trend_report.return_score,
-        "full_period_return_score": full_period_trend_report.return_score,
-        "eval_arrival_capture_score": eval_trend_report.arrival_score,
-        "eval_escort_capture_score": eval_trend_report.escort_score,
-        "eval_turn_adaptation_score": eval_trend_report.turn_score,
-        "arrival_capture_score": full_period_trend_report.arrival_score,
-        "escort_capture_score": full_period_trend_report.escort_score,
-        "turn_adaptation_score": full_period_trend_report.turn_score,
-        "eval_bull_capture_score": eval_trend_report.bull_score,
-        "eval_bear_capture_score": eval_trend_report.bear_score,
-        "bull_capture_score": full_period_trend_report.bull_score,
-        "bear_capture_score": full_period_trend_report.bear_score,
-        "eval_segment_hit_rate": eval_trend_report.hit_rate,
+        "selection_return_score": selection_trend_report.return_score,
+        "combined_return_score": selection_trend_report.return_score,
+        "full_period_return_score": selection_trend_report.return_score,
+        "validation_arrival_capture_score": validation_trend_report.arrival_score,
+        "validation_escort_capture_score": validation_trend_report.escort_score,
+        "validation_turn_adaptation_score": validation_trend_report.turn_score,
+        "selection_arrival_capture_score": selection_trend_report.arrival_score,
+        "selection_escort_capture_score": selection_trend_report.escort_score,
+        "selection_turn_adaptation_score": selection_trend_report.turn_score,
+        "arrival_capture_score": selection_trend_report.arrival_score,
+        "escort_capture_score": selection_trend_report.escort_score,
+        "turn_adaptation_score": selection_trend_report.turn_score,
+        "validation_bull_capture_score": validation_trend_report.bull_score,
+        "validation_bear_capture_score": validation_trend_report.bear_score,
+        "selection_bull_capture_score": selection_trend_report.bull_score,
+        "selection_bear_capture_score": selection_trend_report.bear_score,
+        "bull_capture_score": selection_trend_report.bull_score,
+        "bear_capture_score": selection_trend_report.bear_score,
         "validation_segment_hit_rate": validation_trend_report.hit_rate,
-        "segment_hit_rate": full_period_trend_report.hit_rate,
-        "full_period_segment_hit_rate": full_period_trend_report.hit_rate,
-        "eval_major_segment_count": float(eval_trend_report.segment_count),
+        "selection_segment_hit_rate": selection_trend_report.hit_rate,
+        "segment_hit_rate": selection_trend_report.hit_rate,
+        "full_period_segment_hit_rate": selection_trend_report.hit_rate,
         "validation_major_segment_count": float(validation_trend_report.segment_count),
-        "major_segment_count": float(full_period_trend_report.segment_count),
-        "full_period_major_segment_count": float(full_period_trend_report.segment_count),
-        "eval_path_return_pct": eval_trend_report.path_return_pct,
+        "selection_major_segment_count": float(selection_trend_report.segment_count),
+        "major_segment_count": float(selection_trend_report.segment_count),
+        "full_period_major_segment_count": float(selection_trend_report.segment_count),
+        "validation_bull_segment_count": float(validation_trend_report.bull_segment_count),
+        "validation_bear_segment_count": float(validation_trend_report.bear_segment_count),
+        "validation_long_closed_trades": float(validation_long_trades),
+        "validation_short_closed_trades": float(validation_short_trades),
+        "selection_long_closed_trades": float(selection_long_trades),
+        "selection_short_closed_trades": float(selection_short_trades),
         "validation_path_return_pct": validation_trend_report.path_return_pct,
-        "combined_path_return_pct": full_period_trend_report.path_return_pct,
-        "full_period_return_pct": full_period_return,
+        "validation_total_return_pct": float(validation_source.get("return", validation_avg_return)),
+        "selection_path_return_pct": selection_trend_report.path_return_pct,
+        "selection_total_return_pct": selection_total_return,
+        "combined_path_return_pct": selection_trend_report.path_return_pct,
+        "full_period_return_pct": selection_total_return,
         "capture_drop": capture_drop,
+        "dev_validation_gap": promotion_gap,
         "promotion_gap": promotion_gap,
         "validation_block_score_mean": validation_block_report.mean_score,
         "validation_block_score_std": validation_block_report.std_score,

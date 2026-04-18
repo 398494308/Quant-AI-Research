@@ -10,7 +10,7 @@ from typing import Any
 @dataclass(frozen=True)
 class PerformanceChartPaths:
     validation_chart: Path | None
-    full_period_chart: Path | None
+    selection_chart: Path | None
 
 
 def _load_matplotlib():

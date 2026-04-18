@@ -8,85 +8,129 @@
 - 回测器：`src/backtest_macd_aggressive.py`
 - 研究器：`scripts/research_macd_aggressive_v2.py`
 
-仓库已经清理掉旧的 `v1` 研究链路，也不再依赖外部同类仓库的脚本、路径或配置。
+仓库不再依赖旧的 `test1 / test2` 研究链路。
 
-## 当前做什么
+## 当前研究器做什么
 
-研究器每轮会做这几件事：
+研究器每轮会按下面的顺序执行：
 
 1. 读取当前最优策略。
-2. 创建一个临时 workspace，把当前最优策略复制到里面。
-3. 先把“方向风险表 + 过拟合风险表 + 历史压缩摘要 + 最近轮次表”喂给模型，再让模型直接在临时 workspace 里的 `src/strategy_macd_aggressive.py` 原地修改。
-4. 模型最终只回传候选元信息，不再把整份策略源码塞回 JSON；主进程会直接读取临时 workspace 里的文件。
-5. 候选必须显式说明它最接近哪个失败方向簇，并给出 `novelty_proof` 证明这轮不是重复试错。
-6. 主进程会校验候选只改了 `PARAMS / _is_sideways_regime / _trend_quality_ok / _trend_followthrough_ok / strategy` 这些允许区域。
-7. 先对候选跑少量 `smoke` 窗口；若运行报错，会在同一轮把错误回传给模型修复，而不是直接进入下一轮。
-8. `smoke` 通过后再跑整套 `eval + validation` 窗口回测。
-9. 只有 `gate` 通过、未触发严重过拟合淘汰且 `promotion_score` 至少比当前最优提高 `0.02`，才晋级为新的最优。
-10. 把每轮结果写进 journal，包含 `accepted / rejected / duplicate_skipped / early_rejected / runtime_failed`；即使候选和当前最优完全相同，或没有有效 diff，也会记入历史并参与探索计数；journal 仍按 20 轮做压缩记忆。
+2. 创建临时 workspace，把当前最优策略复制到里面。
+3. 把“当前诊断 + 方向风险表 + 过拟合风险表 + 最近轮次摘要 + 压缩历史弱参考”喂给模型。
+4. 模型只允许改 `src/strategy_macd_aggressive.py` 的可编辑区域，并在 workspace 里原地改文件。
+5. 主进程校验候选只修改了允许区域。
+6. 先跑少量 `smoke` 窗口；如果运行报错，会在同一轮进入 repair loop，而不是直接开始下一轮。
+7. `smoke` 通过后，再跑整套 `development walk-forward + validation`。
+8. 只有 `gate` 通过，且 `promotion_score` 至少比当前最优高 `0.02`，才刷新 best。
+9. 刷新 best 之后，才会额外跑一次隐藏 `test`；它只做验收，不参与 best 选择，也不会喂给模型。
+10. 每轮结果都会写进 journal，包含 `accepted / rejected / duplicate_skipped / early_rejected / runtime_failed`。
 
-当前评分口径：
+## 当前评分口径
 
-- `score_regime = trend_capture_v4`
-- `quality_score = 0.70 * eval_trend_capture_score + 0.30 * eval_return_score`
-- `promotion_score = 0.70 * validation_trend_capture_score + 0.30 * validation_return_score`
-- `trend_capture_score` 不看“平滑度”，而是看大趋势的 `到来 / 陪跑 / 掉头`
-- 切段用唯一 `4h` 市场路径，不重复加权重叠窗口里的同一时间点
-- 当前切段已经放宽到更细的 `4h` 趋势段，约 `5%` 级别的单边也纳入核心机会；按当前全段数据大约会识别出 `61` 段
-- `promotion_score` 现在只看 `validation` 连续结果；全段连续收益和全段趋势分保留为展示与诊断口径
-- `validation` 连续路径会再按时间顺序切成 `3` 个分块；晋级时除了看 `promotion_score`，还会看分块均值、波动、最差块和负分块数量
+当前评分口径是 `trend_capture_v5`。
 
-当前窗口配置默认是：
+它分成三层：
 
-- `eval` 起点：`2023-07-01`
-- `eval` 终点：`2026-03-31`
-- `eval` 窗口：`28` 天
-- `eval` 步长：`21` 天
-- `validation`：末尾 `396` 天
+- `development`
+  `2023-07-01` 到 `2024-12-31`
+  这里会生成滚动 walk-forward 窗口，用来检查稳定性。
 
-## 本次机制增强
+- `validation`
+  `2025-01-01` 到 `2025-12-31`
+  这是模型可见的 holdout，也是唯一决定能不能刷新 best 的主分。
 
-- 防重复探索仍然走 prompt 约束，不做系统层面的硬禁令。
-- prompt 开头会先明确说明：这是 `15m` 执行、`1h + 4h` 确认的 BTC 激进趋势策略，目标是抓大波段，而不是追求平滑收益。
-- prompt 第一屏现在会显示“方向风险表”，按方向簇聚合最近同评分口径下的失败、零增益和运行报错。
-- 若最近一段历史里同一方向簇占比过高且没有实质正 `delta`，prompt 会在方向风险表后追加“主簇过热”提示，默认要求下一轮优先跨簇探索。
-- prompt 第一屏紧跟着会显示“过拟合风险表”，明确标出哪些轮次虽然分数不差，但更像依赖少数同类行情，应该降权参考。
-- 当前评分口径的“最近未压缩轮次表”现在会正确读取最新未压缩历史，不再被全局 compact 索引误伤。
-- 旧评分口径不会混进当前主表；它们只会在后面以“旧评分口径弱参考”形式出现，作为低优先级方向启发，不能覆盖当前 `v4` 记忆。
-- 模型必须输出 `closest_failed_cluster` 与 `novelty_proof`，先解释为什么不是继续围绕同一失败簇做近邻微调。
-- 方向记忆现在统一写入 `cluster_key`：优先用已经稳定的失败簇名；如果模型写的是临时说法，就回退到系统识别出的广义方向簇，避免同一方向换 tag 就被记成新簇。
-- 若最近连续 3 轮都属于低变化轮次，prompt 会强制进入“探索轮”，要求切换因子家族或编辑区域家族，而不是继续做近邻改写。
-- 如果仍想留在“主簇过热”的方向簇里，`novelty_proof` 现在必须明确说明：改的是哪条不同交易路径、哪两个关键诊断会明显变化、以及为什么这不是只换 tag 或轻微阈值。
-- 每轮先跑 `smoke` 窗口，运行报错会在同一轮进入 repair loop，最多按配置尝试修复，再决定是否记为 `runtime_failed`。
-- 候选生成现在改成“临时 workspace 原地编辑”模式：prompt 不再内嵌完整策略源码，模型也不再回传完整 `strategy_code`，只回传候选元信息。
-- 主进程会直接读取临时 workspace 里的 `src/strategy_macd_aggressive.py`，并校验非 editable 区域完全未变，防止模型偷偷改动边界外内容。
-- `same-source / recent-hash / empty-diff` 这类空转轮次现在也会写进 journal，并出现在方向风险表、最近轮次表和探索触发里，不再静默跳过。
-- 这台机器上的 `codex exec` 在 `workspace-write` 沙箱下会触发 `bwrap: loopback: Failed RTM_NEWADDR`，所以研究器子进程现在显式使用非交互 `approval=never`，并改走 `danger-full-access`，否则模型连本地文件都读写不了。
-- 这次切换后，研究 prompt 体积从之前约 `105KB` 降到约 `15KB`，主要节省来自不再传输整份策略源码。
-- `smoke` 抽样现在默认会覆盖 `validation`；在 `smoke_window_count=3` 时，默认是“早期 eval + validation + 中段 eval”，不再只测 `eval`。
-- `heartbeat` 会写出当前阶段和窗口进度，便于判断卡在 `smoke`、`full_eval` 还是修复。
-- 模型生成和 repair 阶段现在也会持续刷新 `heartbeat`，状态里能直接看到 `model_generate / model_repair`、等待秒数和超时上限。
-- `codex exec` 默认单次超时已从 `900s` 收紧到 `600s`；超时后会回收整组 provider 子进程，避免留下孤儿进程一直占着 CPU / 内存。
-- `2026-04-17` 已按当前 `trend_capture_v4` 评分口径重新初始化 best state，避免旧分数挡住本该通过的候选。
-- 提前淘汰从旧的 Sortino 逻辑改成了部分窗口趋势捕获快照：趋势段够多且趋势捕获分、命中率都很差时，会提前结束该轮。
-- 评估阶段现在会额外计算过拟合风险：若结果过度依赖单一正向趋势段、同向连续段，或有效命中覆盖率过低且明显多空偏科，会直接被 gate 掉。
-- compact 历史现在会带上 `score_regime`，prompt 主压缩摘要只使用当前评分口径；旧版口径只保留极短的弱参考摘要，避免长期污染又完全丢失跨口径启发。
-- 方向簇的 `ACTIVE_WINNER` 标签现在只保留给“有实质正 delta”的方向；只有微小正增益但没有真正抬过门槛的方向簇，不再被当成赢家簇提示给模型。
-- 回测器现在会强制校验 `price / funding` 的 venue 是否一致，并检查 funding 在请求窗口内是否完整覆盖，避免静默错跑。
-- 默认 funding 数据源已经切到 Binance 永续 funding，和当前 Binance 价格数据口径保持一致。
+- `test`
+  `2026-01-01` 到 `2026-03-31`
+  这是隐藏验收集，不参与调参，不进 prompt，只在新 best 时播报。
+
+单段评分还是：
+
+- `period_score = 0.70 * trend_capture_score + 0.30 * return_score`
+
+其中：
+
+- `trend_capture_score`
+  看三件事：到来时能不能及时跟上，主趋势中段能不能陪跑，掉头时能不能及时退出或反手。
+
+- `return_score`
+  看这条连续路径最终把资金放大了多少。
+
+研究器里的两个主分现在是：
+
+- `quality_score`
+  开发期滚动窗口的均值分。
+
+- `promotion_score`
+  验证集单段连续分。
+
+现在不会再把 hidden `test` 混进 `quality_score` 或 `promotion_score`。
+
+## 当前 gate
+
+当前 gate 主要看这些：
+
+- 开发期滚动均值分
+- 开发期滚动中位分
+- 开发期滚动波动
+- 开发期盈利窗口占比
+- 验证集趋势段数量
+- 验证集命中率
+- 验证集趋势捕获分
+- 开发期和验证集的分数落差
+- 验证集多头捕获
+- 验证集空头捕获
+- 验证集三分块稳健性
+- 手续费拖累
+- 验证集多空交易支持是否过弱
+
+过拟合集中度诊断还会继续计算，但现在主要作为诊断项和 journal 参考，不再单独充当唯一大门神。
+
+## Prompt 现在怎么组织
+
+当前 prompt 的顺序是：
+
+1. 策略目标
+2. 思考框架
+3. 当前诊断
+4. 记忆使用规则
+5. 历史研究记忆
+6. 探索与防重复规则
+7. 硬约束
+8. 输出要求
+
+现在的 prompt 有几个重要变化：
+
+- 不再把整份策略源码塞进 prompt。
+- memory rule 放在 journal 记忆前面，避免规则和记忆内容隔太远。
+- 防重复约束只保留一份，不再在多个位置重复同一句规则。
+- 模型可以看到 `validation` 的聚合诊断，但完全看不到 hidden `test`。
+- 最近轮次摘要拆成了“核心指标表 + 元信息摘要”，不再用超宽大表。
+
+## 当前窗口配置
+
+默认配置在 `config/research_v2.env`。
+
+关键日期：
+
+- `MACD_V2_DEVELOPMENT_START_DATE=2023-07-01`
+- `MACD_V2_DEVELOPMENT_END_DATE=2024-12-31`
+- `MACD_V2_VALIDATION_START_DATE=2025-01-01`
+- `MACD_V2_VALIDATION_END_DATE=2025-12-31`
+- `MACD_V2_TEST_START_DATE=2026-01-01`
+- `MACD_V2_TEST_END_DATE=2026-03-31`
+
+滚动窗口：
+
+- `MACD_V2_EVAL_WINDOW_DAYS=28`
+- `MACD_V2_EVAL_STEP_DAYS=21`
 
 ## 当前策略轮廓
 
-当前只有两个有效入场信号：
+当前策略仍然是：
 
-- `long_breakout`
-- `short_breakdown`
-
-核心逻辑：
-
-- `15m` 做执行
+- `15m` 执行
 - `1h + 4h` 做趋势确认
-- 横盘环境会尽量少做
+- 横盘环境尽量少做
 - 开仓后带 ATR 初始止损、保本、TP1、移动止损、趋势失效退出、时间退出
 - 允许有限次加仓
 
@@ -99,39 +143,121 @@
 - 多并发仓位
 - TP1 分批结算
 
-交易统计口径已经修正为“整笔仓位”，不会再把 `TP1` 当成独立 trade 放大交易数。
+交易统计口径已经是“整笔仓位”，不会再把 `TP1` 当成独立 trade。
 
-## 当前最优快照
+## Discord 播报说明
 
-研究器运行时会把最新最优状态写到 `state/research_macd_aggressive_v2_best.json`。
+Discord 主表现在优先显示收益相关，再显示验证集与选择期诊断。
 
-截至 `2026-04-17 11:39:31`（Asia/Shanghai），按当前 `trend_capture_v4` 评分口径重新评估，当前最优快照为：
+核心字段的直白解释：
 
-- `quality_score = 0.75`
-- `promotion_score = 0.40`
-- `full_period_return_pct = 230.09%`
-- `eval_trend_capture_score = 0.71`
-- `validation_trend_capture_score = 0.18`
-- `combined_trend_capture_score = 0.53`
-- `combined_return_score = 1.72`
-- `promotion_gap = 0.35`
-- `validation_block_score_mean = 0.23`
-- `validation_block_score_std = 0.27`
-- `validation_block_score_min = -0.15`
-- `validation_block_fail_count = 1`
-- `eval_avg_return = 2.28%`
-- `validation_avg_return = 88.98%`
-- `worst_drawdown = 34.17%`
-- `total_trades = 432`
-- `eval_major_segment_count = 33`
-- `validation_major_segment_count = 21`
-- `segment_hit_rate = 45.90%`
-- `bull_capture_score = 0.37`
-- `bear_capture_score = 0.72`
-- `overfit_risk_score = 20`
-- `overfit_top1_positive_share = 8.32%`
-- `overfit_coverage_ratio = 83.33%`
-- `gate = 通过`
+- `窗口`
+  这轮一共跑了多少个开发窗口、多少个验证窗口。只有新 best 才会额外显示隐藏测试窗口。
+
+- `选择期连续收益`
+  这是把 `development + validation` 这段时间真正连续跑 1 次后的总收益。
+
+- `验证连续收益`
+  这是把 `validation` 整段真正连续跑 1 次后的收益。
+
+- `隐藏测试连续收益`
+  只在新 best 时出现。它不参与本次 best 选择，只做最终验收。
+
+- `开发窗口均值收益`
+  所有开发窗口收益的平均值，只用于看训练期整体大概表现。
+
+- `开发滚动分(均/中/std)`
+  这是开发期滚动窗口分数的均值、中位数和波动。
+  均值越高越好，中位数越高越好，`std` 越小越稳。
+
+- `开发盈利窗占比`
+  开发窗口里有多少比例是正分窗口。
+
+- `验证晋级分`
+  就是 `promotion_score`。这是决定能不能刷新 best 的唯一主分。
+
+- `开发/验证分差`
+  如果这个数很大，通常说明前面开发期很好，但验证集跟不上，泛化不足。
+
+- `验证趋势/收益分`
+  前一个看抓趋势的质量，后一个看资金放大的效果。
+
+- `验证到来/陪跑/掉头`
+  分别表示：上车速度、陪跑能力、掉头时的退出或反手能力。
+
+- `验证多/空捕获`
+  分别表示这套策略在验证期里对上涨段和下跌段抓得怎么样。
+
+- `验证命中率/趋势段`
+  前一个是抓到的大趋势比例，后一个是验证期一共识别出多少个趋势段。
+
+- `验证多/空平仓数`
+  看验证期是不是只靠单边方向偶然出结果。
+
+- `验证分块均值/std`
+  把验证期按时间顺序切成三块后，每块各算一个分。这里看平均值和块间波动。
+
+- `验证最差块/负块数`
+  最差那一块有多差，负分块有几个。
+
+- `选择期趋势/收益分`
+  这是 `development + validation` 连续跑一次后的趋势分和收益分，只做诊断，不直接决定 best。
+
+- `选择期集中度诊断`
+  用来看结果是不是太依赖少数行情、同向链条过重或覆盖面太窄。
+
+- `手续费拖累`
+  手续费吃掉了多少本金比例。
+
+## 运行状态
+
+研究器会持续写 `state/research_macd_aggressive_v2_heartbeat.json`。
+
+重点字段：
+
+- `status`
+  当前状态，比如 `model_waiting`、`iteration_running`、`candidate_repairing`、`sleeping`。
+
+- `phase`
+  当前在哪个阶段，比如 `model_generate`、`model_repair`、`smoke_test`、`full_eval`、`selection_period_eval`、`hidden_test_eval`。
+
+- `current_window`
+  当前跑的是哪个窗口；连续回测会显示 `选择期连续` 或 `隐藏测试`。
+
+- `elapsed_seconds / timeout_seconds`
+  只在等模型返回时有意义，方便判断是 provider 慢，还是研究器卡在别的阶段。
+
+## 常用命令
+
+只评估当前策略：
+
+```bash
+python3 scripts/research_macd_aggressive_v2.py --no-optimize
+```
+
+只跑一轮研究：
+
+```bash
+python3 scripts/research_macd_aggressive_v2.py --once
+```
+
+持续运行研究器：
+
+```bash
+bash scripts/manage_research_macd_aggressive_v2.sh start
+```
+
+查看状态：
+
+```bash
+bash scripts/manage_research_macd_aggressive_v2.sh status
+```
+
+停止研究器：
+
+```bash
+bash scripts/manage_research_macd_aggressive_v2.sh stop
+```
 
 ## 目录结构
 
@@ -145,250 +271,3 @@ src/               策略、回测器、研究器模块
 state/             运行状态、journal、最优快照
 tests/             最小回归测试
 ```
-
-## 配置文件
-
-当前主要配置：
-
-- `config/research_v2.env`
-  研究窗口、gate、循环间隔
-- `config/research_v2.env.example`
-  `v2` 配置样板
-- `config/secrets.env.example`
-  Discord / OKX / 可选 Codex 覆盖项样板
-
-`config/secrets.env` 现在是可选的：
-
-- 只跑研究器且不发 Discord 时，可以没有它
-- 需要 Discord 或 `real-money-test` 的 OKX 凭证时再补
-
-当前与运行保护直接相关的参数：
-
-- `MACD_V2_EARLY_REJECT_WINDOWS`
-- `MACD_V2_EARLY_REJECT_MIN_SEGMENTS`
-- `MACD_V2_EARLY_REJECT_TREND_SCORE`
-- `MACD_V2_EARLY_REJECT_HIT_RATE`
-- `MACD_V2_SMOKE_WINDOW_COUNT`
-- `MACD_V2_MAX_REPAIR_ATTEMPTS`
-- `CODEX_TIMEOUT_SECONDS`
-
-现在 `bash scripts/manage_research_macd_aggressive_v2.sh status` 除了会显示轮次，还会带上：
-
-- `phase`
-  当前处在哪个阶段，比如 `model_generate`、`model_repair`、`smoke_test`、`full_eval`。
-
-- `window`
-  当前正在跑哪个窗口；如果是整段连续回测，会显示 `全段连续`。
-
-- `wait`
-  只有在等模型返回时才会出现，表示“已经等了多久 / 最多等多久”。
-
-## Discord 播报说明
-
-Discord 里的主表目前会显示这些字段。下面尽量用直白的话解释：
-
-- `窗口`
-  显示这次评估一共跑了多少个 `eval` 窗口、多少个 `validation` 窗口。
-
-- `全段连续收益`
-  这是把当前策略从研究起点一直连续跑到研究终点，只跑 1 次之后得到的总收益。
-  它最接近“这套策略整段历史一路跑下来最后赚了多少”。
-
-- `评估连续收益`
-  这是把全部 `eval` 时间段首尾连起来，真正连续跑 1 次之后得到的收益。
-
-- `验证连续收益`
-  这是把 `validation` 整段真正连续跑 1 次之后得到的收益。
-
-- `评估窗口均值收益`
-  这是所有 `eval` 窗口收益的平均值。
-  它主要用来看训练期窗口整体表现，是辅助诊断，不再和连续收益混成同一口径。
-
-- `评/验趋势分`
-  这是 `eval_trend_capture_score / validation_trend_capture_score`。
-  两边看的都是“抓趋势抓得怎么样”，口径一致，可以直接横比。
-
-- `评/验命中率`
-  这是 `eval_segment_hit_rate / validation_segment_hit_rate`。
-  两边看的都是“大趋势段里抓中了多少”，也是同口径对比。
-
-- `评/验趋势段`
-  这是 `eval_major_segment_count / validation_major_segment_count`。
-  看的都是两边各自识别出了多少个大趋势段。
-
-- `评/验捕获落差`
-  就是 `capture_drop`。
-  它表示评估和验证之间的趋势捕获差多少，绝对值越大，一般越不稳。
-
-- `主晋级分落差`
-  就是 `promotion_gap`。
-  它表示 `quality_score` 和 `promotion_score` 差多少。
-  如果这个数很大，通常就是前面 `eval` 很强，但后面 `validation` 跟不上。
-
-- `评分(主/晋)`
-  第一个是 `quality_score`，主要看 `eval` 阶段表现。
-  第二个是 `promotion_score`，只看 `validation` 连续回测表现，也是决定能不能刷新最优的核心分数。
-
-- `验证分块均值/std`
-  这是把整段 `validation` 连续路径按时间顺序切成 `3` 块后，每块各算一个晋级分。
-  前一个是这 `3` 块的平均值，后一个是它们之间的波动。
-  波动越大，说明这套策略在验证期内部也不够稳。
-
-- `验证最差块/负块数`
-  前一个是 `validation` 三个分块里最差的那块分数。
-  后一个是分数小于 `0` 的分块数量。
-  如果最差块太差，或者负块太多，就算整段验证总分还行，也不会轻易刷新最优。
-
-- `全段趋势/收益分`
-  第一个是 `combined_trend_capture_score`，意思是这套策略在全段连续口径下对大趋势抓得好不好。
-  第二个是 `combined_return_score`，意思是它在全段连续口径下把资金放大了多少。
-
-- `全段到来/陪跑/掉头`
-  一共 3 个数：
-  第一个看大行情刚开始时，能不能及时上车。
-  第二个看上车后，能不能尽量跟住主趋势。
-  第三个看趋势转向时，能不能及时跑掉或者反手。
-
-- `全段多/空捕获`
-  前一个是多头趋势抓得怎么样，后一个是空头趋势抓得怎么样。
-  如果一个很高一个很低，说明策略可能偏科，只会单边。
-
-- `全段命中率/趋势段`
-  前一个是 `segment_hit_rate`，意思是在全段连续口径识别出来的大趋势段里，有多少比例算是“抓到了”。
-  后一个是 `major_segment_count`，意思是全段连续口径下总共识别出了多少个大趋势段。
-
-- `过拟合风险`
-  前一个是风险等级，比如 `低 / 观察 / 高 / 严重`。
-  后一个是风险分数。
-  分数越高，越说明这次结果可能太依赖少数行情，不够稳。
-
-- `集中度/覆盖率`
-  一共 3 个数：
-  第一个是 `overfit_top1_positive_share`，看是不是主要靠单独一个趋势段拿分。
-  第二个是 `overfit_chain_positive_share`，看是不是主要靠一串同方向行情拿分。
-  第三个是 `overfit_coverage_ratio`，看有效命中是不是分布得够广，而不是只会某一种行情。
-
-- `评估唯一路径`
-  是 `eval_unique_trend_points`，意思是主评分真正使用了多少个唯一 `4h` 点。
-  这里是去重后的时间点，不会把重叠窗口重复算进去。
-
-- `最大回撤`
-  这次评估里，从资金最高点回落到最低点，最大的那次跌了多少。
-  数字越大，说明过程越难受。
-
-- `总交易`
-  所有窗口合计的整笔交易数。
-  现在已经按“整笔仓位”统计，不会把 `TP1` 单独当一笔交易。
-
-- `手续费拖累`
-  所有窗口平均下来，手续费吃掉了多少收益。
-  这个数越高，通常说明交易太碎或者噪声太多。
-
-表格下面还会有这些文字：
-
-- `门禁`
-  直接告诉你这轮为什么通过，或者为什么被拒。
-
-新最优时还会附带一张验证窗口图：
-
-- 上图蓝线是策略累计增长，橙线是 BTC 累计增长。
-- 下图红区是策略相对自己历史峰值的回撤。
-- Discord 默认附验证窗口图，方便直接看 holdout 表现。
-- 全段连续图会额外保存到 `reports/research_v2_charts/`，用于本地复盘整段历史走势。
-
-如果你看到很久没有新结果，先看 `status`：
-
-- 如果是 `phase=model_generate` 或 `phase=model_repair`，说明卡在模型返回，`wait` 会告诉你已经等了多久。
-- 如果 `wait` 接近 `CODEX_TIMEOUT_SECONDS` 还没回来，这轮通常会自动记成 `provider transient failure`，清理 provider 子进程后再重试。
-- 如果是 `phase=smoke_test`、`full_eval` 或 `new_best_charting`，那就是在跑回测或画图，不是 provider 卡住。
-
-- `方向`
-  这轮主要改的是哪类方向，比如更偏多头入场、横盘过滤、做空确认之类。
-
-- `修改区域`
-  这轮主要改了策略文件的哪些区块，比如参数、横盘识别、趋势质量、入场逻辑。
-
-- `假设`
-  这一轮想验证的核心想法。
-
-- `计划`
-  这一轮准备怎么改。
-
-- `预期`
-  如果这轮方向是对的，理论上希望改善什么。
-
-- `过拟合结论`
-  用一句话总结这轮结果能不能放心参考。
-  如果这里写的是 `直接淘汰` 或 `慎重参考`，就说明分数虽然可能不差，但不应该直接把它当模板。
-
-## 快速开始
-
-只做一次评估，不生成候选：
-
-```bash
-python3 scripts/research_macd_aggressive_v2.py --once --no-optimize
-```
-
-按当前评分口径重算现有基底，并把它写回新的 best state：
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/research_macd_aggressive_v2.py --once --no-optimize --reset-best
-```
-
-跑一轮研究：
-
-```bash
-python3 scripts/research_macd_aggressive_v2.py --once
-```
-
-持续运行研究器：
-
-```bash
-bash scripts/manage_research_macd_aggressive_v2.sh start
-tail -f logs/macd_aggressive_research_v2.out
-```
-
-说明：
-
-- 研究器现在会在每轮内部自动创建临时 workspace 给模型编辑，评估结束后自动清理。
-- 仓库里的 `src/strategy_macd_aggressive.py` 只会在候选进入实际评估或成为新最优时由主进程写入，不会直接把临时 workspace 留在仓库里。
-
-看状态：
-
-```bash
-bash scripts/manage_research_macd_aggressive_v2.sh status
-```
-
-看窗口分析：
-
-```bash
-python3 scripts/analyze_windows.py
-```
-
-检查 freqtrade 入场信号适配：
-
-```bash
-./.venv/bin/python scripts/freqtrade_compare.py
-```
-
-## real-money-test
-
-`real-money-test/` 现在是本仓库内自洽的 freqtrade 壳子：
-
-- 策略入口来自 `real-money-test/strategies/MacdAggressiveStrategy.py`
-- 逻辑源仍是 `src/freqtrade_macd_aggressive.py`
-- 运行配置由 `real-money-test/build_runtime_config.py` 本地生成
-- OKX 凭证优先读取环境变量或 `config/secrets.env`
-
-不再默认继承外部仓库配置。
-
-## 已移除的旧链路
-
-以下内容已经从仓库主线移除：
-
-- `v1` 研究器脚本
-- 旧版 `v1` 研究脚本
-- 对外部仓库配置链的默认依赖
-- 对外部路径的硬编码
-
-如果你还看到旧概念，优先以这里和 `docs/macd_aggressive_current_state.md` 为准。

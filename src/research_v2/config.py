@@ -54,30 +54,35 @@ class ResearchPaths:
 
 @dataclass(frozen=True)
 class WindowConfig:
-    eval_start_date: str
-    eval_end_date: str
+    development_start_date: str
+    development_end_date: str
+    validation_start_date: str
+    validation_end_date: str
+    test_start_date: str
+    test_end_date: str
     eval_window_days: int
     eval_step_days: int
-    validation_days: int
 
 
 @dataclass(frozen=True)
 class GateConfig:
-    min_eval_segments: int
+    min_development_mean_score: float
+    min_development_median_score: float
+    max_development_score_std: float
+    min_profitable_window_ratio: float
     min_validation_segments: int
-    min_eval_hit_rate: float
     min_validation_hit_rate: float
-    min_eval_trend_score: float
     min_validation_trend_score: float
-    max_capture_drop: float
-    min_bull_capture: float
-    min_bear_capture: float
+    max_dev_validation_gap: float
+    min_validation_bull_capture: float
+    min_validation_bear_capture: float
     max_fee_drag_pct: float
     validation_block_count: int = 3
-    max_promotion_gap: float = 0.35
     max_validation_block_std: float = 0.30
     min_validation_block_floor: float = -0.20
     max_validation_block_failures: int = 1
+    min_trade_support_per_side: int = 3
+    min_side_segment_count_for_trade_gate: int = 6
 
 
 @dataclass(frozen=True)
@@ -119,29 +124,34 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
     )
 
     windows = WindowConfig(
-        eval_start_date=os.getenv("MACD_V2_EVAL_START_DATE", "2025-09-01"),
-        eval_end_date=os.getenv("MACD_V2_EVAL_END_DATE", "2026-03-31"),
+        development_start_date=os.getenv("MACD_V2_DEVELOPMENT_START_DATE", "2023-07-01"),
+        development_end_date=os.getenv("MACD_V2_DEVELOPMENT_END_DATE", "2024-12-31"),
+        validation_start_date=os.getenv("MACD_V2_VALIDATION_START_DATE", "2025-01-01"),
+        validation_end_date=os.getenv("MACD_V2_VALIDATION_END_DATE", "2025-12-31"),
+        test_start_date=os.getenv("MACD_V2_TEST_START_DATE", "2026-01-01"),
+        test_end_date=os.getenv("MACD_V2_TEST_END_DATE", "2026-03-31"),
         eval_window_days=_env_int("MACD_V2_EVAL_WINDOW_DAYS", 28),
         eval_step_days=_env_int("MACD_V2_EVAL_STEP_DAYS", 21),
-        validation_days=_env_int("MACD_V2_VALIDATION_DAYS", 28),
     )
 
     gates = GateConfig(
-        min_eval_segments=_env_int("MACD_V2_MIN_EVAL_SEGMENTS", 8),
-        min_validation_segments=_env_int("MACD_V2_MIN_VALIDATION_SEGMENTS", 3),
-        min_eval_hit_rate=_env_float("MACD_V2_MIN_EVAL_HIT_RATE", 0.35),
-        min_validation_hit_rate=_env_float("MACD_V2_MIN_VALIDATION_HIT_RATE", 0.25),
-        min_eval_trend_score=_env_float("MACD_V2_MIN_EVAL_TREND_SCORE", 0.10),
-        min_validation_trend_score=_env_float("MACD_V2_MIN_VALIDATION_TREND_SCORE", 0.00),
-        max_capture_drop=_env_float("MACD_V2_MAX_CAPTURE_DROP", 0.45),
-        min_bull_capture=_env_float("MACD_V2_MIN_BULL_CAPTURE", -0.10),
-        min_bear_capture=_env_float("MACD_V2_MIN_BEAR_CAPTURE", -0.10),
+        min_development_mean_score=_env_float("MACD_V2_MIN_DEVELOPMENT_MEAN_SCORE", 0.20),
+        min_development_median_score=_env_float("MACD_V2_MIN_DEVELOPMENT_MEDIAN_SCORE", 0.05),
+        max_development_score_std=_env_float("MACD_V2_MAX_DEVELOPMENT_SCORE_STD", 0.35),
+        min_profitable_window_ratio=_env_float("MACD_V2_MIN_PROFITABLE_WINDOW_RATIO", 0.45),
+        min_validation_segments=_env_int("MACD_V2_MIN_VALIDATION_SEGMENTS", 18),
+        min_validation_hit_rate=_env_float("MACD_V2_MIN_VALIDATION_HIT_RATE", 0.40),
+        min_validation_trend_score=_env_float("MACD_V2_MIN_VALIDATION_TREND_SCORE", 0.10),
+        max_dev_validation_gap=_env_float("MACD_V2_MAX_DEV_VALIDATION_GAP", 0.20),
+        min_validation_bull_capture=_env_float("MACD_V2_MIN_VALIDATION_BULL_CAPTURE", 0.00),
+        min_validation_bear_capture=_env_float("MACD_V2_MIN_VALIDATION_BEAR_CAPTURE", 0.00),
         max_fee_drag_pct=_env_float("MACD_V2_MAX_FEE_DRAG_PCT", 8.0),
         validation_block_count=_env_int("MACD_V2_VALIDATION_BLOCK_COUNT", 3),
-        max_promotion_gap=_env_float("MACD_V2_MAX_PROMOTION_GAP", 0.35),
         max_validation_block_std=_env_float("MACD_V2_MAX_VALIDATION_BLOCK_STD", 0.30),
         min_validation_block_floor=_env_float("MACD_V2_MIN_VALIDATION_BLOCK_FLOOR", -0.20),
         max_validation_block_failures=_env_int("MACD_V2_MAX_VALIDATION_BLOCK_FAILURES", 1),
+        min_trade_support_per_side=_env_int("MACD_V2_MIN_TRADE_SUPPORT_PER_SIDE", 3),
+        min_side_segment_count_for_trade_gate=_env_int("MACD_V2_MIN_SIDE_SEGMENTS_FOR_TRADE_GATE", 6),
     )
 
     return ResearchRuntimeConfig(

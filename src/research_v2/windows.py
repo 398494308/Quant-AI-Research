@@ -28,28 +28,40 @@ def _parse_date(raw: str) -> datetime:
 
 
 def build_research_windows(config: WindowConfig) -> list[ResearchWindow]:
-    start_dt = _parse_date(config.eval_start_date)
-    end_dt = _parse_date(config.eval_end_date)
-    if end_dt < start_dt:
-        raise ValueError(f"invalid evaluation range: {config.eval_start_date}..{config.eval_end_date}")
+    development_start = _parse_date(config.development_start_date)
+    development_end = _parse_date(config.development_end_date)
+    validation_start = _parse_date(config.validation_start_date)
+    validation_end = _parse_date(config.validation_end_date)
+    test_start = _parse_date(config.test_start_date)
+    test_end = _parse_date(config.test_end_date)
+
+    if development_end < development_start:
+        raise ValueError(
+            f"invalid development range: {config.development_start_date}..{config.development_end_date}"
+        )
+    if validation_end < validation_start:
+        raise ValueError(
+            f"invalid validation range: {config.validation_start_date}..{config.validation_end_date}"
+        )
+    if test_end < test_start:
+        raise ValueError(
+            f"invalid test range: {config.test_start_date}..{config.test_end_date}"
+        )
+    if development_end >= validation_start:
+        raise ValueError("development range must end before validation starts")
+    if validation_end >= test_start:
+        raise ValueError("validation range must end before test starts")
     if config.eval_window_days < 7:
         raise ValueError(f"eval_window_days too small: {config.eval_window_days}")
     if config.eval_step_days < 5:
         raise ValueError(f"eval_step_days too small: {config.eval_step_days}")
-    if config.validation_days < 7:
-        raise ValueError(f"validation_days too small: {config.validation_days}")
-
-    validation_start = end_dt - timedelta(days=config.validation_days - 1)
-    eval_last_end = validation_start - timedelta(days=1)
-    if eval_last_end <= start_dt:
-        raise ValueError("not enough room for eval windows before validation")
 
     eval_windows: list[ResearchWindow] = []
-    cursor = start_dt
+    cursor = development_start
     window_index = 1
     while True:
         window_end = cursor + timedelta(days=config.eval_window_days - 1)
-        if window_end > eval_last_end:
+        if window_end > development_end:
             break
         eval_windows.append(
             ResearchWindow(
@@ -63,10 +75,10 @@ def build_research_windows(config: WindowConfig) -> list[ResearchWindow]:
         window_index += 1
         cursor += timedelta(days=config.eval_step_days)
 
-    tail_start = eval_last_end - timedelta(days=config.eval_window_days - 1)
-    if tail_start >= start_dt:
+    tail_start = development_end - timedelta(days=config.eval_window_days - 1)
+    if tail_start >= development_start:
         tail_start_str = tail_start.strftime("%Y-%m-%d")
-        tail_end_str = eval_last_end.strftime("%Y-%m-%d")
+        tail_end_str = development_end.strftime("%Y-%m-%d")
         if not eval_windows or (
             eval_windows[-1].start_date != tail_start_str
             or eval_windows[-1].end_date != tail_end_str
@@ -88,7 +100,14 @@ def build_research_windows(config: WindowConfig) -> list[ResearchWindow]:
         group="validation",
         label="验证1",
         start_date=validation_start.strftime("%Y-%m-%d"),
-        end_date=end_dt.strftime("%Y-%m-%d"),
+        end_date=validation_end.strftime("%Y-%m-%d"),
         weight=1.0,
     )
-    return [*eval_windows, validation_window]
+    test_window = ResearchWindow(
+        group="test",
+        label="测试1",
+        start_date=test_start.strftime("%Y-%m-%d"),
+        end_date=test_end.strftime("%Y-%m-%d"),
+        weight=1.0,
+    )
+    return [*eval_windows, validation_window, test_window]

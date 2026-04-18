@@ -603,9 +603,6 @@ def _direction_risk_board(entries: list[dict[str, Any]], limit: int) -> list[str
             f"| {cluster} | {stats['attempts']} | {stats['failures']} | {stats['zero_delta']} | "
             f"{stats['runtime_errors']} | {stats['best_delta']:.2f} | {label} | {tags} |"
         )
-    lines.append(
-        "若某方向簇被标为 `SATURATED` / `EXHAUSTED` / `RUNTIME_RISK`，除非能明确说明会改变交易路径，否则不要继续把它当主方向。"
-    )
     return lines
 
 
@@ -642,7 +639,6 @@ def _overfit_risk_board(entries: list[dict[str, Any]], limit: int) -> list[str]:
 
     for _, row in sorted(flagged_rows, key=lambda item: item[0], reverse=True)[:limit]:
         lines.append(row)
-    lines.append("若某轮被标为 `高` / `严重`，不要把它当作可直接复用的成功模板；若仍要借鉴，必须说明这次如何打破它对少数行情的依赖。")
     return lines
 
 
@@ -726,12 +722,8 @@ def _exploration_trigger_lines(entries: list[dict[str, Any]], limit: int) -> lis
             "探索触发（必须执行）:",
             f"最近 {LOW_CHANGE_STREAK} 轮都没有产生有效代码改动，已按重复探索记入历史。",
             f"- 重复原因：{'；'.join(reasons[:limit]) or '-'}",
-            f"- 近期近邻方向簇：{', '.join(clusters[:limit]) or '-'}",
-            f"- 近期近邻标签：{', '.join(tags[:limit]) or '-'}",
-            f"- 近期高频编辑区域：{', '.join(regions[:limit]) or '-'}",
-            "- 下一轮必须先产生有效 diff，不允许再次直接回传原文件或近乎等价的空改动。",
-            "- 若继续沿用相近方向，必须切换核心因子解释或 edited region family，并明确说明会改变哪类交易路径。",
-            "- 仅换 tag 说法、仅换轻微阈值或只在同一 edited region family 里做小修补，仍算重复探索。",
+            f"- 近期近邻方向簇：{', '.join(clusters[:limit]) or '-'}；标签：{', '.join(tags[:limit]) or '-'}；高频区域：{', '.join(regions[:limit]) or '-'}",
+            "- 下一轮必须先产出有效 diff；若继续沿用相近方向，至少切换方向簇、edited region family、long-short target 中的一项。",
         ]
 
     tail = _low_change_tail(entries)
@@ -764,15 +756,9 @@ def _exploration_trigger_lines(entries: list[dict[str, Any]], limit: int) -> lis
     lines = [
         "探索触发（必须执行）:",
         f"最近 {LOW_CHANGE_STREAK} 轮都属于低变化轮次：晋级分没有实质提升，且 trend_score / hit_rate / bull_bear_capture / fee_drag 基本不变。",
-        f"- 近期近邻方向簇：{', '.join(clusters[:limit]) or '-'}",
-        f"- 近期近邻标签：{', '.join(tags[:limit]) or '-'}",
-        f"- 近期近邻核心因子：{', '.join(factors[:limit]) or '-'}",
-        f"- 近期高频编辑区域：{', '.join(regions[:limit]) or '-'}",
-        "- 下一轮必须作为探索轮，不要继续沿用上述主因子解释或其近邻改写。",
-        "- 探索轮优先切换方向簇；若无法切换，至少切换 edited region family、long-short target 或核心因子家族中的一项。",
-        "- 若仍停留在相近方向，必须明确说明将改变哪类交易路径，并点名至少两个预计会明显变化的关键诊断。",
-        "- 仅换措辞、仅换 tag、仅换轻微阈值或只在同一 edited region family 里做小修补，仍算重复探索。",
-        "- 探索轮允许结果变差，但应尽量让 segment_hit_rate、bull_capture_score、bear_capture_score、avg_fee_drag、total_trades 这类关键诊断至少两项出现明显变化。",
+        f"- 近期近邻方向簇：{', '.join(clusters[:limit]) or '-'}；标签：{', '.join(tags[:limit]) or '-'}；核心因子：{', '.join(factors[:limit]) or '-'}；高频区域：{', '.join(regions[:limit]) or '-'}",
+        "- 下一轮必须把它当作探索轮：优先切簇；若无法切簇，至少切换 edited region family、long-short target 或核心因子家族中的一项。",
+        "- 目标是让 segment_hit_rate、bull_capture_score、bear_capture_score、avg_fee_drag、total_trades 中至少两项明显变化。",
     ]
     return lines
 
@@ -827,12 +813,8 @@ def _cluster_overheat_lines(entries: list[dict[str, Any]], limit: int) -> list[s
         "主簇过热（必须先读）:",
         f"最近 {len(recent)} 轮里，`{hot_cluster}` 占比 {hot_share:.0%}（{hot_count}/{len(recent)}），且最佳 promotion_delta 仅 {best_delta:.2f}，继续留在该簇大概率仍是近邻试错。",
         f"- 过热方向簇：{hot_cluster}",
-        f"- 近期近邻标签：{', '.join(tags[:limit]) or '-'}",
-        f"- 近期近邻核心因子：{', '.join(factors[:limit]) or '-'}",
-        f"- 近期高频编辑区域：{', '.join(regions[:limit]) or '-'}",
-        "- 下一轮默认必须切换到不同方向簇；若仍留在该簇，novelty_proof 必须同时说明：改的是哪条交易路径、至少两个会明显变化的关键诊断、以及为什么这不是只换标签或轻微阈值。",
-        "- 仅换 tag 说法、仅换轻微阈值、仅在同一 edited region family 内做小修补，仍算重复探索。",
-        "- 若无法跨簇，至少切换以下一项：edited region family / long-short target / core factor family。",
+        f"- 近期近邻标签：{', '.join(tags[:limit]) or '-'}；核心因子：{', '.join(factors[:limit]) or '-'}；高频区域：{', '.join(regions[:limit]) or '-'}",
+        "- 下一轮默认应切到不同方向簇；若仍留在该簇，必须证明这次会改变不同交易路径。",
     ]
 
 
@@ -948,53 +930,44 @@ def _recent_core_factor_lines(entries: list[dict[str, Any]], columns: list[str])
     return lines
 
 
-def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int, core_factor_columns: list[str]) -> list[str]:
-    factor_headers = [_truncate(name, 18) for name in core_factor_columns]
+def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int) -> list[str]:
     lines = [
-        "| 轮次 | 候选 | 结果 | 阶段 | promotion | quality | trend | return | hit | seg | bull | bear | gate | tags | regions | "
-        + " | ".join(factor_headers)
-        + (" | " if factor_headers else "")
-        + "摘要 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | "
-        + " | ".join("---" for _ in factor_headers)
-        + (" | " if factor_headers else "")
-        + "--- |",
+        "| 轮次 | 结果 | 阶段 | quality | promotion | val_hit | val_bull | val_bear | gap | gate |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for offset, entry in enumerate(entries, start=1):
         round_label = entry.get("iteration")
         if round_label in (None, "", 0):
             round_label = f"j{start_index + offset}"
-        candidate_id = _truncate(entry.get("candidate_id", "unknown"), 36)
         outcome = _display_outcome(str(entry.get("outcome", "")))
         stage = _display_stage(entry)
         promotion = _format_metric(entry.get("promotion_score"))
         quality = _format_metric(entry.get("quality_score"))
-        trend = _format_metric(_metric_from_entry(entry, "combined_trend_capture_score"))
-        return_score = _format_metric(_metric_from_entry(entry, "combined_return_score"))
-        hit_rate = _format_metric(_metric_from_entry(entry, "segment_hit_rate"))
-        segment_count = _format_metric(_metric_from_entry(entry, "major_segment_count"))
-        bull = _format_metric(_metric_from_entry(entry, "bull_capture_score"))
-        bear = _format_metric(_metric_from_entry(entry, "bear_capture_score"))
+        hit_rate = _format_metric(_metric_from_entry(entry, "validation_segment_hit_rate"))
+        bull = _format_metric(_metric_from_entry(entry, "validation_bull_capture_score"))
+        bear = _format_metric(_metric_from_entry(entry, "validation_bear_capture_score"))
+        gap = _format_metric(_metric_from_entry(entry, "dev_validation_gap") or entry.get("promotion_gap"))
         gate = _truncate(entry.get("gate_reason", "-"), 20) or "-"
-        tags = _truncate(",".join(entry.get("change_tags", [])) or "-", 42)
-        regions = _truncate(",".join(entry.get("edited_regions", [])) or "-", 22)
-        summary = _truncate(entry.get("note") or entry.get("hypothesis") or "-", 42)
-        factor_map: dict[str, str] = {}
-        for factor in entry.get("core_factors", []):
-            if not isinstance(factor, dict):
-                continue
-            name = str(factor.get("name", "")).strip()
-            if not name:
-                continue
-            factor_map[name] = _truncate(str(factor.get("current_signal", "")).strip(), 18) or "关注"
-        factor_cells = [factor_map.get(name, "-") for name in core_factor_columns]
         lines.append(
-            f"| {round_label} | {candidate_id} | {outcome} | {stage} | {promotion} | "
-            f"{quality} | {trend} | {return_score} | {hit_rate} | {segment_count} | {bull} | {bear} | "
-            f"{gate} | {tags} | {regions} | "
-            + " | ".join(factor_cells)
-            + (" | " if factor_cells else "")
-            + f"{summary} |"
+            f"| {round_label} | {outcome} | {stage} | {quality} | {promotion} | "
+            f"{hit_rate} | {bull} | {bear} | {gap} | {gate} |"
+        )
+    return lines
+
+
+def _recent_round_meta_lines(entries: list[dict[str, Any]], start_index: int) -> list[str]:
+    lines = ["最近轮次元信息:"]
+    for offset, entry in enumerate(entries, start=1):
+        round_label = entry.get("iteration")
+        if round_label in (None, "", 0):
+            round_label = f"j{start_index + offset}"
+        candidate_id = _truncate(entry.get("candidate_id", "unknown"), 28)
+        cluster = _truncate(cluster_key_for_entry(entry) or "-", 24)
+        tags = _truncate(",".join(entry.get("change_tags", [])) or "-", 40)
+        regions = _truncate(",".join(entry.get("edited_regions", [])) or "-", 20)
+        summary = _truncate(entry.get("note") or entry.get("hypothesis") or "-", 64)
+        lines.append(
+            f"- {round_label} {candidate_id}: cluster={cluster}; tags={tags}; regions={regions}; 摘要={summary}"
         )
     return lines
 
@@ -1012,10 +985,13 @@ def _empty_prompt_tables() -> list[str]:
         "| - | - | - | 低 | 0 | - | - | - | - | - | 暂无需要降权的高风险轮次 |",
         "",
         "最近未压缩轮次共 0 条：保留 0，未保留 0，重复跳过 0，提前淘汰 0，运行失败 0。",
-        "最近未压缩轮次表:",
-        "| 轮次 | 候选 | 结果 | 阶段 | promotion | quality | trend | return | hit | seg | bull | bear | gate | tags | regions | 摘要 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-        "| - | - | - | - | - | - | - | - | - | - | - | - | - | - | - | 新评分口径已重置，等待新历史。 |",
+        "最近核心指标表:",
+        "| 轮次 | 结果 | 阶段 | quality | promotion | val_hit | val_bull | val_bear | gap | gate |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| - | - | - | - | - | - | - | - | - | 新评分口径已重置，等待新历史。 |",
+        "",
+        "最近轮次元信息:",
+        "- 新评分口径已重置，等待新历史。",
     ]
 
 
@@ -1195,8 +1171,10 @@ def build_journal_prompt_summary(
             core_factor_lines = _recent_core_factor_lines(display_entries, core_factor_columns)
             if core_factor_lines:
                 parts.extend(core_factor_lines)
-            parts.append("最近未压缩轮次表:")
-            parts.extend(_format_recent_rounds_table(display_entries, recent_start, core_factor_columns))
+            parts.append("最近核心指标表:")
+            parts.extend(_format_recent_rounds_table(display_entries, recent_start))
+            parts.append("")
+            parts.extend(_recent_round_meta_lines(display_entries, recent_start))
 
         # 压缩历史放在近期方向风险之后，避免长历史淹没最近连续失败。
         if journal_path is not None:

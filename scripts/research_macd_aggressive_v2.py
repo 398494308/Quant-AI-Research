@@ -39,7 +39,12 @@ from codex_exec_client import (
 )
 from research_v2.config import ResearchRuntimeConfig, load_research_runtime_config
 from research_v2.charting import PerformanceChartPaths, charts_available, render_performance_chart
-from research_v2.evaluation import EvaluationReport, partial_eval_gate_snapshot, summarize_evaluation
+from research_v2.evaluation import (
+    EvaluationReport,
+    partial_eval_gate_snapshot,
+    summarize_evaluation,
+    summarize_hidden_test_result,
+)
 from research_v2.journal import (
     append_journal_entry,
     build_journal_prompt_summary,
@@ -74,7 +79,8 @@ WINDOWS = build_research_windows(RUNTIME.windows)
 DISCORD_CONFIG = load_discord_config()
 EVAL_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "eval")
 VALIDATION_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "validation")
-SCORE_REGIME = "trend_capture_v4"
+TEST_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "test")
+SCORE_REGIME = "trend_capture_v5"
 MODEL_WORKSPACE_STRATEGY_PATH = Path("src/strategy_macd_aggressive.py")
 
 best_source = ""
@@ -243,19 +249,21 @@ def _prepare_backtest_context() -> dict[str, Any]:
     )
 
 
-def _full_period_bounds(windows: list[Any]) -> tuple[str, str]:
-    if not windows:
-        raise ValueError("missing research windows")
-    start_date = min(window.start_date for window in windows)
-    end_date = max(window.end_date for window in windows)
+def _evaluation_windows() -> list[Any]:
+    return [window for window in WINDOWS if window.group == "eval"]
+
+
+def _scored_windows() -> list[Any]:
+    return [window for window in WINDOWS if window.group in {"eval", "validation"}]
+
+
+def _selection_period_bounds(windows: list[Any]) -> tuple[str, str]:
+    selection_windows = [window for window in windows if window.group in {"eval", "validation"}]
+    if not selection_windows:
+        raise ValueError("missing selection windows")
+    start_date = min(window.start_date for window in selection_windows)
+    end_date = max(window.end_date for window in selection_windows)
     return start_date, end_date
-
-
-def _eval_bounds(windows: list[Any]) -> tuple[str, str]:
-    eval_windows = [window for window in windows if window.group == "eval"]
-    if not eval_windows:
-        raise ValueError("missing eval windows")
-    return eval_windows[0].start_date, eval_windows[-1].end_date
 
 
 def _validation_window() -> Any:
@@ -263,6 +271,13 @@ def _validation_window() -> Any:
         if window.group == "validation":
             return window
     raise ValueError("missing validation window")
+
+
+def _test_window() -> Any:
+    for window in WINDOWS:
+        if window.group == "test":
+            return window
+    raise ValueError("missing test window")
 
 
 def _run_base_backtests(
@@ -276,7 +291,7 @@ def _run_base_backtests(
     results: list[dict[str, Any]] = []
     eval_count = 0
     check_at = RUNTIME.early_reject_after_windows
-    active_windows = windows or WINDOWS
+    active_windows = windows or _scored_windows()
     runtime_context = prepared_context or _prepare_backtest_context()
     eval_start_date: str | None = None
 
@@ -331,20 +346,20 @@ def _run_base_backtests(
     return results
 
 
-def _run_full_period_backtest(
+def _run_selection_period_backtest(
     prepared_context: dict[str, Any],
     *,
     include_diagnostics: bool = True,
-    heartbeat_phase: str = "full_period_eval",
+    heartbeat_phase: str = "selection_period_eval",
 ) -> dict[str, Any]:
-    start_date, end_date = _full_period_bounds(WINDOWS)
+    start_date, end_date = _selection_period_bounds(WINDOWS)
     write_heartbeat(
         "iteration_running",
         message=f"iteration {iteration_counter} {heartbeat_phase}",
         phase=heartbeat_phase,
-        current_window="全段连续",
-        window_index=len(WINDOWS) + 1,
-        window_count=len(WINDOWS) + 1,
+        current_window="选择期连续",
+        window_index=len(_scored_windows()) + 1,
+        window_count=len(_scored_windows()) + 1,
     )
     return backtest_module.backtest_macd_aggressive(
         strategy_func=strategy_module.strategy,
@@ -359,55 +374,27 @@ def _run_full_period_backtest(
     )
 
 
-def _run_eval_continuous_backtest(
+def _run_hidden_test_backtest(
     prepared_context: dict[str, Any],
     *,
     include_diagnostics: bool = True,
-    heartbeat_phase: str = "eval_continuous",
+    heartbeat_phase: str = "hidden_test_eval",
 ) -> dict[str, Any]:
-    start_date, end_date = _eval_bounds(WINDOWS)
+    test_window = _test_window()
     write_heartbeat(
         "iteration_running",
         message=f"iteration {iteration_counter} {heartbeat_phase}",
         phase=heartbeat_phase,
-        current_window="评估连续",
-        window_index=len(WINDOWS) + 1,
-        window_count=len(WINDOWS) + 2,
+        current_window="隐藏测试",
+        window_index=len(_scored_windows()) + 2,
+        window_count=len(_scored_windows()) + 2,
     )
     return backtest_module.backtest_macd_aggressive(
         strategy_func=strategy_module.strategy,
         intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
         hourly_file=backtest_module.DEFAULT_HOURLY_FILE,
-        start_date=start_date,
-        end_date=end_date,
-        strategy_params=strategy_module.PARAMS,
-        exit_params=backtest_module.EXIT_PARAMS,
-        include_diagnostics=include_diagnostics,
-        prepared_context=prepared_context,
-    )
-
-
-def _run_validation_continuous_backtest(
-    prepared_context: dict[str, Any],
-    *,
-    include_diagnostics: bool = True,
-    heartbeat_phase: str = "validation_continuous",
-) -> dict[str, Any]:
-    validation_window = _validation_window()
-    write_heartbeat(
-        "iteration_running",
-        message=f"iteration {iteration_counter} {heartbeat_phase}",
-        phase=heartbeat_phase,
-        current_window="验证连续",
-        window_index=len(WINDOWS) + 1,
-        window_count=len(WINDOWS) + 2,
-    )
-    return backtest_module.backtest_macd_aggressive(
-        strategy_func=strategy_module.strategy,
-        intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
-        hourly_file=backtest_module.DEFAULT_HOURLY_FILE,
-        start_date=validation_window.start_date,
-        end_date=validation_window.end_date,
+        start_date=test_window.start_date,
+        end_date=test_window.end_date,
         strategy_params=strategy_module.PARAMS,
         exit_params=backtest_module.EXIT_PARAMS,
         include_diagnostics=include_diagnostics,
@@ -436,7 +423,7 @@ def _build_chart_note(message: str) -> str:
 def _generate_new_best_charts(iteration_id: int) -> PerformanceChartPaths:
     if not charts_available():
         log_info("跳过新最优图表：matplotlib 不可用")
-        return PerformanceChartPaths(validation_chart=None, full_period_chart=None)
+        return PerformanceChartPaths(validation_chart=None, selection_chart=None)
 
     chart_dir = _chart_output_dir()
     validation_window = _validation_window()
@@ -461,7 +448,7 @@ def _generate_new_best_charts(iteration_id: int) -> PerformanceChartPaths:
         include_diagnostics=True,
         prepared_context=prepared_context,
     )
-    full_period_result = _run_full_period_backtest(
+    selection_result = _run_selection_period_backtest(
         prepared_context,
         include_diagnostics=True,
         heartbeat_phase="new_best_charting",
@@ -470,9 +457,9 @@ def _generate_new_best_charts(iteration_id: int) -> PerformanceChartPaths:
     validation_chart = chart_dir / (
         f"new_best_{iteration_id:04d}_validation_{validation_window.start_date}_{validation_window.end_date}.png"
     )
-    full_start, full_end = _full_period_bounds(WINDOWS)
-    full_period_chart = chart_dir / (
-        f"new_best_{iteration_id:04d}_full_period_{full_start}_{full_end}.png"
+    selection_start, selection_end = _selection_period_bounds(WINDOWS)
+    selection_chart = chart_dir / (
+        f"new_best_{iteration_id:04d}_selection_{selection_start}_{selection_end}.png"
     )
 
     validation_chart = render_performance_chart(
@@ -481,21 +468,21 @@ def _generate_new_best_charts(iteration_id: int) -> PerformanceChartPaths:
         title=f"New Best #{iteration_id} Validation",
         subtitle=f"{validation_window.start_date} to {validation_window.end_date}",
     )
-    full_period_chart = render_performance_chart(
-        daily_equity_curve=full_period_result.get("daily_equity_curve", []),
-        output_path=full_period_chart,
-        title=f"New Best #{iteration_id} Full Period",
-        subtitle=f"{full_start} to {full_end}",
+    selection_chart = render_performance_chart(
+        daily_equity_curve=selection_result.get("daily_equity_curve", []),
+        output_path=selection_chart,
+        title=f"New Best #{iteration_id} Selection Period",
+        subtitle=f"{selection_start} to {selection_end}",
     )
 
     if validation_chart is not None:
         _write_chart_copy(validation_chart, chart_dir / "latest_validation.png")
-    if full_period_chart is not None:
-        _write_chart_copy(full_period_chart, chart_dir / "latest_full_period.png")
+    if selection_chart is not None:
+        _write_chart_copy(selection_chart, chart_dir / "latest_selection.png")
 
     return PerformanceChartPaths(
         validation_chart=validation_chart,
-        full_period_chart=full_period_chart,
+        selection_chart=selection_chart,
     )
 
 
@@ -505,16 +492,23 @@ def evaluate_current_strategy(allow_early_reject: bool = False) -> EvaluationRep
         allow_early_reject=allow_early_reject,
         prepared_context=prepared_context,
     )
-    eval_continuous_result = _run_eval_continuous_backtest(prepared_context)
-    validation_continuous_result = _run_validation_continuous_backtest(prepared_context)
-    full_period_result = _run_full_period_backtest(prepared_context)
+    validation_continuous_result = next(
+        (item["result"] for item in base_results if item["window"].group == "validation"),
+        None,
+    )
+    selection_period_result = _run_selection_period_backtest(prepared_context)
     return summarize_evaluation(
         base_results,
         RUNTIME.gates,
-        eval_continuous_result=eval_continuous_result,
+        selection_period_result=selection_period_result,
         validation_continuous_result=validation_continuous_result,
-        full_period_result=full_period_result,
     )
+
+
+def evaluate_hidden_test_metrics() -> dict[str, float]:
+    prepared_context = _prepare_backtest_context()
+    hidden_test_result = _run_hidden_test_backtest(prepared_context, include_diagnostics=True)
+    return summarize_hidden_test_result(hidden_test_result)
 
 
 def smoke_test_current_strategy() -> None:
@@ -703,7 +697,12 @@ def build_strategy_candidate(base_source: str, *, workspace_root: Path) -> Strat
 # ==================== 最优状态管理 ====================
 
 
-def _persist_best_state(source: str, report: EvaluationReport) -> None:
+def _persist_best_state(
+    source: str,
+    report: EvaluationReport,
+    *,
+    shadow_test_metrics: dict[str, float] | None = None,
+) -> None:
     RUNTIME.paths.best_state_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "updated_at": datetime.now(UTC).isoformat(),
@@ -712,6 +711,7 @@ def _persist_best_state(source: str, report: EvaluationReport) -> None:
         "metrics": report.metrics,
         "gate_passed": report.gate_passed,
         "gate_reason": report.gate_reason,
+        "shadow_test_metrics": shadow_test_metrics or {},
     }
     RUNTIME.paths.best_state_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     write_strategy_source(RUNTIME.paths.best_strategy_file, source)
@@ -747,6 +747,7 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
                 report=best_report,
                 eval_window_count=EVAL_WINDOW_COUNT,
                 validation_window_count=VALIDATION_WINDOW_COUNT,
+                test_window_count=TEST_WINDOW_COUNT,
             ),
             context="initialize_saved_best",
         )
@@ -775,6 +776,7 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
             report=best_report,
             eval_window_count=EVAL_WINDOW_COUNT,
             validation_window_count=VALIDATION_WINDOW_COUNT,
+            test_window_count=TEST_WINDOW_COUNT,
         ),
         context="initialize_baseline",
     )
@@ -1098,7 +1100,21 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
     if accepted:
         best_source = candidate.strategy_code
         best_report = candidate_report
-        _persist_best_state(best_source, best_report)
+        shadow_test_metrics: dict[str, float] | None = None
+        try:
+            shadow_test_metrics = evaluate_hidden_test_metrics()
+            log_info(
+                "隐藏测试验收: "
+                f"score={shadow_test_metrics['shadow_test_score']:.2f}, "
+                f"return={shadow_test_metrics['shadow_test_total_return_pct']:.2f}%, "
+                f"segments={int(shadow_test_metrics['shadow_test_segment_count'])}, "
+                f"hit={shadow_test_metrics['shadow_test_hit_rate']:.0%}"
+            )
+        except Exception as exc:
+            log_info(f"隐藏测试评估失败，但本轮 best 已按验证集保留: {exc}")
+            logging.exception("隐藏测试评估失败(iteration=%s)", iteration_id)
+
+        _persist_best_state(best_source, best_report, shadow_test_metrics=shadow_test_metrics)
         append_journal_entry(RUNTIME.paths.journal_file, entry_base)
         if maybe_compact(RUNTIME.paths.journal_file):
             log_info("研究日志已压缩")
@@ -1115,11 +1131,11 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             quality=best_report.metrics["quality_score"],
             gate=best_report.gate_reason,
         )
-        chart_paths = PerformanceChartPaths(validation_chart=None, full_period_chart=None)
+        chart_paths = PerformanceChartPaths(validation_chart=None, selection_chart=None)
         try:
             chart_paths = _generate_new_best_charts(iteration_id)
-            if chart_paths.full_period_chart is not None:
-                log_info(f"全段图已保存: {chart_paths.full_period_chart}")
+            if chart_paths.selection_chart is not None:
+                log_info(f"选择期图已保存: {chart_paths.selection_chart}")
             if chart_paths.validation_chart is not None:
                 log_info(f"验证图已保存: {chart_paths.validation_chart}")
         except Exception as exc:
@@ -1130,6 +1146,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             report=best_report,
             eval_window_count=EVAL_WINDOW_COUNT,
             validation_window_count=VALIDATION_WINDOW_COUNT,
+            test_window_count=TEST_WINDOW_COUNT,
+            shadow_test_metrics=shadow_test_metrics,
             candidate=candidate,
         )
         attachments = [chart_paths.validation_chart] if chart_paths.validation_chart is not None else None
