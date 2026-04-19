@@ -10,6 +10,28 @@
 
 仓库不再依赖旧的 `test1 / test2` 研究链路。
 
+## 最新基底状态
+
+`2026-04-19` 已手工重做过一版新的 `baseline`，并已经持久化到：
+
+- `src/strategy_macd_aggressive.py`
+- `backups/strategy_macd_aggressive_v2_best.py`
+- `state/research_macd_aggressive_v2_best.json`
+
+这版基底的当前评估结果是：
+
+- 开发均值分：`0.2737`
+- 开发中位分：`0.1526`
+- 开发波动：`0.4144`
+- 验证趋势分：`0.1549`
+- 验证收益分：`0.0071`
+- 验证多头捕获：`-0.0527`
+- 验证空头捕获：`0.3558`
+- 验证命中率：`39.29%`
+- 总交易数：`322`
+
+它还没过 gate，但已经作为新的研究起点使用；历史 journal 也已经在同一天彻底清空后重启。
+
 ## 当前研究器做什么
 
 研究器每轮会按下面的顺序执行：
@@ -145,6 +167,29 @@
 
 ```bash
 python3 scripts/download_aggressive_data.py
+```
+
+注意：
+
+- 研究器启动时会把 `src/strategy_macd_aggressive.py` 从已保存 best 恢复回来。
+- 所以如果你只是想看当前 `src` 的真实评估，不要直接跑 `python3 scripts/research_macd_aggressive_v2.py --no-optimize`。
+- 安全做法是直接调用评估函数：
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import sys, importlib
+sys.path.insert(0, str(Path('.').resolve()))
+sys.path.insert(0, str(Path('src').resolve()))
+
+import strategy_macd_aggressive as sm
+import scripts.research_macd_aggressive_v2 as rs
+
+importlib.reload(sm)
+rs.strategy_module = sm
+report = rs.evaluate_current_strategy()
+print(report.summary_text)
+PY
 ```
 
 回测器当前已包含：

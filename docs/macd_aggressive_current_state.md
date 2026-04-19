@@ -11,6 +11,35 @@
 - `1h` / `4h` 只是由 `15m` 聚合出来的确认层
 - 成交量维度除了总量，还包含 `trade_count`、`taker_buy_volume`、`taker_sell_volume`
 
+## 最新手工基底
+
+- 更新时间：`2026-04-19`
+- 当前已持久化到：
+  - `src/strategy_macd_aggressive.py`
+  - `backups/strategy_macd_aggressive_v2_best.py`
+  - `state/research_macd_aggressive_v2_best.json`
+- 当前 `baseline` 评估结果：
+  - 开发均值分：`0.2737`
+  - 开发中位分：`0.1526`
+  - 开发波动：`0.4144`
+  - 验证趋势分：`0.1549`
+  - 验证收益分：`0.0071`
+  - 验证多头捕获：`-0.0527`
+  - 验证空头捕获：`0.3558`
+  - 验证命中率：`39.29%`
+  - 总交易数：`322`
+- 当前 gate 仍未通过，原因是：
+  - 开发期滚动波动过大
+  - 验证命中率略低于线
+  - 验证多头捕获略低于线
+
+这版新基底的手工方向不是“继续堆更多 long”，而是：
+
+- 保留原主吸收型 long 路径
+- 给 long 加入更强的 flow / chop 环境过滤
+- 保留 short 主框架不大动
+- 用更干净的历史重新起跑，让研究器围绕这个基底继续找 gate 内解
+
 ## 当前时间切分
 
 - `development`
@@ -133,8 +162,27 @@ Discord 现在优先播报：
 - 这是一次新的评分 regime 切换，旧 `trend_capture_v4` 历史不会再作为主参考。
 - 新 regime 下的 `champion / baseline` 会在研究器下一次初始化或下一轮运行后重新沉淀。
 - 如果本地价格 CSV 还是旧格式，需要先重新运行 `python3 scripts/download_aggressive_data.py`，生成带 flow 列的新 `15m/1h/4h/1m` 数据。
-- 如果要看现在的真实基线，请直接跑：
+- `scripts/research_macd_aggressive_v2.py` 的启动路径会把 `src/strategy_macd_aggressive.py` 从已保存 best 恢复回来。
+- 所以如果只是想安全评估当前 `src`，不要直接跑 `--no-optimize`，请用下面这段：
 
 ```bash
-python3 scripts/research_macd_aggressive_v2.py --no-optimize
+python3 - <<'PY'
+from pathlib import Path
+import sys, importlib
+sys.path.insert(0, str(Path('.').resolve()))
+sys.path.insert(0, str(Path('src').resolve()))
+
+import strategy_macd_aggressive as sm
+import scripts.research_macd_aggressive_v2 as rs
+
+importlib.reload(sm)
+rs.strategy_module = sm
+report = rs.evaluate_current_strategy()
+print(report.summary_text)
+PY
 ```
+
+- 本轮已在 `2026-04-19` 做过一次彻底历史清理：
+  - `state/research_macd_aggressive_v2_journal.jsonl` 已清空
+  - `state/research_macd_aggressive_v2_journal.compact.json` 已清空
+  - 原文件已按时间戳归档

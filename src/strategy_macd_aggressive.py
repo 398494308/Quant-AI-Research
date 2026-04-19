@@ -25,18 +25,29 @@ PARAMS = {'breakdown_adx_min': 25.6,
  'breakout_body_ratio_min': 0.3,
  'breakout_buffer_pct': 0.00015,
  'breakout_close_pos_min': 0.58,
+ 'breakout_flow_imbalance_min': 0.02,
+ 'breakout_flow_score_min': 4,
+ 'breakout_flow_score_strong_min': 6,
  'breakout_hist_min': 4.0,
  'breakout_lookback': 28,
  'breakout_rsi_max': 69.0,
  'breakout_rsi_min': 50.0,
+ 'breakout_taker_buy_ratio_min': 0.5,
+ 'breakout_trade_count_ratio_min': 1.05,
  'breakout_volume_ratio_min': 1.12,
- 'fourh_adx_min': 12.5,
- 'fourh_ema_fast': 10,
- 'fourh_ema_slow': 34,
+ 'flow_lookback': 9,
+  'fourh_adx_min': 12.5,
+  'fourh_ema_fast': 10,
+  'fourh_ema_slow': 34,
+ 'fourh_flow_confirmation_min': 0.0,
+ 'fourh_taker_buy_ratio_min': 0.49,
+ 'hourly_flow_confirmation_min': 0.0,
+ 'hourly_taker_buy_ratio_min': 0.495,
+ 'hourly_trade_count_ratio_min': 0.75,
  'hourly_adx_min': 19.0,
  'hourly_ema_anchor': 85,
  'hourly_ema_fast': 12,
- 'hourly_ema_slow': 50,
+  'hourly_ema_slow': 50,
  'long_anchor_extension_atr_max': 1.02,
  'long_anchor_extension_spread_max': 2.44,
  'long_base_distance_atr_max': 0.12,
@@ -135,6 +146,124 @@ def _intraday_trend_metrics(market_state):
         'spread_pct': (ema_fast - ema_slow) / trend_base,
         'slope_pct': (ema_slow - prev_ema_slow) / trend_base,
     }
+
+
+def _flow_alignment_score(market_state, hourly, fourh, params, side):
+    def _safe_float(payload, key, default):
+        if payload is None:
+            return default
+        try:
+            value = float(payload.get(key, default))
+        except (TypeError, ValueError, AttributeError):
+            return default
+        return value
+
+    intraday_trade_ratio = _safe_float(market_state, 'trade_count_ratio', 1.0)
+    intraday_buy_ratio = _safe_float(market_state, 'taker_buy_ratio', 0.5)
+    intraday_sell_ratio = _safe_float(market_state, 'taker_sell_ratio', 0.5)
+    intraday_imbalance = _safe_float(market_state, 'flow_imbalance', 0.0)
+    hourly_trade_ratio = _safe_float(hourly, 'trade_count_ratio', 1.0)
+    hourly_buy_ratio = _safe_float(hourly, 'taker_buy_ratio', 0.5)
+    hourly_sell_ratio = _safe_float(hourly, 'taker_sell_ratio', 0.5)
+    hourly_imbalance = _safe_float(hourly, 'flow_imbalance', 0.0)
+    fourh_buy_ratio = _safe_float(fourh, 'taker_buy_ratio', 0.5)
+    fourh_sell_ratio = _safe_float(fourh, 'taker_sell_ratio', 0.5)
+    fourh_imbalance = _safe_float(fourh, 'flow_imbalance', 0.0)
+
+    if side == 'long':
+        score = 0
+        if intraday_trade_ratio >= params['breakout_trade_count_ratio_min']:
+            score += 1
+        if intraday_buy_ratio >= params['breakout_taker_buy_ratio_min']:
+            score += 1
+        if intraday_imbalance >= params['breakout_flow_imbalance_min']:
+            score += 1
+        if hourly_trade_ratio >= params['hourly_trade_count_ratio_min']:
+            score += 1
+        if hourly_buy_ratio >= params['hourly_taker_buy_ratio_min']:
+            score += 1
+        if hourly_imbalance >= params['hourly_flow_confirmation_min']:
+            score += 1
+        if fourh_buy_ratio >= params['fourh_taker_buy_ratio_min']:
+            score += 1
+        if fourh_imbalance >= params['fourh_flow_confirmation_min']:
+            score += 1
+        return score
+
+    score = 0
+    if intraday_trade_ratio >= 1.18:
+        score += 1
+    if intraday_sell_ratio >= 0.54:
+        score += 1
+    if intraday_imbalance <= -0.08:
+        score += 1
+    if hourly_trade_ratio >= 0.88:
+        score += 1
+    if hourly_sell_ratio >= 0.505:
+        score += 1
+    if hourly_imbalance <= -0.01:
+        score += 1
+    if fourh_sell_ratio >= 0.50:
+        score += 1
+    if fourh_imbalance <= 0.0:
+        score += 1
+    return score
+
+
+def _flow_confirmation_ok(market_state, hourly, fourh, params, side, strong=False):
+    score = _flow_alignment_score(market_state, hourly, fourh, params, side)
+
+    def _safe_float(payload, key, default):
+        if payload is None:
+            return default
+        try:
+            value = float(payload.get(key, default))
+        except (TypeError, ValueError, AttributeError):
+            return default
+        return value
+
+    intraday_imbalance = _safe_float(market_state, 'flow_imbalance', 0.0)
+    hourly_buy_ratio = _safe_float(hourly, 'taker_buy_ratio', 0.5)
+    hourly_sell_ratio = _safe_float(hourly, 'taker_sell_ratio', 0.5)
+    hourly_imbalance = _safe_float(hourly, 'flow_imbalance', 0.0)
+    fourh_buy_ratio = _safe_float(fourh, 'taker_buy_ratio', 0.5)
+    fourh_sell_ratio = _safe_float(fourh, 'taker_sell_ratio', 0.5)
+    fourh_imbalance = _safe_float(fourh, 'flow_imbalance', 0.0)
+
+    if side == 'long':
+        if strong:
+            return (
+                score >= params['breakout_flow_score_strong_min']
+                and intraday_imbalance >= max(params['breakout_flow_imbalance_min'], 0.02)
+                and hourly_imbalance >= -0.01
+                and fourh_imbalance >= -0.02
+                and hourly_buy_ratio >= max(params['hourly_taker_buy_ratio_min'], 0.5)
+                and fourh_buy_ratio >= max(params['fourh_taker_buy_ratio_min'], 0.495)
+            )
+        return (
+            score >= params['breakout_flow_score_min']
+            and intraday_imbalance >= -0.02
+            and hourly_buy_ratio >= 0.495
+            and fourh_buy_ratio >= 0.49
+            and fourh_imbalance >= -0.03
+        )
+
+    if strong:
+        return (
+            score >= 6
+            and intraday_imbalance <= -0.08
+            and hourly_imbalance <= 0.0
+            and fourh_imbalance <= 0.01
+            and hourly_sell_ratio >= 0.50
+            and fourh_sell_ratio >= 0.50
+        )
+    return (
+        score >= 5
+        and intraday_imbalance <= 0.01
+        and hourly_sell_ratio >= 0.495
+        and fourh_sell_ratio >= 0.495
+        and fourh_imbalance <= 0.02
+    )
 
 
 def _build_signal_context(data, idx, market_state, params):
@@ -1143,6 +1272,9 @@ def strategy(data, idx, positions, market_state):
     )
 
     if intraday_bull and hourly_bull and fourh_bull_base and _trend_quality_ok(market_state, 'long'):
+        long_flow_score = _flow_alignment_score(market_state, hourly, fourh, p, 'long')
+        long_flow_entry_ok = _flow_confirmation_ok(market_state, hourly, fourh, p, 'long', strong=False)
+        long_flow_impulse_ok = _flow_confirmation_ok(market_state, hourly, fourh, p, 'long', strong=True)
         long_trend_expansion_ok = (
             hourly['trend_spread_pct'] >= max(SIDEWAYS_MIN_HOURLY_SPREAD_PCT * 1.55, atr_ratio * 1.00)
             and fourh['trend_spread_pct'] >= max(SIDEWAYS_MIN_FOURH_SPREAD_PCT * 1.26, atr_ratio * 1.14)
@@ -1624,7 +1756,22 @@ def strategy(data, idx, positions, market_state):
                 or hourly_anchor_extension_pct >= max(atr_ratio * 1.14, SIDEWAYS_MIN_HOURLY_SPREAD_PCT * 2.74)
             )
         )
-        long_arrival_acceptance_path_ok = long_fourh_ownership_takeover_ok and (long_early_acceptance_breakout or long_takeover_squeeze_breakout)
+        long_flow_weak_context = (
+            long_flow_score < p['breakout_flow_score_min']
+            or hourly['flow_imbalance'] < -0.03
+            or fourh['flow_imbalance'] < -0.04
+        )
+        long_absorption_path_ok = (
+            long_absorption_exception
+            and not long_flow_weak_context
+            and market_state['chop'] < SIDEWAYS_INTRADAY_CHOP_MIN + 1.0
+            and hourly['chop'] < SIDEWAYS_HOURLY_CHOP_MIN - 1.0
+        )
+        long_arrival_acceptance_path_ok = (
+            long_fourh_ownership_takeover_ok
+            and (long_flow_impulse_ok or long_price_discovery_impulse_ok)
+            and (long_early_acceptance_breakout or long_takeover_squeeze_breakout)
+        )
         long_reset_release_path_ok = long_anchor_reset_zone and long_fourh_early_relay_ok and (
             long_reset_release_breakout or long_ignition_breakout or long_coiled_handoff_breakout
         )
@@ -1659,10 +1806,20 @@ def strategy(data, idx, positions, market_state):
             and long_base_release_breakout
             and (long_price_discovery_impulse_ok or long_fourh_relay_strengthening)
         )
+        long_signal_path_ok = (
+            long_arrival_acceptance_path_ok
+            or long_reset_release_path_ok
+            or long_turn_path_ok
+            or long_compression_launch_path_ok
+            or long_compressed_reclaim_path_ok
+            or long_continuation_path_ok
+            or long_base_release_path_ok
+            or long_absorption_path_ok
+        )
         if (
-            (long_arrival_acceptance_path_ok or long_reset_release_path_ok or long_turn_path_ok or long_compression_launch_path_ok or long_compressed_reclaim_path_ok or long_continuation_path_ok or long_base_release_path_ok or long_absorption_exception)
-            and (not long_mature_breakout_risk or long_absorption_exception or long_base_release_path_ok)
-            and (not long_chase_breakout or long_reacceleration_ok or long_price_discovery_impulse_ok or long_absorption_exception or long_reset_release_path_ok or long_arrival_acceptance_path_ok or long_compression_launch_path_ok or long_compressed_reclaim_path_ok or long_base_release_path_ok)
+            long_signal_path_ok
+            and (not long_mature_breakout_risk or long_base_release_path_ok or long_absorption_path_ok)
+            and (not long_chase_breakout or long_reacceleration_ok or long_price_discovery_impulse_ok or long_reset_release_path_ok or long_arrival_acceptance_path_ok or long_turn_path_ok or long_compression_launch_path_ok or long_compressed_reclaim_path_ok or long_base_release_path_ok or long_absorption_path_ok)
             and not long_hourly_led_continuation_risk
             and not long_reload_without_expansion
             and not long_stale_discovery_risk
@@ -1675,6 +1832,17 @@ def strategy(data, idx, positions, market_state):
                 or long_reset_release_path_ok
                 or long_compression_launch_path_ok
             )
+            and not (
+                long_flow_weak_context
+                and not long_anchor_reset_zone
+                and not long_absorption_path_ok
+                and (
+                    long_mature_breakout_risk
+                    or long_chase_breakout
+                    or long_midstage_no_edge
+                    or prev_already_discovered_breakout
+                )
+            )
             and _trend_followthrough_ok(market_state, 'long', breakout_high, current['close'])
         ):
             return 'long_breakout'
@@ -1684,6 +1852,7 @@ def strategy(data, idx, positions, market_state):
     fourh_bear, fourh_bear_confirmed = short_state['fourh_bear'], short_state['fourh_bear_confirmed']
 
     if intraday_bear and hourly_bear and fourh_bear and _trend_quality_ok(market_state, 'short'):
+        short_flow_score = _flow_alignment_score(market_state, hourly, fourh, p, 'short')
         short_trend_expansion_ok = (
             hourly['trend_spread_pct'] <= -max(SIDEWAYS_MIN_HOURLY_SPREAD_PCT * 1.28, atr_ratio * 0.82)
             and fourh['trend_spread_pct'] <= -max(SIDEWAYS_MIN_FOURH_SPREAD_PCT * 1.08, atr_ratio * 1.00)
@@ -1894,6 +2063,11 @@ def strategy(data, idx, positions, market_state):
             or short_participation_exception
             or short_discounted_reacceleration_ok
         )
+        short_flow_weak_context = (
+            short_flow_score < 5
+            or hourly['flow_imbalance'] > 0.02
+            or fourh['flow_imbalance'] > 0.02
+        )
         if (
             short_trend_expansion_ok
             and (short_higher_tf_participation_ok or short_participation_exception)
@@ -1908,6 +2082,15 @@ def strategy(data, idx, positions, market_state):
             and (not prev_already_discovered_breakdown or short_incremental_discovery_ok or short_participation_exception)
             and not short_handoff_discount_risk
             and not short_stale_handoff_decay
+            and not (
+                short_flow_weak_context
+                and not short_participation_exception
+                and (
+                    short_chase_breakdown
+                    or short_deep_discount
+                    or prev_already_discovered_breakdown
+                )
+            )
             and breakdown_ready
             and _trend_followthrough_ok(market_state, 'short', breakdown_low, current['close'])
         ):
