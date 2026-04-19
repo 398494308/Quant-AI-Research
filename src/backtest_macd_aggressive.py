@@ -7,14 +7,16 @@ from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
+from market_data_catalog import default_market_data_paths, okx_flow_proxy, okx_quote_volume_fallback
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_INTRADAY_FILE = REPO_ROOT / "data/price/BTCUSDT_futures_15m_20230101_20260401.csv"
-DEFAULT_HOURLY_FILE = REPO_ROOT / "data/price/BTCUSDT_futures_1h_20230101_20260401.csv"
-DEFAULT_FOURH_FILE = REPO_ROOT / "data/price/BTCUSDT_futures_4h_20230101_20260401.csv"
-DEFAULT_EXECUTION_FILE = REPO_ROOT / "data/price/BTCUSDT_futures_1m_20230101_20260401.csv"
-DEFAULT_SENTIMENT_FILE = REPO_ROOT / "data/index/crypto_fear_greed_daily_20230101_20260401.csv"
-DEFAULT_FUNDING_FILE = REPO_ROOT / "data/funding/BTCUSDT_futures_funding_20230101_20260401.csv"
+DEFAULT_DATA_PATHS = default_market_data_paths()
+DEFAULT_INTRADAY_FILE = DEFAULT_DATA_PATHS.intraday_15m
+DEFAULT_HOURLY_FILE = DEFAULT_DATA_PATHS.hourly_1h
+DEFAULT_FOURH_FILE = DEFAULT_DATA_PATHS.fourh_4h
+DEFAULT_EXECUTION_FILE = DEFAULT_DATA_PATHS.execution_1m
+DEFAULT_SENTIMENT_FILE = DEFAULT_DATA_PATHS.sentiment
+DEFAULT_FUNDING_FILE = DEFAULT_DATA_PATHS.funding
 
 
 # EXIT_PARAMS_START
@@ -103,23 +105,58 @@ def _infer_data_venue(filename):
     return "unknown"
 
 
+def _normalized_flow_columns(row):
+    volume = float(row["volume"])
+    open_price = float(row["open"])
+    high_price = float(row["high"])
+    low_price = float(row["low"])
+    close_price = float(row["close"])
+    quote_volume_raw = row.get("quote_volume")
+    if quote_volume_raw in (None, ""):
+        quote_volume = okx_quote_volume_fallback(volume, close_price)
+    else:
+        quote_volume = float(quote_volume_raw)
+
+    trade_count = row.get("trade_count")
+    taker_buy_volume = row.get("taker_buy_volume")
+    taker_sell_volume = row.get("taker_sell_volume")
+
+    if trade_count in (None, "") or taker_buy_volume in (None, ""):
+        proxy = okx_flow_proxy(
+            open_price=open_price,
+            high_price=high_price,
+            low_price=low_price,
+            close_price=close_price,
+            volume=volume,
+            quote_volume=quote_volume,
+        )
+        trade_count_value = float(proxy["trade_count"])
+        taker_buy_value = float(proxy["taker_buy_volume"])
+        taker_sell_value = float(proxy["taker_sell_volume"])
+    else:
+        trade_count_value = float(trade_count)
+        taker_buy_value = float(taker_buy_volume)
+        if taker_sell_volume in (None, ""):
+            taker_sell_value = max(volume - taker_buy_value, 0.0)
+        else:
+            taker_sell_value = float(taker_sell_volume)
+
+    return {
+        "quote_volume": quote_volume,
+        "trade_count": trade_count_value,
+        "taker_buy_volume": taker_buy_value,
+        "taker_sell_volume": taker_sell_value,
+    }
+
+
 @lru_cache(maxsize=12)
 def load_ohlcv_data(filename):
     data = []
     with open(filename, "r") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            if "trade_count" not in row or "taker_buy_volume" not in row:
-                raise ValueError(
-                    f"{filename} missing flow columns; rerun scripts/download_aggressive_data.py to regenerate 15m/1m data"
-                )
             volume = float(row["volume"])
-            taker_buy_volume = float(row["taker_buy_volume"])
-            taker_sell_volume = row.get("taker_sell_volume")
-            if taker_sell_volume in (None, ""):
-                taker_sell_volume_value = max(volume - taker_buy_volume, 0.0)
-            else:
-                taker_sell_volume_value = float(taker_sell_volume)
+            flow_columns = _normalized_flow_columns(row)
             data.append(
                 {
                     "timestamp": int(row["timestamp"]),
@@ -128,9 +165,10 @@ def load_ohlcv_data(filename):
                     "low": float(row["low"]),
                     "close": float(row["close"]),
                     "volume": volume,
-                    "trade_count": float(row["trade_count"]),
-                    "taker_buy_volume": taker_buy_volume,
-                    "taker_sell_volume": taker_sell_volume_value,
+                    "quote_volume": float(flow_columns["quote_volume"]),
+                    "trade_count": float(flow_columns["trade_count"]),
+                    "taker_buy_volume": float(flow_columns["taker_buy_volume"]),
+                    "taker_sell_volume": float(flow_columns["taker_sell_volume"]),
                 }
             )
     return data
@@ -347,6 +385,7 @@ def _aggregate_bars(data, bars_per_bucket):
         current.append(row)
         if len(current) == bars_per_bucket:
             volume = sum(item["volume"] for item in current)
+            quote_volume = sum(item.get("quote_volume", okx_quote_volume_fallback(item["volume"], item["close"])) for item in current)
             taker_buy_volume = sum(item.get("taker_buy_volume", 0.0) for item in current)
             taker_sell_volume = sum(item.get("taker_sell_volume", 0.0) for item in current)
             buckets.append(
@@ -357,6 +396,7 @@ def _aggregate_bars(data, bars_per_bucket):
                     "low": min(item["low"] for item in current),
                     "close": current[-1]["close"],
                     "volume": volume,
+                    "quote_volume": quote_volume,
                     "trade_count": sum(item.get("trade_count", 0.0) for item in current),
                     "taker_buy_volume": taker_buy_volume,
                     "taker_sell_volume": taker_sell_volume,
@@ -718,18 +758,37 @@ def _funding_interval_ms(funding_timestamps):
     return min(deltas) if deltas else 8 * 60 * 60 * 1000
 
 
-def _validate_funding_window_coverage(funding_timestamps, start_ts, end_ts):
+def _funding_window_coverage_report(funding_timestamps, start_ts, end_ts):
     if not funding_timestamps:
-        raise ValueError("funding enabled but funding data is empty")
+        return {
+            "mode": "none",
+            "ratio": 0.0,
+            "interval_ms": 8 * 60 * 60 * 1000,
+            "gap_count": 0,
+        }
+
     interval_ms = _funding_interval_ms(funding_timestamps)
-    if funding_timestamps[0] > start_ts + interval_ms:
-        raise ValueError("funding data starts too late for requested window")
-    if funding_timestamps[-1] < end_ts - interval_ms:
-        raise ValueError("funding data ends too early for requested window")
     max_gap = interval_ms + interval_ms // 2
+    missing_gap_span = 0
+    gap_count = 0
     for idx in range(1, len(funding_timestamps)):
-        if funding_timestamps[idx] - funding_timestamps[idx - 1] > max_gap:
-            raise ValueError("funding data has gaps inside requested window")
+        delta = funding_timestamps[idx] - funding_timestamps[idx - 1]
+        if delta > max_gap:
+            gap_count += 1
+            missing_gap_span += max(0, delta - interval_ms)
+
+    window_span = max(end_ts - start_ts, interval_ms)
+    cover_start = max(start_ts, funding_timestamps[0] - interval_ms)
+    cover_end = min(end_ts, funding_timestamps[-1] + interval_ms)
+    covered_span = max(0, cover_end - cover_start - missing_gap_span)
+    coverage_ratio = max(0.0, min(1.0, covered_span / window_span))
+    coverage_mode = "full" if coverage_ratio >= 0.999 and gap_count == 0 else "partial"
+    return {
+        "mode": coverage_mode,
+        "ratio": coverage_ratio,
+        "interval_ms": interval_ms,
+        "gap_count": gap_count,
+    }
 
 
 def _intrabar_tp1_first(position, subbar, leverage, exit_p):
@@ -1182,6 +1241,11 @@ def backtest_macd_aggressive(
 
     funding_rows = []
     funding_timestamps = []
+    funding_coverage = {
+        "mode": "disabled" if int(exit_p.get("funding_fee_enabled", 1)) <= 0 else "none",
+        "ratio": 0.0,
+        "gap_count": 0,
+    }
     funding_all = prepared_context["funding_all"]
     if funding_all:
         full_funding_timestamps = prepared_context["funding_timestamps"]
@@ -1191,7 +1255,7 @@ def backtest_macd_aggressive(
             start_ts - funding_interval_ms,
             end_ts + funding_interval_ms,
         )
-        _validate_funding_window_coverage(
+        funding_coverage = _funding_window_coverage_report(
             full_funding_timestamps[validation_start_idx:validation_end_idx],
             start_ts,
             end_ts,
@@ -1646,6 +1710,9 @@ def backtest_macd_aggressive(
         "fee_score_penalty": fee_penalty,
         "funding_pnl_amount": total_funding_pnl,
         "funding_event_count": funding_event_count,
+        "funding_coverage_ratio": funding_coverage["ratio"],
+        "funding_coverage_gap_count": funding_coverage["gap_count"],
+        "funding_coverage_mode": funding_coverage["mode"],
         "first_tp_count": sum(1 for trade in settlement_legs if trade["reason"] == "第一止盈"),
         "stop_exit_count": sum(1 for trade in settlement_legs if trade["reason"] == "止损"),
         "regime_exit_count": sum(1 for trade in settlement_legs if trade["reason"] == "趋势失效"),

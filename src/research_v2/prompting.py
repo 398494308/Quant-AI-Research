@@ -10,10 +10,19 @@ from typing import Any
 
 EDITABLE_REGIONS = (
     "PARAMS",
+    "_sideways_release_flags",
     "_is_sideways_regime",
+    "_flow_signal_metrics",
     "_flow_confirmation_ok",
+    "_flow_entry_ok",
+    "_trend_quality_long",
+    "_trend_quality_short",
     "_trend_quality_ok",
+    "_trend_followthrough_long",
+    "_trend_followthrough_short",
     "_trend_followthrough_ok",
+    "_long_entry_signal",
+    "_short_entry_signal",
     "strategy",
 )
 
@@ -132,7 +141,7 @@ def build_strategy_research_prompt(
     return f"""你是 BTC 合约激进趋势策略研究员。
 
 策略目标：
-- `15m` 是唯一事实源，`1h + 4h` 只是由 `15m` 聚合的趋势确认层；突破判断除了总成交量，也要看主动买卖量和成交活跃度。
+- `15m` 是唯一事实源，`1h + 4h` 只是由 `15m` 聚合的趋势确认层；突破判断除了总成交量，也要看基于 OKX K 线推导的方向流量代理和成交活跃度。
 - 目标不是做平滑收益，而是尽快抓到 BTC 的大上涨或大下跌，尽量陪跑主趋势，并在掉头时退出或反手。
 - 允许较大波动、较大回撤，甚至允许个别阶段爆仓；不要为了“看起来更平滑”而牺牲大趋势捕获能力。
 - 当前核心机会已经放宽到更细的 `4h` 趋势段，约 `5%` 级别的单边也算应当抓住的有效趋势。
@@ -144,6 +153,7 @@ def build_strategy_research_prompt(
 - 主进程会先比较当前参考与候选在 smoke 窗口上的行为指纹；如果收益、交易数、信号统计、退出原因和交易摘要完全一致，会直接按 `behavioral_noop` 跳过 full eval。
 - 如果你主要修改 `_trend_followthrough_ok()`、`_trend_quality_ok()` 或 `_flow_confirmation_ok()`，必须确认 `strategy()` 里已有入场路径会实际触达这些变化；否则优先改 `strategy()` 的最终入场路径。
 - `change_plan` 和 `novelty_proof` 必须明确写出预计会新增、删除或移动哪类实际交易，例如早段多头突破、横盘假突破过滤、空头反手、趋势失效退出，而不是只说“提高确认质量”。
+- 当前策略已经拆成命名规则块；优先围绕具体规则块或 path 提出假设，不要再用“顺手补几个条件”的方式做补丁式堆叠。
 
 当前 champion 参考晋级分：{previous_best_score:.2f}
 {side_bias_block}
@@ -211,7 +221,7 @@ def build_strategy_research_prompt(
 硬约束：
 - 只允许修改 `src/strategy_macd_aggressive.py`。
 - 只允许改这些区域：{", ".join(EDITABLE_REGIONS)}。
-- 保留 `PARAMS`、`strategy()`、`_is_sideways_regime()`、`_trend_quality_ok()`、`_trend_followthrough_ok()` 这些符号。
+- 保留 `PARAMS`、`strategy()`、`_is_sideways_regime()`、`_trend_quality_ok()`、`_trend_followthrough_ok()`、`_long_entry_signal()`、`_short_entry_signal()` 这些符号。
 - 不要删除、改名或只改一半仍被下游条件复用的共享中间变量；若重构某个布尔变量或上下文变量，必须同步更新全部引用，禁止留下未定义局部变量。
 - 不要引入网络、文件、随机数、外部依赖。
 - 每轮只做一个明确假设，最多改 `1` 到 `3` 个区域。

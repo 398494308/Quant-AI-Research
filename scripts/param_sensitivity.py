@@ -10,10 +10,12 @@ SRC_DIR = REPO_ROOT / "src"
 sys.path.insert(0, str(SRC_DIR))
 
 from backtest_macd_aggressive import EXIT_PARAMS, backtest_macd_aggressive
+from market_data_catalog import default_market_data_paths
 import strategy_macd_aggressive as aggressive_strategy
 
-INTRADAY_FILE = str(REPO_ROOT / "data/price/BTCUSDT_futures_15m_20240601_20260401.csv")
-HOURLY_FILE = str(REPO_ROOT / "data/price/BTCUSDT_futures_1h_20240601_20260401.csv")
+DATA_PATHS = default_market_data_paths()
+INTRADAY_FILE = str(DATA_PATHS.intraday_15m)
+HOURLY_FILE = str(DATA_PATHS.hourly_1h)
 
 
 def run_variant(strategy_delta=None, exit_delta=None):

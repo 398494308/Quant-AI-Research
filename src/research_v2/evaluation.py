@@ -1007,6 +1007,9 @@ def summarize_evaluation(
 
     worst_drawdown = max((float(item["result"].get("max_drawdown", 0.0)) for item in results), default=0.0)
     avg_fee_drag = _mean([float(item["result"].get("fee_drag_pct", 0.0)) for item in results])
+    eval_funding_coverage = _mean([float(item["result"].get("funding_coverage_ratio", 0.0)) for item in eval_results])
+    validation_funding_coverage = float(validation_source.get("funding_coverage_ratio", 0.0))
+    selection_funding_coverage = float(selection_source.get("funding_coverage_ratio", 0.0))
     liquidations = sum(int(item["result"].get("liquidations", 0)) for item in results)
     total_trades = sum(int(item["result"].get("trades", 0)) for item in results)
     eval_trades = sum(int(item["result"].get("trades", 0)) for item in eval_results)
@@ -1092,7 +1095,7 @@ def summarize_evaluation(
 
     weakest_signals = _aggregate_signal_stats(results, "eval")
     summary_lines = [
-        "研究评估摘要（15m 为唯一事实源，1h/4h 只是由 15m 聚合的确认层；成交量诊断同时看总量、主动买卖量和成交活跃度）",
+        "研究评估摘要（15m 为唯一事实源，1h/4h 只是由 15m 聚合的确认层；成交量诊断同时看总量、OKX K 线方向流量代理和成交活跃度）",
         (
             "train滚动分(均值/中位/std/盈利窗比): "
             f"{development_mean_score:.2f} / {development_median_score:.2f} / "
@@ -1132,6 +1135,7 @@ def summarize_evaluation(
         f"val窗口收益均值 / 最差: {validation_avg_return:.2f}% / {validation_worst_return:.2f}%",
         f"train/val分数落差: {promotion_gap:.2f}",
         f"train 4h唯一路径点 / 重叠点 / 被覆盖点: {eval_path.unique_points} / {eval_path.overlap_points} / {eval_path.dropped_points}",
+        f"funding覆盖(train均值 / val / train+val): {eval_funding_coverage:.0%} / {validation_funding_coverage:.0%} / {selection_funding_coverage:.0%}",
         f"最大回撤 / 手续费拖累: {worst_drawdown:.2f}% / {avg_fee_drag:.2f}%",
         f"总交易 / train交易 / val交易 / 爆仓: {total_trades} / {eval_trades} / {validation_trades} / {liquidations}",
         f"质量分 / 晋级分: {quality_score:.2f} / {promotion_score:.2f}",
@@ -1144,7 +1148,7 @@ def summarize_evaluation(
         summary_lines.extend(["", "拖累较大的信号:", *weakest_signals])
 
     prompt_lines = [
-        f"当前策略是 BTC 激进趋势策略：15m 是唯一事实源，1h/4h 只是由 15m 聚合的确认层；突破除了总成交量，也会看主动买卖量和成交活跃度。目标是抓大行情的到来、陪跑主趋势、在掉头时退出或反手。",
+        f"当前策略是 BTC 激进趋势策略：15m 是唯一事实源，1h/4h 只是由 15m 聚合的确认层；突破除了总成交量，也会看基于 OKX K 线推导的方向流量代理和成交活跃度。目标是抓大行情的到来、陪跑主趋势、在掉头时退出或反手。",
         f"当前基底质量分={quality_score:.2f}，晋级分={promotion_score:.2f}，gate={gate_reason}",
         (
             f"train滚动分均值/中位/std/盈利窗比="
@@ -1200,6 +1204,10 @@ def summarize_evaluation(
             f"最大回撤={worst_drawdown:.2f}%"
         ),
         (
+            f"funding覆盖(train均值/val/train+val)="
+            f"{eval_funding_coverage:.0%}/{validation_funding_coverage:.0%}/{selection_funding_coverage:.0%}"
+        ),
+        (
             f"train+val集中度诊断={overfit_report.risk_level}({overfit_report.risk_score:.0f})，"
             f"单段正向贡献={overfit_report.top1_positive_share:.0%}，"
             f"同向链贡献={overfit_report.max_chain_positive_share:.0%}，"
@@ -1226,6 +1234,9 @@ def summarize_evaluation(
         "eval_worst_return": eval_worst_return,
         "validation_avg_return": validation_avg_return,
         "validation_worst_return": validation_worst_return,
+        "development_funding_coverage_ratio": eval_funding_coverage,
+        "validation_funding_coverage_ratio": validation_funding_coverage,
+        "selection_funding_coverage_ratio": selection_funding_coverage,
         "worst_drawdown": worst_drawdown,
         "avg_fee_drag": avg_fee_drag,
         "liquidations": float(liquidations),

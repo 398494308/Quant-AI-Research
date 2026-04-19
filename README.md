@@ -1,6 +1,6 @@
 # Quant Test 3
 
-这是一个独立的 `BTCUSDT` 永续合约激进趋势研究仓库。
+这是一个独立的 `OKX BTC-USDT-SWAP` 激进趋势研究仓库。
 
 当前主线只有一套：
 
@@ -18,19 +18,20 @@
 - `backups/strategy_macd_aggressive_v2_best.py`
 - `state/research_macd_aggressive_v2_best.json`
 
-这版基底的当前评估结果是：
+`2026-04-20` 已按 `OKX` 默认数据重评一次当前基底，当前有效结果是：
 
-- train 均值分：`0.2737`
-- train 中位分：`0.1526`
-- train 波动：`0.4144`
-- val 趋势分：`0.1549`
-- val 收益分：`0.0071`
-- val 多头捕获：`-0.0527`
-- val 空头捕获：`0.3558`
-- val 命中率：`39.29%`
-- 总交易数：`322`
+- `gate=通过`
+- `quality_score=0.32`
+- `promotion_score=0.25`
+- `train+val期间收益=139.48%`
+- `val期间收益=10.06%`
+- `val多/空捕获=0.17 / 0.41`
+- `最大回撤/手续费拖累=34.47% / 2.80%`
 
-它还没过 gate，但已经作为新的研究起点使用；历史 journal 也已经在同一天彻底清空后重启。
+注意：
+
+- `2026-04-19` 之后，回测与研究默认数据已切到 `OKX`，旧的 Binance 口径评估值不再作为当前有效指标。
+- OKX 公共 funding 历史目前拿不到 `train/val` 这整段，因此当前 `train/val` 评估的 funding 覆盖率是 `0%`；缺失区间按 `0 funding` 回测，并在评估摘要里明确标注。
 
 ## 当前研究器做什么
 
@@ -138,7 +139,7 @@
 - 模型可以看到 `val` 的聚合诊断，但完全看不到 `test`。
 - prompt 会明确写出：只有 `gate` 通过且 `promotion_delta > 0.02` 才可能刷新当前 `champion`。
 - `edited_regions` 现在只允许填 `1-3` 个，而且系统会用真实代码 diff / AST 派生的 `system signature` 复核，不再只信模型自报元信息。
-- prompt 里的可编辑区域已清到当前策略文件真实存在的 `6` 个区域，减少把注意力浪费到不存在 helper 上的情况。
+- prompt 里的可编辑区域已经扩成真实存在的命名规则块，允许模型直接动 `sideways / flow / trend_quality / followthrough / long_entry / short_entry / strategy` 这些结构块。
 - 最近轮次摘要拆成了“核心指标表 + 元信息摘要”，不再用超宽大表。
 
 ## 当前窗口配置
@@ -165,15 +166,20 @@
 
 - `15m` 是唯一事实源
 - `1h + 4h` 只是由 `15m` 聚合出来的趋势确认层
-- 横盘环境尽量少做；突破不只看总成交量，也会看主动买卖量、成交活跃度，以及 `1h/4h` 的 flow confirm
+- 横盘环境尽量少做；突破不只看总成交量，也会看基于 OKX K 线推导的方向流量代理、成交活跃度，以及 `1h/4h` 的 flow confirm
 - 开仓后带 ATR 初始止损、保本、TP1、移动止损、趋势失效退出、时间退出
 - 允许有限次加仓
 
-数据下载脚本现在会先下载 `15m`，再由它派生 `1h` 和 `4h`。如果本地还是旧版 CSV，需要重新执行：
+数据下载脚本现在会直接下载 `OKX 15m / 1m`，再由 `15m` 派生 `1h / 4h`。如果本地还是旧版 CSV，需要重新执行：
 
 ```bash
 python3 scripts/download_aggressive_data.py
 ```
+
+说明：
+
+- `15m/1m` 价格数据和 `funding` 都来自 `OKX`。
+- 若 OKX 公共 funding 历史无法覆盖请求起点，脚本会打印提示；旧窗口会在回测里按 `0 funding` 继续运行，而不是直接报错中断研究器。
 
 注意：
 

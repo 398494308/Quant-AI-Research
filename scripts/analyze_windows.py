@@ -10,9 +10,11 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import backtest_macd_aggressive as bt
 import strategy_macd_aggressive as strat
+from market_data_catalog import default_market_data_paths
 
-INTRADAY_FILE = str(REPO_ROOT / "data/price/BTCUSDT_futures_15m_20240601_20260401.csv")
-HOURLY_FILE = str(REPO_ROOT / "data/price/BTCUSDT_futures_1h_20240601_20260401.csv")
+DATA_PATHS = default_market_data_paths()
+INTRADAY_FILE = str(DATA_PATHS.intraday_15m)
+HOURLY_FILE = str(DATA_PATHS.hourly_1h)
 
 
 def beijing_dt(ts_ms):
@@ -178,7 +180,7 @@ def _run_trade_trace(
     sentiment_state = []
 
     # Load execution data
-    execution_file = str(REPO_ROOT / "data/price/BTCUSDT_futures_1m_20240601_20260401.csv")
+    execution_file = str(DATA_PATHS.execution_1m)
     execution_rows = []
     execution_timestamps = []
     if Path(execution_file).exists() and int(exit_p.get("execution_use_1m", 1)) > 0:

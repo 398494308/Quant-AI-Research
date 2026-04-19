@@ -9,7 +9,8 @@
 - 当前评分口径：`trend_capture_v6`
 - 当前事实源：`15m`
 - `1h` / `4h` 只是由 `15m` 聚合出来的确认层
-- 成交量维度除了总量，还包含 `trade_count`、`taker_buy_volume`、`taker_sell_volume`
+- 默认交易所数据源：`OKX`
+- 成交量维度除了总量，还会从 OKX K 线推导方向流量代理和成交活跃度
 
 ## 最新手工基底
 
@@ -18,18 +19,16 @@
   - `src/strategy_macd_aggressive.py`
   - `backups/strategy_macd_aggressive_v2_best.py`
   - `state/research_macd_aggressive_v2_best.json`
-- 当前 `baseline` 评估结果：
-  - train 均值分：`0.2737`
-  - train 中位分：`0.1526`
-  - train 波动：`0.4144`
-  - val 趋势分：`0.1549`
-  - val 收益分：`0.0071`
-  - val 多头捕获：`-0.0527`
-  - val 空头捕获：`0.3558`
-  - val 命中率：`39.29%`
-  - 总交易数：`322`
-- 当前 gate 仍未通过，原因是：
-  - val 多头捕获略低于线
+- `2026-04-20` 已在 `OKX` 数据上重新评估，当前有效结果：
+  - `gate=通过`
+  - `quality_score=0.32`
+  - `promotion_score=0.25`
+  - `train+val期间收益=139.48%`
+  - `val期间收益=10.06%`
+  - `val多/空捕获=0.17 / 0.41`
+  - `最大回撤/手续费拖累=34.47% / 2.80%`
+  - `train+val交易数=280`
+- 当前 `train/val` funding 覆盖率是 `0%`。原因不是研究器没开 funding，而是 OKX 公共 funding 历史拿不到这段旧窗口；缺失区间当前按 `0 funding` 回测，并在评估摘要里直接显示覆盖率。
 
 这版新基底的手工方向不是“继续堆更多 long”，而是：
 
@@ -125,7 +124,7 @@ test 验收：
 - journal 里新增 `方向冷却表（系统硬约束）`
 - 防重复规则只保留一份，不再多处复写
 - `edited_regions` 最多 `1-3` 个，系统会用真实 diff / AST 派生的 `system signature` 复核
-- prompt 里的可编辑区域已收紧到当前策略文件真实存在的 `6` 个区域
+- prompt 里的可编辑区域已切到真实存在的命名规则块，能直接改 `sideways / flow / trend_quality / followthrough / long_entry / short_entry / strategy`
 
 ## 当前 Discord 口径
 
@@ -161,7 +160,8 @@ Discord 现在只保留：
 
 - 这是一次新的评分 regime 切换，旧 `trend_capture_v4` 历史不会再作为主参考。
 - 新 regime 下的 `champion / baseline` 会在研究器下一次初始化或下一轮运行后重新沉淀。
-- 如果本地价格 CSV 还是旧格式，需要先重新运行 `python3 scripts/download_aggressive_data.py`，生成带 flow 列的新 `15m/1h/4h/1m` 数据。
+- 如果本地价格 CSV 还是旧格式，需要先重新运行 `python3 scripts/download_aggressive_data.py`，生成新的 `OKX 15m/1h/4h/1m` 数据。
+- OKX 公共 funding 历史当前只能覆盖较近日期；如果请求窗口更早，下载脚本会保留可得 funding，并由回测器把缺口按 `0 funding` 继续跑，不再因为 funding 文件覆盖不足而整轮失败。
 - `scripts/research_macd_aggressive_v2.py` 的启动路径会把 `src/strategy_macd_aggressive.py` 从已保存 best 恢复回来。
 - 所以如果只是想安全评估当前 `src`，不要直接跑 `--no-optimize`，请用下面这段：
 

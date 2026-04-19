@@ -16,6 +16,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 import backtest_macd_aggressive as backtest
 from codex_exec_client import StrategyClientConfig, StrategyGenerationTransientError, generate_json_object
 import freqtrade_macd_aggressive as ft_adapter
+from market_data_catalog import default_market_data_paths
 import scripts.research_macd_aggressive_v2 as research_script
 from scripts.research_macd_aggressive_v2 import select_smoke_windows
 from research_v2.config import GateConfig
@@ -58,9 +59,6 @@ def make_gate_config(**overrides):
     payload = {
         "min_development_mean_score": -10.0,
         "min_development_median_score": -10.0,
-        "max_development_score_std": 100.0,
-        "min_profitable_window_ratio": 0.0,
-        "min_validation_segments": 0,
         "min_validation_hit_rate": 0.0,
         "min_validation_trend_score": -10.0,
         "max_dev_validation_gap": 100.0,
@@ -68,17 +66,20 @@ def make_gate_config(**overrides):
         "min_validation_bear_capture": -10.0,
         "max_fee_drag_pct": 100.0,
         "validation_block_count": 3,
-        "max_validation_block_std": 100.0,
         "min_validation_block_floor": -100.0,
         "max_validation_block_failures": 100,
-        "min_trade_support_per_side": 0,
-        "min_side_segment_count_for_trade_gate": 1000,
     }
     payload.update(overrides)
     return GateConfig(**payload)
 
 
 class BacktestFixesTest(unittest.TestCase):
+    def test_default_market_data_paths_use_okx_naming(self):
+        paths = default_market_data_paths()
+
+        self.assertIn("okx_btc_usdt_swap_15m", paths.intraday_15m.name)
+        self.assertIn("okx_btc_usdt_swap_funding", paths.funding.name)
+
     def test_aggregate_bars_rolls_up_flow_columns(self):
         rows = [
             {
@@ -88,6 +89,7 @@ class BacktestFixesTest(unittest.TestCase):
                 "low": 99.0 + index,
                 "close": 100.5 + index,
                 "volume": 10.0 + index,
+                "quote_volume": 1000.0 + index * 10.0,
                 "trade_count": 100.0 + index,
                 "taker_buy_volume": 6.0 + index,
                 "taker_sell_volume": 4.0,
@@ -98,9 +100,28 @@ class BacktestFixesTest(unittest.TestCase):
         aggregated = backtest._aggregate_bars(rows, 4)
 
         self.assertEqual(len(aggregated), 1)
+        self.assertAlmostEqual(aggregated[0]["quote_volume"], 4060.0)
         self.assertAlmostEqual(aggregated[0]["trade_count"], 406.0)
         self.assertAlmostEqual(aggregated[0]["taker_buy_volume"], 30.0)
         self.assertAlmostEqual(aggregated[0]["taker_sell_volume"], 16.0)
+
+    def test_load_ohlcv_data_derives_okx_flow_proxy_when_flow_columns_missing(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as handle:
+            handle.write("timestamp,open,high,low,close,volume,quote_volume\n")
+            handle.write("1711929600000,70000,70100,69900,70080,12,840960\n")
+            temp_path = handle.name
+
+        try:
+            backtest.load_ohlcv_data.cache_clear()
+            rows = backtest.load_ohlcv_data(temp_path)
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
+            backtest.load_ohlcv_data.cache_clear()
+
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["quote_volume"], 840960.0)
+        self.assertGreater(rows[0]["trade_count"], 0.0)
+        self.assertAlmostEqual(rows[0]["taker_buy_volume"] + rows[0]["taker_sell_volume"], rows[0]["volume"])
 
     def test_daily_equity_point_keeps_latest_market_close(self):
         points = []
@@ -590,11 +611,41 @@ PARAMS = {
 def _is_sideways_regime(*args, **kwargs):
     return False
 
+def _sideways_release_flags(*args, **kwargs):
+    return {}
+
+def _flow_signal_metrics(*args, **kwargs):
+    return {}
+
+def _flow_confirmation_ok(*args, **kwargs):
+    return True
+
+def _flow_entry_ok(*args, **kwargs):
+    return True
+
+def _trend_quality_long(*args, **kwargs):
+    return True
+
+def _trend_quality_short(*args, **kwargs):
+    return True
+
 def _trend_quality_ok(*args, **kwargs):
+    return True
+
+def _trend_followthrough_long(*args, **kwargs):
+    return True
+
+def _trend_followthrough_short(*args, **kwargs):
     return True
 
 def _trend_followthrough_ok(*args, **kwargs):
     return True
+
+def _long_entry_signal(*args, **kwargs):
+    return False
+
+def _short_entry_signal(*args, **kwargs):
+    return False
 
 def strategy(*args, **kwargs):
     return None
@@ -638,11 +689,41 @@ PARAMS = {
 def _is_sideways_regime(*args, **kwargs):
     return False
 
+def _sideways_release_flags(*args, **kwargs):
+    return {}
+
+def _flow_signal_metrics(*args, **kwargs):
+    return {}
+
+def _flow_confirmation_ok(*args, **kwargs):
+    return True
+
+def _flow_entry_ok(*args, **kwargs):
+    return True
+
+def _trend_quality_long(*args, **kwargs):
+    return True
+
+def _trend_quality_short(*args, **kwargs):
+    return True
+
 def _trend_quality_ok(*args, **kwargs):
+    return True
+
+def _trend_followthrough_long(*args, **kwargs):
+    return True
+
+def _trend_followthrough_short(*args, **kwargs):
     return True
 
 def _trend_followthrough_ok(*args, **kwargs):
     return True
+
+def _long_entry_signal(*args, **kwargs):
+    return False
+
+def _short_entry_signal(*args, **kwargs):
+    return False
 
 def strategy(*args, **kwargs):
     return None
@@ -716,7 +797,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         )
 
         self.assertIn("15m` 是唯一事实源", prompt)
-        self.assertIn("主动买卖量", prompt)
+        self.assertIn("方向流量代理", prompt)
         self.assertIn("promotion_delta > 0.02", prompt)
 
     def test_build_strategy_exploration_repair_prompt_mentions_blocked_cluster(self):

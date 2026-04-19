@@ -368,7 +368,22 @@ def validate_strategy_source(source: str) -> None:
         raise StrategySourceError(f"strategy source has syntax error: line {exc.lineno} {exc.msg}") from exc
 
     function_names = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
-    required_functions = {"strategy", "_is_sideways_regime", "_trend_quality_ok", "_trend_followthrough_ok"}
+    required_functions = {
+        "_sideways_release_flags",
+        "_is_sideways_regime",
+        "_flow_signal_metrics",
+        "_flow_confirmation_ok",
+        "_flow_entry_ok",
+        "_trend_quality_long",
+        "_trend_quality_short",
+        "_trend_quality_ok",
+        "_trend_followthrough_long",
+        "_trend_followthrough_short",
+        "_trend_followthrough_ok",
+        "_long_entry_signal",
+        "_short_entry_signal",
+        "strategy",
+    }
     missing_functions = required_functions - function_names
     if missing_functions:
         raise StrategySourceError(f"missing required functions: {sorted(missing_functions)}")

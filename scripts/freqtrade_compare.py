@@ -18,11 +18,13 @@ sys.path.insert(0, str(BASE_DIR / "src"))
 import backtest_macd_aggressive as bt_engine
 import strategy_macd_aggressive as strat_module
 import freqtrade_macd_aggressive as ft_adapter
+from market_data_catalog import default_market_data_paths
 
 START_DATE = os.getenv("COMPARE_START_DATE", "2025-10-01")
 END_DATE = os.getenv("COMPARE_END_DATE", "2026-03-31")
 BEIJING_TZ = timezone(timedelta(hours=8))
 DIFF_SAMPLE_LIMIT = 5
+DATA_PATHS = default_market_data_paths()
 
 
 def run_custom_engine():
@@ -30,8 +32,8 @@ def run_custom_engine():
     bt_engine.load_ohlcv_data.cache_clear()
     result = bt_engine.backtest_macd_aggressive(
         strategy_func=strat_module.strategy,
-        intraday_file=str(BASE_DIR / "data/price/BTCUSDT_futures_15m_20240601_20260401.csv"),
-        hourly_file=str(BASE_DIR / "data/price/BTCUSDT_futures_1h_20240601_20260401.csv"),
+        intraday_file=str(DATA_PATHS.intraday_15m),
+        hourly_file=str(DATA_PATHS.hourly_1h),
         start_date=START_DATE,
         end_date=END_DATE,
         strategy_params=strat_module.PARAMS,
@@ -43,7 +45,7 @@ def run_custom_engine():
 def run_core_signal_check():
     """直接运行主策略函数，统计不受仓位管理影响的原始信号。"""
     bt_engine.load_ohlcv_data.cache_clear()
-    intraday_all = bt_engine.load_ohlcv_data(str(BASE_DIR / "data/price/BTCUSDT_futures_15m_20240601_20260401.csv"))
+    intraday_all = bt_engine.load_ohlcv_data(str(DATA_PATHS.intraday_15m))
     hourly_all = bt_engine._aggregate_bars(intraday_all, 4)
     start_idx, end_idx = bt_engine._beijing_window_indices(intraday_all, START_DATE, END_DATE)
     if start_idx >= end_idx or not hourly_all:
@@ -146,7 +148,7 @@ def run_freqtrade_signal_check():
     """用 freqtrade 适配层生成入场信号并统计。"""
     import pandas as pd
 
-    df_15m = pd.read_csv(BASE_DIR / "data/price/BTCUSDT_futures_15m_20240601_20260401.csv")
+    df_15m = pd.read_csv(DATA_PATHS.intraday_15m)
 
     from backtest_macd_aggressive import _beijing_timestamp_ms
 
