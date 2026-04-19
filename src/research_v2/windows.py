@@ -66,7 +66,7 @@ def build_research_windows(config: WindowConfig) -> list[ResearchWindow]:
         eval_windows.append(
             ResearchWindow(
                 group="eval",
-                label=f"评估{window_index}",
+                label=f"train{window_index}",
                 start_date=cursor.strftime("%Y-%m-%d"),
                 end_date=window_end.strftime("%Y-%m-%d"),
                 weight=1.0,
@@ -86,7 +86,7 @@ def build_research_windows(config: WindowConfig) -> list[ResearchWindow]:
             eval_windows.append(
                 ResearchWindow(
                     group="eval",
-                    label=f"评估{window_index}",
+                    label=f"train{window_index}",
                     start_date=tail_start_str,
                     end_date=tail_end_str,
                     weight=1.0,
@@ -98,14 +98,14 @@ def build_research_windows(config: WindowConfig) -> list[ResearchWindow]:
 
     validation_window = ResearchWindow(
         group="validation",
-        label="验证1",
+        label="val1",
         start_date=validation_start.strftime("%Y-%m-%d"),
         end_date=validation_end.strftime("%Y-%m-%d"),
         weight=1.0,
     )
     test_window = ResearchWindow(
         group="test",
-        label="测试1",
+        label="test1",
         start_date=test_start.strftime("%Y-%m-%d"),
         end_date=test_end.strftime("%Y-%m-%d"),
         weight=1.0,

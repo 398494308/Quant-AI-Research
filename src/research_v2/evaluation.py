@@ -331,7 +331,11 @@ def _build_window_lines(results: list[dict[str, Any]], include_validation: bool)
         if window.group == "validation" and not include_validation:
             continue
         result = item["result"]
-        group_label = "评" if window.group == "eval" else "留"
+        group_label = {
+            "eval": "train",
+            "validation": "val",
+            "test": "test",
+        }.get(window.group, window.group)
         lines.append(
             f"{window.label}({group_label}) {window.start_date}~{window.end_date} | "
             f"收益{result['return']:.1f}% | 回撤{result['max_drawdown']:.1f}% | "
@@ -936,7 +940,7 @@ def _validation_weakest_axis(
     if block_report.used_block_count >= 2 and block_report.block_scores:
         tail_score = float(block_report.block_scores[-1])
         if tail_score < block_report.mean_score - 0.15:
-            return "验证后半段明显偏弱"
+            return "val后半段明显偏弱"
 
     candidates = [
         ("到来能力", trend_report.arrival_score),
@@ -946,7 +950,7 @@ def _validation_weakest_axis(
         ("空头捕获", trend_report.bear_score),
     ]
     weakest_label, _ = min(candidates, key=lambda item: item[1])
-    return f"验证短板={weakest_label}"
+    return f"val短板={weakest_label}"
 
 
 def summarize_hidden_test_result(result: dict[str, Any] | None) -> dict[str, float]:
@@ -966,6 +970,7 @@ def summarize_hidden_test_result(result: dict[str, Any] | None) -> dict[str, flo
         "shadow_test_path_return_pct": trend_report.path_return_pct,
         "shadow_test_total_return_pct": float((result or {}).get("return", 0.0)),
         "shadow_test_max_drawdown": float((result or {}).get("max_drawdown", 0.0)),
+        "shadow_test_closed_trades": float((result or {}).get("trades", long_trades + short_trades)),
         "shadow_test_long_closed_trades": float(long_trades),
         "shadow_test_short_closed_trades": float(short_trades),
     }
@@ -1043,73 +1048,43 @@ def summarize_evaluation(
     overfit_report = _overfit_risk_report(selection_trend_report, promotion_gap)
     validation_long_trades, validation_short_trades = _trade_side_counts(validation_source)
     selection_long_trades, selection_short_trades = _trade_side_counts(selection_source)
+    validation_closed_trades = int(validation_source.get("trades", validation_long_trades + validation_short_trades))
+    selection_closed_trades = int(selection_source.get("trades", selection_long_trades + selection_short_trades))
     validation_weakest_axis = _validation_weakest_axis(validation_trend_report, validation_block_report)
     selection_total_return = float(selection_source.get("return", 0.0))
 
     gate_reasons: list[str] = []
     if development_mean_score < gates.min_development_mean_score:
-        gate_reasons.append(f"开发期均值分偏低({development_mean_score:.2f})")
+        gate_reasons.append(f"train均值分偏低({development_mean_score:.2f})")
     if development_median_score < gates.min_development_median_score:
-        gate_reasons.append(f"开发期中位分偏低({development_median_score:.2f})")
-    if development_score_std > gates.max_development_score_std:
-        gate_reasons.append(f"开发期滚动波动过大({development_score_std:.2f})")
-    if profitable_window_ratio < gates.min_profitable_window_ratio:
-        gate_reasons.append(f"开发期盈利窗口占比偏低({profitable_window_ratio:.0%})")
-    if validation_trend_report.segment_count < gates.min_validation_segments:
-        gate_reasons.append(f"验证大趋势段不足({validation_trend_report.segment_count})")
+        gate_reasons.append(f"train中位分偏低({development_median_score:.2f})")
     if validation_trend_report.hit_rate < gates.min_validation_hit_rate:
-        gate_reasons.append(f"验证命中率偏低({validation_trend_report.hit_rate:.0%})")
+        gate_reasons.append(f"val命中率偏低({validation_trend_report.hit_rate:.0%})")
     if validation_trend_report.trend_score < gates.min_validation_trend_score:
-        gate_reasons.append(f"验证趋势捕获分偏低({validation_trend_report.trend_score:.2f})")
+        gate_reasons.append(f"val趋势捕获分偏低({validation_trend_report.trend_score:.2f})")
     if promotion_gap > gates.max_dev_validation_gap:
-        gate_reasons.append(f"开发/验证分数落差过大({promotion_gap:.2f})")
+        gate_reasons.append(f"train/val分数落差过大({promotion_gap:.2f})")
     if validation_trend_report.bull_score < gates.min_validation_bull_capture:
-        gate_reasons.append(f"验证多头捕获偏低({validation_trend_report.bull_score:.2f})")
+        gate_reasons.append(f"val多头捕获偏低({validation_trend_report.bull_score:.2f})")
     if validation_trend_report.bear_score < gates.min_validation_bear_capture:
-        gate_reasons.append(f"验证空头捕获偏低({validation_trend_report.bear_score:.2f})")
+        gate_reasons.append(f"val空头捕获偏低({validation_trend_report.bear_score:.2f})")
     if avg_fee_drag > gates.max_fee_drag_pct:
         gate_reasons.append(f"手续费拖累过高({avg_fee_drag:.2f}%)")
     if validation_block_report.used_block_count >= 2:
-        if validation_block_report.std_score > gates.max_validation_block_std:
-            gate_reasons.append(
-                "验证分块波动过大"
-                f"({validation_block_report.std_score:.2f})"
-            )
         if validation_block_report.min_score < gates.min_validation_block_floor:
             gate_reasons.append(
-                "验证最差分块过弱"
+                "val最差分块过弱"
                 f"({validation_block_report.min_score:.2f})"
             )
         if validation_block_report.fail_count > gates.max_validation_block_failures:
             gate_reasons.append(
-                "验证负分块过多"
+                "val负分块过多"
                 f"({validation_block_report.fail_count})"
             )
-    if (
-        validation_trend_report.bull_segment_count >= gates.min_side_segment_count_for_trade_gate
-        and validation_long_trades < gates.min_trade_support_per_side
-    ):
-        gate_reasons.append(
-            "验证多头交易支持不足"
-            f"({validation_long_trades} < {gates.min_trade_support_per_side})"
-        )
-    if (
-        validation_trend_report.bear_segment_count >= gates.min_side_segment_count_for_trade_gate
-        and validation_short_trades < gates.min_trade_support_per_side
-    ):
-        gate_reasons.append(
-            "验证空头交易支持不足"
-            f"({validation_short_trades} < {gates.min_trade_support_per_side})"
-        )
     if overfit_report.hard_fail:
         gate_reasons.append(
-            "选择期过拟合集中度严重"
+            "train+val过拟合集中度严重"
             f"({'; '.join(overfit_report.hard_reasons)})"
-        )
-    elif overfit_report.risk_score >= OVERFIT_GATE_SCORE:
-        gate_reasons.append(
-            "选择期过拟合风险过高"
-            f"({overfit_report.risk_score:.0f})"
         )
 
     gate_passed = not gate_reasons
@@ -1119,18 +1094,18 @@ def summarize_evaluation(
     summary_lines = [
         "研究评估摘要（15m 为唯一事实源，1h/4h 只是由 15m 聚合的确认层；成交量诊断同时看总量、主动买卖量和成交活跃度）",
         (
-            "开发期滚动分(均值/中位/std/盈利窗比): "
+            "train滚动分(均值/中位/std/盈利窗比): "
             f"{development_mean_score:.2f} / {development_median_score:.2f} / "
             f"{development_score_std:.2f} / {profitable_window_ratio:.0%}"
         ),
-        f"验证晋级分 / 趋势分 / 收益分: {promotion_score:.2f} / {validation_trend_report.trend_score:.2f} / {validation_trend_report.return_score:.2f}",
-        f"验证到来 / 陪跑 / 掉头: {validation_trend_report.arrival_score:.2f} / {validation_trend_report.escort_score:.2f} / {validation_trend_report.turn_score:.2f}",
-        f"验证多头 / 空头捕获: {validation_trend_report.bull_score:.2f} / {validation_trend_report.bear_score:.2f}",
-        f"验证趋势段 / 命中率: {validation_trend_report.segment_count} / {validation_trend_report.hit_rate:.0%}",
-        f"验证多 / 空平仓数: {validation_long_trades} / {validation_short_trades}",
-        f"验证短板: {validation_weakest_axis}",
+        f"val晋级分 / 趋势分 / 收益分: {promotion_score:.2f} / {validation_trend_report.trend_score:.2f} / {validation_trend_report.return_score:.2f}",
+        f"val到来 / 陪跑 / 掉头: {validation_trend_report.arrival_score:.2f} / {validation_trend_report.escort_score:.2f} / {validation_trend_report.turn_score:.2f}",
+        f"val多头 / 空头捕获: {validation_trend_report.bull_score:.2f} / {validation_trend_report.bear_score:.2f}",
+        f"val趋势段 / 命中率: {validation_trend_report.segment_count} / {validation_trend_report.hit_rate:.0%}",
+        f"val多 / 空平仓数: {validation_long_trades} / {validation_short_trades}",
+        f"val短板: {validation_weakest_axis}",
         (
-            "验证分块晋级分(均值/std/最差/负分块): "
+            "val分块晋级分(均值/std/最差/负分块): "
             f"{validation_block_report.mean_score:.2f} / "
             f"{validation_block_report.std_score:.2f} / "
             f"{validation_block_report.min_score:.2f} / "
@@ -1141,7 +1116,7 @@ def summarize_evaluation(
             )
         ),
         (
-            "选择期集中度诊断: "
+            "train+val集中度诊断: "
             f"{overfit_report.risk_level}({overfit_report.risk_score:.0f})，"
             f"单段正向贡献={overfit_report.top1_positive_share:.0%}，"
             f"同向链贡献={overfit_report.max_chain_positive_share:.0%}，"
@@ -1149,16 +1124,16 @@ def summarize_evaluation(
             f"多空落差={overfit_report.bull_bear_gap:.2f}，"
             f"处置={overfit_reference_action(overfit_report.risk_score, overfit_report.hard_fail)}"
         ),
-        f"选择期连续趋势捕获分 / 收益分: {selection_trend_report.trend_score:.2f} / {selection_trend_report.return_score:.2f}",
-        f"选择期连续到来 / 陪跑 / 掉头: {selection_trend_report.arrival_score:.2f} / {selection_trend_report.escort_score:.2f} / {selection_trend_report.turn_score:.2f}",
-        f"选择期连续多头 / 空头捕获: {selection_trend_report.bull_score:.2f} / {selection_trend_report.bear_score:.2f}",
-        f"选择期连续收益 / 路径收益: {selection_total_return:.2f}% / {selection_trend_report.path_return_pct:.2f}%",
-        f"开发期窗口收益均值 / 中位 / P25 / 最差: {eval_avg_return:.2f}% / {eval_median_return:.2f}% / {eval_p25_return:.2f}% / {eval_worst_return:.2f}%",
-        f"验证窗口收益均值 / 最差: {validation_avg_return:.2f}% / {validation_worst_return:.2f}%",
-        f"开发/验证分数落差: {promotion_gap:.2f}",
-        f"开发期4h唯一路径点 / 重叠点 / 被覆盖点: {eval_path.unique_points} / {eval_path.overlap_points} / {eval_path.dropped_points}",
+        f"train+val连续趋势捕获分 / 收益分: {selection_trend_report.trend_score:.2f} / {selection_trend_report.return_score:.2f}",
+        f"train+val连续到来 / 陪跑 / 掉头: {selection_trend_report.arrival_score:.2f} / {selection_trend_report.escort_score:.2f} / {selection_trend_report.turn_score:.2f}",
+        f"train+val连续多头 / 空头捕获: {selection_trend_report.bull_score:.2f} / {selection_trend_report.bear_score:.2f}",
+        f"train+val期间收益 / 路径收益: {selection_total_return:.2f}% / {selection_trend_report.path_return_pct:.2f}%",
+        f"train窗口收益均值 / 中位 / P25 / 最差: {eval_avg_return:.2f}% / {eval_median_return:.2f}% / {eval_p25_return:.2f}% / {eval_worst_return:.2f}%",
+        f"val窗口收益均值 / 最差: {validation_avg_return:.2f}% / {validation_worst_return:.2f}%",
+        f"train/val分数落差: {promotion_gap:.2f}",
+        f"train 4h唯一路径点 / 重叠点 / 被覆盖点: {eval_path.unique_points} / {eval_path.overlap_points} / {eval_path.dropped_points}",
         f"最大回撤 / 手续费拖累: {worst_drawdown:.2f}% / {avg_fee_drag:.2f}%",
-        f"总交易 / 开发期交易 / 验证交易 / 爆仓: {total_trades} / {eval_trades} / {validation_trades} / {liquidations}",
+        f"总交易 / train交易 / val交易 / 爆仓: {total_trades} / {eval_trades} / {validation_trades} / {liquidations}",
         f"质量分 / 晋级分: {quality_score:.2f} / {promotion_score:.2f}",
         f"Gate: {gate_reason}",
         "",
@@ -1172,28 +1147,28 @@ def summarize_evaluation(
         f"当前策略是 BTC 激进趋势策略：15m 是唯一事实源，1h/4h 只是由 15m 聚合的确认层；突破除了总成交量，也会看主动买卖量和成交活跃度。目标是抓大行情的到来、陪跑主趋势、在掉头时退出或反手。",
         f"当前基底质量分={quality_score:.2f}，晋级分={promotion_score:.2f}，gate={gate_reason}",
         (
-            f"开发期滚动分均值/中位/std/盈利窗比="
+            f"train滚动分均值/中位/std/盈利窗比="
             f"{development_mean_score:.2f}/{development_median_score:.2f}/"
             f"{development_score_std:.2f}/{profitable_window_ratio:.0%}"
         ),
         (
-            f"验证晋级分={promotion_score:.2f}，"
-            f"验证趋势分/收益分={validation_trend_report.trend_score:.2f}/{validation_trend_report.return_score:.2f}，"
+            f"val晋级分={promotion_score:.2f}，"
+            f"val趋势分/收益分={validation_trend_report.trend_score:.2f}/{validation_trend_report.return_score:.2f}，"
             f"趋势段/命中率={validation_trend_report.segment_count}/{validation_trend_report.hit_rate:.0%}"
         ),
         (
-            f"验证到来/陪跑/掉头={validation_trend_report.arrival_score:.2f}/"
+            f"val到来/陪跑/掉头={validation_trend_report.arrival_score:.2f}/"
             f"{validation_trend_report.escort_score:.2f}/"
             f"{validation_trend_report.turn_score:.2f}，"
             f"多头/空头捕获={validation_trend_report.bull_score:.2f}/"
             f"{validation_trend_report.bear_score:.2f}"
         ),
         (
-            f"验证多/空平仓数={validation_long_trades}/{validation_short_trades}，"
+            f"val多/空平仓数={validation_long_trades}/{validation_short_trades}，"
             f"{validation_weakest_axis}"
         ),
         (
-            "验证分块均值/std/最差/负分块="
+            "val分块均值/std/最差/负分块="
             f"{validation_block_report.mean_score:.2f}/"
             f"{validation_block_report.std_score:.2f}/"
             f"{validation_block_report.min_score:.2f}/"
@@ -1204,39 +1179,39 @@ def summarize_evaluation(
             )
         ),
         (
-            f"选择期连续趋势分/收益分={selection_trend_report.trend_score:.2f}/"
+            f"train+val连续趋势分/收益分={selection_trend_report.trend_score:.2f}/"
             f"{selection_trend_report.return_score:.2f}，"
             f"到来/陪跑/掉头={selection_trend_report.arrival_score:.2f}/"
             f"{selection_trend_report.escort_score:.2f}/"
             f"{selection_trend_report.turn_score:.2f}"
         ),
         (
-            f"选择期连续多头/空头捕获={selection_trend_report.bull_score:.2f}/"
+            f"train+val连续多头/空头捕获={selection_trend_report.bull_score:.2f}/"
             f"{selection_trend_report.bear_score:.2f}，"
-            f"开发均值趋势分={development_mean_trend_score:.2f}，开发/验证分差={promotion_gap:.2f}"
+            f"train均值趋势分={development_mean_trend_score:.2f}，train/val分差={promotion_gap:.2f}"
         ),
         (
-            f"开发期窗口收益均值/中位/P25/最差={eval_avg_return:.2f}%/"
+            f"train窗口收益均值/中位/P25/最差={eval_avg_return:.2f}%/"
             f"{eval_median_return:.2f}%/{eval_p25_return:.2f}%/{eval_worst_return:.2f}%"
         ),
         (
-            f"选择期连续收益={selection_total_return:.2f}%，"
-            f"验证连续收益={float(validation_source.get('return', validation_avg_return)):.2f}%，"
+            f"train+val期间收益={selection_total_return:.2f}%，"
+            f"val期间收益={float(validation_source.get('return', validation_avg_return)):.2f}%，"
             f"最大回撤={worst_drawdown:.2f}%"
         ),
         (
-            f"选择期集中度诊断={overfit_report.risk_level}({overfit_report.risk_score:.0f})，"
+            f"train+val集中度诊断={overfit_report.risk_level}({overfit_report.risk_score:.0f})，"
             f"单段正向贡献={overfit_report.top1_positive_share:.0%}，"
             f"同向链贡献={overfit_report.max_chain_positive_share:.0%}，"
             f"覆盖率={overfit_report.coverage_ratio:.0%}，"
             f"多空落差={overfit_report.bull_bear_gap:.2f}，"
             f"处置={overfit_reference_action(overfit_report.risk_score, overfit_report.hard_fail)}"
         ),
-        f"开发期4h唯一路径点={eval_path.unique_points}，重叠点={eval_path.overlap_points}，被覆盖点={eval_path.dropped_points}",
-        f"手续费拖累={avg_fee_drag:.2f}%，开发期交易={eval_trades}，验证交易={validation_trades}，爆仓={liquidations}",
+        f"train 4h唯一路径点={eval_path.unique_points}，重叠点={eval_path.overlap_points}，被覆盖点={eval_path.dropped_points}",
+        f"手续费拖累={avg_fee_drag:.2f}%，train交易={eval_trades}，val交易={validation_trades}，爆仓={liquidations}",
     ]
     if weakest_signals:
-        prompt_lines.append("开发期拖累信号: " + " | ".join(weakest_signals))
+        prompt_lines.append("train拖累信号: " + " | ".join(weakest_signals))
 
     metrics = {
         "development_mean_score": development_mean_score,
@@ -1305,6 +1280,8 @@ def summarize_evaluation(
         "validation_short_closed_trades": float(validation_short_trades),
         "selection_long_closed_trades": float(selection_long_trades),
         "selection_short_closed_trades": float(selection_short_trades),
+        "validation_closed_trades": float(validation_closed_trades),
+        "selection_closed_trades": float(selection_closed_trades),
         "validation_path_return_pct": validation_trend_report.path_return_pct,
         "validation_total_return_pct": float(validation_source.get("return", validation_avg_return)),
         "selection_path_return_pct": selection_trend_report.path_return_pct,

@@ -213,6 +213,14 @@ def _reference_benchmark_report() -> EvaluationReport | None:
     return champion_report or best_report
 
 
+def _discord_data_range_text() -> str:
+    return (
+        f"train {RUNTIME.windows.development_start_date}~{RUNTIME.windows.development_end_date} / "
+        f"val {RUNTIME.windows.validation_start_date}~{RUNTIME.windows.validation_end_date} / "
+        f"test {RUNTIME.windows.test_start_date}~{RUNTIME.windows.test_end_date}"
+    )
+
+
 def _reference_manifest_payload(
     source: str,
     report: EvaluationReport,
@@ -430,7 +438,7 @@ def _run_selection_period_backtest(
         "iteration_running",
         message=f"iteration {iteration_counter} {heartbeat_phase}",
         phase=heartbeat_phase,
-        current_window="选择期连续",
+        current_window="train+val连续",
         window_index=len(_scored_windows()) + 1,
         window_count=len(_scored_windows()) + 1,
     )
@@ -458,7 +466,7 @@ def _run_hidden_test_backtest(
         "iteration_running",
         message=f"iteration {iteration_counter} {heartbeat_phase}",
         phase=heartbeat_phase,
-        current_window="隐藏测试",
+        current_window="test连续",
         window_index=len(_scored_windows()) + 2,
         window_count=len(_scored_windows()) + 2,
     )
@@ -790,6 +798,7 @@ def _build_model_candidate(
             current_iteration=iteration_counter,
         ),
         previous_best_score=benchmark_report.metrics["promotion_score"],
+        reference_metrics=benchmark_report.metrics,
         score_regime=SCORE_REGIME,
         promotion_min_delta=RUNTIME.promotion_min_delta,
     )
@@ -1010,6 +1019,7 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
                 eval_window_count=EVAL_WINDOW_COUNT,
                 validation_window_count=VALIDATION_WINDOW_COUNT,
                 test_window_count=TEST_WINDOW_COUNT,
+                data_range_text=_discord_data_range_text(),
             ),
             context="initialize_saved_reference",
         )
@@ -1042,6 +1052,7 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
             eval_window_count=EVAL_WINDOW_COUNT,
             validation_window_count=VALIDATION_WINDOW_COUNT,
             test_window_count=TEST_WINDOW_COUNT,
+            data_range_text=_discord_data_range_text(),
         ),
         context="initialize_baseline",
     )
@@ -1553,15 +1564,15 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         try:
             shadow_test_metrics = evaluate_hidden_test_metrics()
             log_info(
-                "隐藏测试验收: "
+                "test验收: "
                 f"score={shadow_test_metrics['shadow_test_score']:.2f}, "
                 f"return={shadow_test_metrics['shadow_test_total_return_pct']:.2f}%, "
                 f"segments={int(shadow_test_metrics['shadow_test_segment_count'])}, "
                 f"hit={shadow_test_metrics['shadow_test_hit_rate']:.0%}"
             )
         except Exception as exc:
-            log_info(f"隐藏测试评估失败，但本轮 champion 已按验证集保留: {exc}")
-            logging.exception("隐藏测试评估失败(iteration=%s)", iteration_id)
+            log_info(f"test评估失败，但本轮 champion 已按 val 保留: {exc}")
+            logging.exception("test评估失败(iteration=%s)", iteration_id)
 
         _persist_best_state(best_source, best_report, shadow_test_metrics=shadow_test_metrics)
         append_journal_entry(RUNTIME.paths.journal_file, entry_base)
@@ -1585,9 +1596,9 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         try:
             chart_paths = _generate_new_champion_charts(iteration_id)
             if chart_paths.selection_chart is not None:
-                log_info(f"选择期图已保存: {chart_paths.selection_chart}")
+                log_info(f"train+val图已保存: {chart_paths.selection_chart}")
             if chart_paths.validation_chart is not None:
-                log_info(f"验证图已保存: {chart_paths.validation_chart}")
+                log_info(f"val图已保存: {chart_paths.validation_chart}")
         except Exception as exc:
             log_info(f"新 champion 图表生成失败: {exc}")
             logging.exception("新 champion 图表生成失败(iteration=%s)", iteration_id)
@@ -1597,6 +1608,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             eval_window_count=EVAL_WINDOW_COUNT,
             validation_window_count=VALIDATION_WINDOW_COUNT,
             test_window_count=TEST_WINDOW_COUNT,
+            data_range_text=_discord_data_range_text(),
             shadow_test_metrics=shadow_test_metrics,
             candidate=candidate,
         )

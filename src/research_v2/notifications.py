@@ -9,7 +9,7 @@ from pathlib import Path
 
 import requests
 
-from research_v2.evaluation import EvaluationReport, overfit_reference_action, overfit_risk_level_from_score
+from research_v2.evaluation import EvaluationReport
 from research_v2.strategy_code import StrategyCandidate
 
 
@@ -238,105 +238,37 @@ def build_discord_summary_message(
     eval_window_count: int,
     validation_window_count: int,
     test_window_count: int = 0,
+    data_range_text: str | None = None,
     shadow_test_metrics: dict[str, float] | None = None,
     candidate: StrategyCandidate | None = None,
 ) -> str:
     metrics = report.metrics
     selection_return_pct = float(metrics.get("selection_total_return_pct", metrics.get("full_period_return_pct", 0.0)))
     validation_return_pct = float(metrics.get("validation_total_return_pct", metrics.get("validation_avg_return", 0.0)))
-    overfit_score = float(metrics.get("overfit_risk_score", 0.0))
-    overfit_hard_fail = float(metrics.get("overfit_hard_fail", 0.0)) > 0.5
-    overfit_level = "严重" if overfit_hard_fail else overfit_risk_level_from_score(overfit_score)
-    window_text = f"{eval_window_count} 个开发窗口"
+    selection_trade_count = int(metrics.get("selection_closed_trades", metrics.get("total_trades", 0.0)))
+    window_text = f"train滚动 {eval_window_count} 个"
     if validation_window_count > 0:
-        window_text += f" / {validation_window_count} 个验证窗口"
-    if shadow_test_metrics is not None and test_window_count > 0:
-        window_text += f" / {test_window_count} 个隐藏测试窗口"
+        window_text += f" / val连续 {validation_window_count} 个"
+    if test_window_count > 0:
+        window_text += " / test连续 1 个" if shadow_test_metrics is not None else " / test 仅新 champion 时运行"
     rows = [
-        ("窗口", window_text),
-        ("选择期连续收益", f"{selection_return_pct:.2f}%"),
-        ("验证连续收益", f"{validation_return_pct:.2f}%" if validation_window_count > 0 else "-"),
-        ("开发窗口均值收益", f"{metrics['eval_avg_return']:.2f}%"),
+        ("数据范围", data_range_text or "-"),
+        ("本轮窗口", window_text),
+        ("train+val期间收益", f"{selection_return_pct:.2f}%"),
+        ("val期间收益", f"{validation_return_pct:.2f}%" if validation_window_count > 0 else "-"),
+        ("train+val交易数量", str(selection_trade_count)),
         (
-            "开发滚动分(均/中/std)",
-            f"{metrics.get('development_mean_score', 0.0):.2f} / "
-            f"{metrics.get('development_median_score', 0.0):.2f} / "
-            f"{metrics.get('development_score_std', 0.0):.2f}",
-        ),
-        ("开发盈利窗占比", f"{metrics.get('development_profitable_window_ratio', 0.0):.0%}"),
-        ("验证晋级分", f"{metrics['promotion_score']:.2f}"),
-        ("开发/验证分差", f"{metrics.get('dev_validation_gap', metrics.get('promotion_gap', 0.0)):.2f}"),
-        (
-            "验证趋势/收益分",
-            f"{metrics.get('validation_trend_capture_score', 0.0):.2f} / {metrics.get('validation_return_score', 0.0):.2f}"
-            if validation_window_count > 0 else "-",
-        ),
-        (
-            "验证到来/陪跑/掉头",
-            f"{metrics.get('validation_arrival_capture_score', 0.0):.2f} / "
-            f"{metrics.get('validation_escort_capture_score', 0.0):.2f} / "
-            f"{metrics.get('validation_turn_adaptation_score', 0.0):.2f}"
-            if validation_window_count > 0 else "-",
-        ),
-        (
-            "验证多/空捕获",
+            "val多/空捕获",
             f"{metrics.get('validation_bull_capture_score', 0.0):.2f} / "
             f"{metrics.get('validation_bear_capture_score', 0.0):.2f}"
             if validation_window_count > 0 else "-",
         ),
-        (
-            "验证命中率/趋势段",
-            f"{metrics['validation_segment_hit_rate']:.0%} / "
-            f"{int(metrics['validation_major_segment_count'])}"
-            if validation_window_count > 0 else "-",
-        ),
-        (
-            "验证多/空平仓数",
-            f"{int(metrics.get('validation_long_closed_trades', 0.0))} / "
-            f"{int(metrics.get('validation_short_closed_trades', 0.0))}"
-            if validation_window_count > 0 else "-",
-        ),
-        (
-            "验证分块均值/std",
-            f"{metrics.get('validation_block_score_mean', 0.0):.2f} / "
-            f"{metrics.get('validation_block_score_std', 0.0):.2f}"
-            if int(metrics.get("validation_block_count_used", 0)) > 0 else "-",
-        ),
-        (
-            "验证最差块/负块数",
-            f"{metrics.get('validation_block_score_min', 0.0):.2f} / "
-            f"{int(metrics.get('validation_block_fail_count', 0.0))}"
-            if int(metrics.get("validation_block_count_used", 0)) > 0 else "-",
-        ),
-        ("选择期趋势/收益分", f"{metrics['combined_trend_capture_score']:.2f} / {metrics['combined_return_score']:.2f}"),
-        ("选择期到来/陪跑/掉头", f"{metrics['arrival_capture_score']:.2f} / {metrics['escort_capture_score']:.2f} / {metrics['turn_adaptation_score']:.2f}"),
-        ("选择期多/空捕获", f"{metrics['bull_capture_score']:.2f} / {metrics['bear_capture_score']:.2f}"),
-        ("选择期命中率/趋势段", f"{metrics['segment_hit_rate']:.0%} / {int(metrics['major_segment_count'])}"),
-        ("选择期集中度诊断", f"{overfit_level} / {overfit_score:.0f}"),
-        (
-            "集中度/覆盖率",
-            f"{metrics.get('overfit_top1_positive_share', 0.0):.0%} / "
-            f"{metrics.get('overfit_chain_positive_share', 0.0):.0%} / "
-            f"{metrics.get('overfit_coverage_ratio', 1.0):.0%}",
-        ),
-        ("开发唯一路径", f"{int(metrics['eval_unique_trend_points'])} 个4h点"),
-        ("最大回撤", f"{metrics['worst_drawdown']:.2f}%"),
-        ("总交易", str(int(metrics["total_trades"]))),
-        ("手续费拖累", f"{metrics['avg_fee_drag']:.2f}%"),
+        ("最大回撤/手续费拖累", f"{metrics['worst_drawdown']:.2f}% / {metrics['avg_fee_drag']:.2f}%"),
     ]
     if shadow_test_metrics is not None:
-        rows[2:2] = [
-            ("隐藏测试连续收益", f"{shadow_test_metrics.get('shadow_test_total_return_pct', 0.0):.2f}%"),
-            (
-                "隐藏测试趋势/收益分",
-                f"{shadow_test_metrics.get('shadow_test_trend_capture_score', 0.0):.2f} / "
-                f"{shadow_test_metrics.get('shadow_test_return_score', 0.0):.2f}",
-            ),
-            (
-                "隐藏测试命中率/趋势段",
-                f"{shadow_test_metrics.get('shadow_test_hit_rate', 0.0):.0%} / "
-                f"{int(shadow_test_metrics.get('shadow_test_segment_count', 0.0))}",
-            ),
+        rows[4:4] = [
+            ("test期间收益", f"{shadow_test_metrics.get('shadow_test_total_return_pct', 0.0):.2f}%"),
+            ("test交易数量", str(int(shadow_test_metrics.get("shadow_test_closed_trades", 0.0)))),
         ]
 
     parts = [
@@ -346,17 +278,4 @@ def build_discord_summary_message(
         "```",
         f"门禁：{_single_line(report.gate_reason, limit=280)}",
     ]
-    if shadow_test_metrics is not None:
-        parts.append("隐藏测试说明：这部分不参与本次 champion 选择，只做最终验收。")
-    if candidate is not None:
-        parts.extend(
-            [
-                f"方向：{_localized_tags_text(candidate.change_tags)}",
-                f"修改区域：{_localized_regions_text(candidate.edited_regions)}",
-                f"假设：{_candidate_hypothesis_text(candidate)}",
-                f"计划：{_candidate_plan_text(candidate)}",
-                f"预期：{_candidate_effect_text(candidate)}",
-                f"过拟合结论：{overfit_reference_action(overfit_score, overfit_hard_fail)}",
-            ]
-        )
     return "\n".join(parts)

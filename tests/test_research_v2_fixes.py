@@ -201,8 +201,8 @@ class BacktestFixesTest(unittest.TestCase):
 
 class EvaluationFixesTest(unittest.TestCase):
     def test_collect_daily_path_assigns_overlapping_days_to_latest_window(self):
-        window1 = type("Window", (), {"group": "eval", "label": "评估1", "start_date": "2026-01-01", "end_date": "2026-01-02"})()
-        window2 = type("Window", (), {"group": "eval", "label": "评估2", "start_date": "2026-01-02", "end_date": "2026-01-03"})()
+        window1 = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-02"})()
+        window2 = type("Window", (), {"group": "eval", "label": "train2", "start_date": "2026-01-02", "end_date": "2026-01-03"})()
         results = [
             {
                 "window": window1,
@@ -231,9 +231,9 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertEqual(path.dropped_points, 1)
 
     def test_summarize_evaluation_scores_unique_trend_capture_path(self):
-        eval_window1 = type("Window", (), {"group": "eval", "label": "评估1", "start_date": "2026-01-01", "end_date": "2026-01-12"})()
-        eval_window2 = type("Window", (), {"group": "eval", "label": "评估2", "start_date": "2026-01-10", "end_date": "2026-01-15"})()
-        validation_window = type("Window", (), {"group": "validation", "label": "验证1", "start_date": "2026-01-16", "end_date": "2026-01-23"})()
+        eval_window1 = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-12"})()
+        eval_window2 = type("Window", (), {"group": "eval", "label": "train2", "start_date": "2026-01-10", "end_date": "2026-01-15"})()
+        validation_window = type("Window", (), {"group": "validation", "label": "val1", "start_date": "2026-01-16", "end_date": "2026-01-23"})()
         eval_points_1 = [
             {"timestamp": idx, "label": f"t{idx}", "market_close": close, "atr_ratio": 0.01, "strategy_equity": equity}
             for idx, close, equity in [
@@ -370,8 +370,8 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertTrue(report.gate_passed)
 
     def test_summarize_evaluation_rejects_large_quality_promotion_gap(self):
-        eval_window = type("Window", (), {"group": "eval", "label": "评估1", "start_date": "2026-01-01", "end_date": "2026-01-12"})()
-        validation_window = type("Window", (), {"group": "validation", "label": "验证1", "start_date": "2026-01-13", "end_date": "2026-01-23"})()
+        eval_window = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-12"})()
+        validation_window = type("Window", (), {"group": "validation", "label": "val1", "start_date": "2026-01-13", "end_date": "2026-01-23"})()
         eval_points = [
             {"timestamp": idx, "label": f"e{idx}", "market_close": close, "atr_ratio": 0.01, "strategy_equity": equity}
             for idx, close, equity in [
@@ -440,11 +440,11 @@ class EvaluationFixesTest(unittest.TestCase):
         )
 
         self.assertFalse(report.gate_passed)
-        self.assertIn("开发/验证分数落差过大", report.gate_reason)
+        self.assertIn("train/val分数落差过大", report.gate_reason)
 
     def test_summarize_evaluation_rejects_severe_overfit_concentration(self):
-        eval_window = type("Window", (), {"group": "eval", "label": "评估1", "start_date": "2026-01-01", "end_date": "2026-02-10"})()
-        validation_window = type("Window", (), {"group": "validation", "label": "验证1", "start_date": "2026-02-11", "end_date": "2026-03-10"})()
+        eval_window = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-02-10"})()
+        validation_window = type("Window", (), {"group": "validation", "label": "val1", "start_date": "2026-02-11", "end_date": "2026-03-10"})()
         eval_points = [
             {"timestamp": idx, "label": f"t{idx}", "market_close": close, "atr_ratio": 0.01, "strategy_equity": equity}
             for idx, close, equity in [
@@ -524,7 +524,7 @@ class EvaluationFixesTest(unittest.TestCase):
         )
 
         self.assertFalse(report.gate_passed)
-        self.assertIn("选择期过拟合", report.gate_reason)
+        self.assertIn("train+val过拟合", report.gate_reason)
         self.assertGreater(report.metrics["overfit_risk_score"], 0.0)
         self.assertGreater(report.metrics["overfit_top1_positive_share"], 0.60)
         self.assertEqual(report.metrics["overfit_hard_fail"], 1.0)
@@ -1329,11 +1329,11 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
                     "promotion_score": 0.40,
                     "quality_score": 0.33,
                     "promotion_delta": 0.0,
-                    "gate_reason": "开发期滚动波动过大(0.46)",
+                    "gate_reason": "train/val分数落差过大(0.46)",
                     "change_tags": ["long_relay_entry", "fourh_participation"],
                     "edited_regions": ["_trend_quality_ok"],
                     "closest_failed_cluster": "participation_cluster",
-                    "hypothesis": "连续几轮都被同一个开发期 gate 拦下。",
+                    "hypothesis": "连续几轮都被同一个 train/val gap gate 拦下。",
                     "core_factors": [
                         {
                             "name": "fourh_relay_ratio",
@@ -1585,16 +1585,16 @@ class SmokeWindowSelectionTest(unittest.TestCase):
         for idx in range(1, 6):
             window = Window()
             window.group = "eval"
-            window.label = f"评估{idx}"
+            window.label = f"train{idx}"
             windows.append(window)
         validation = Window()
         validation.group = "validation"
-        validation.label = "验证1"
+        validation.label = "val1"
         windows.append(validation)
 
         selected = select_smoke_windows(windows, 3)
 
-        self.assertEqual([window.label for window in selected], ["评估1", "验证1", "评估3"])
+        self.assertEqual([window.label for window in selected], ["train1", "val1", "train3"])
 
 
 class CodexExecClientTest(unittest.TestCase):
@@ -1759,7 +1759,7 @@ class ReferenceStateFixesTest(unittest.TestCase):
         report = EvaluationReport(
             metrics={"promotion_score": 0.31, "quality_score": 0.22},
             gate_passed=False,
-            gate_reason="开发期滚动波动过大(0.46)",
+            gate_reason="train/val分数落差过大(0.46)",
             summary_text="",
             prompt_summary_text="",
         )
@@ -1777,7 +1777,7 @@ class ReferenceStateFixesTest(unittest.TestCase):
         baseline_report = EvaluationReport(
             metrics={"promotion_score": 0.40, "quality_score": 0.33},
             gate_passed=False,
-            gate_reason="开发期滚动波动过大(0.46)",
+            gate_reason="train/val分数落差过大(0.46)",
             summary_text="",
             prompt_summary_text="",
         )
@@ -1840,6 +1840,7 @@ class DiscordSummaryFormattingTest(unittest.TestCase):
                 "segment_hit_rate": 0.50,
                 "major_segment_count": 22.0,
                 "selection_total_return_pct": 123.4,
+                "selection_closed_trades": 123.0,
                 "eval_avg_return": 1.23,
                 "validation_total_return_pct": 34.5,
                 "overfit_risk_score": 20.0,
@@ -1863,24 +1864,22 @@ class DiscordSummaryFormattingTest(unittest.TestCase):
             report=report,
             eval_window_count=29,
             validation_window_count=1,
+            test_window_count=1,
+            data_range_text="train 2023-07-01~2024-12-31 / val 2025-01-01~2025-12-31 / test 2026-01-01~2026-03-31",
         )
 
-        self.assertIn("开发滚动分(均/中/std)", message)
-        self.assertIn("验证趋势/收益分", message)
-        self.assertIn("验证命中率/趋势段", message)
-        self.assertIn("选择期连续收益", message)
-        self.assertIn("验证连续收益", message)
-        self.assertIn("验证分块均值/std", message)
-        self.assertIn("验证最差块/负块数", message)
-        self.assertIn("开发窗口均值收益", message)
-        self.assertIn("选择期趋势/收益分", message)
-        self.assertNotIn("验证整段收益", message)
-        self.assertNotIn("拼接路径收益", message)
-        self.assertNotIn("综合路径收益", message)
-        self.assertNotIn("| 收益 | 1.23% / 45.67% |", message)
-        self.assertLess(message.index("选择期连续收益"), message.index("验证趋势/收益分"))
-        self.assertLess(message.index("验证连续收益"), message.index("验证趋势/收益分"))
-        self.assertLess(message.index("开发窗口均值收益"), message.index("验证趋势/收益分"))
+        self.assertIn("数据范围", message)
+        self.assertIn("本轮窗口", message)
+        self.assertIn("train+val期间收益", message)
+        self.assertIn("val期间收益", message)
+        self.assertIn("train+val交易数量", message)
+        self.assertIn("val多/空捕获", message)
+        self.assertIn("最大回撤/手续费拖累", message)
+        self.assertIn("test 仅新 champion 时运行", message)
+        self.assertNotIn("train滚动分", message)
+        self.assertNotIn("val趋势/收益分", message)
+        self.assertNotIn("train+val趋势/收益分", message)
+        self.assertNotIn("test期间收益", message)
 
 
 class ChartRenderingTest(unittest.TestCase):

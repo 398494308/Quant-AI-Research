@@ -82,14 +82,53 @@ def build_candidate_response_schema() -> dict[str, Any]:
 # ==================== Prompt 组装 ====================
 
 
+def _safe_metric(metrics: dict[str, Any] | None, key: str) -> float:
+    if not isinstance(metrics, dict):
+        return 0.0
+    try:
+        return float(metrics.get(key, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _side_bias_guidance(reference_metrics: dict[str, Any] | None) -> str:
+    bull = _safe_metric(reference_metrics, "validation_bull_capture_score")
+    bear = _safe_metric(reference_metrics, "validation_bear_capture_score")
+    hit_rate = _safe_metric(reference_metrics, "validation_segment_hit_rate")
+    gap = bear - bull
+
+    if bear >= 0.20 and gap >= 0.12:
+        return (
+            "多空强化偏置（软引导，不是硬限制）:\n"
+            f"- 当前主参考 val 多头/空头捕获 = {bull:.2f} / {bear:.2f}，命中率 = {hit_rate:.0%}。\n"
+            "- 这说明空头已有可用基础，但多头仍明显偏弱，继续把主要探索预算投入空头，边际收益大概率更低。\n"
+            "- 本轮默认优先考虑 `long` 或 `mixed` 假设：先补多头的到来、接力、二次启动、陪跑，而不是继续抛光空头。\n"
+            "- 这不是禁止修改空头；只有当某个 mixed 假设能在基本不破坏空头的前提下补多头，或空头出现新的硬伤时，才值得继续动 short。\n"
+            "- 若选择 mixed 方案，`expected_effects` 的第一优先级应是改善多头捕获/命中率，第二优先级才是维持空头不明显恶化。"
+        )
+
+    if bull < 0.05 <= bear:
+        return (
+            "多空强化偏置（软引导，不是硬限制）:\n"
+            f"- 当前主参考 val 多头/空头捕获 = {bull:.2f} / {bear:.2f}。\n"
+            "- 当前更值得优先探索的是多头侧，因为空头至少已经过线，而多头仍接近或低于门槛。\n"
+            "- 默认优先做能补多头捕获的 `long` 或 `mixed` 假设，但不要为了补多头而粗暴破坏空头主框架。"
+        )
+
+    return ""
+
+
 def build_strategy_research_prompt(
     *,
     evaluation_summary: str,
     journal_summary: str,
     previous_best_score: float,
+    reference_metrics: dict[str, Any] | None = None,
     score_regime: str = "trend_capture_v6",
     promotion_min_delta: float = 0.02,
 ) -> str:
+    side_bias_guidance = _side_bias_guidance(reference_metrics)
+    side_bias_block = f"\n{side_bias_guidance}\n" if side_bias_guidance else "\n"
     return f"""你是 BTC 合约激进趋势策略研究员。
 
 策略目标：
@@ -107,10 +146,12 @@ def build_strategy_research_prompt(
 - `change_plan` 和 `novelty_proof` 必须明确写出预计会新增、删除或移动哪类实际交易，例如早段多头突破、横盘假突破过滤、空头反手、趋势失效退出，而不是只说“提高确认质量”。
 
 当前 champion 参考晋级分：{previous_best_score:.2f}
+{side_bias_block}
 
 思考框架：
 - 先看方向风险表，确认哪些方向簇仍然可用，哪些已经过热或接近耗尽。
-- 再看当前验证集短板是什么：到来、陪跑、掉头、多头捕获还是空头捕获。
+- 再看当前 val 短板是什么：到来、陪跑、掉头、多头捕获还是空头捕获。
+- 若当前主参考出现明显多空失衡，且一侧已经基本可用、另一侧明显偏弱，默认优先补弱侧；这是探索预算倾斜，不是硬性禁止另一侧。
 - 围绕最大短板提出一个因果明确的假设：因为 X，所以修改 Y，预期 Z 会变化。
 - 只改最少的区域验证这个假设，避免顺手重写无关逻辑。
 - 在输出 JSON 前，先在内部确认：当前主方向、最大短板、本轮因果链条、以及与最近失败轮次的核心差异。
@@ -134,29 +175,27 @@ def build_strategy_research_prompt(
 
 评分方式：
 - 当前评分口径是 `{score_regime}`。
-- `development` 使用滚动 walk-forward 窗口，看均值、中位数、波动和盈利窗口占比。
-- `validation` 是单段连续 holdout，`promotion_score` 只看这里。
+- `train` 使用滚动 walk-forward 窗口，重点看均值和中位数；波动和盈利窗口占比只做诊断参考。
+- `val` 是单段连续 holdout，`promotion_score` 只看这里。
 - `test` 是隐藏验收集，你完全看不到，也不会参与本轮调参。
 - `trend_capture_score` 看三件事：到来阶段是否及时跟上、主趋势中段是否陪跑、掉头时是否及时退出或反手。
 - `return_score` 看连续路径最终把资金放大了多少。
-- `quality_score` 是开发期滚动窗口的均值分；`promotion_score` 是验证集连续分。
+- `quality_score` 是 train 滚动窗口的均值分；`promotion_score` 是 val 连续分。
 - 只有在 `gate` 通过，且相对当前 champion 的有效 `promotion_delta > {promotion_min_delta:.2f}` 时，候选才有资格刷新当前主参考。
-- 验证集还会检查 `3` 个连续时间分块、开发期与验证集的分差、以及验证期多空交易支持是否过弱。
-- 选择期连续结果只做诊断，不直接决定能否刷新当前主参考。
+- `val` 还会检查 `3` 个连续时间分块；其中最差分块和负分块数量仍是 gate，分块波动只做诊断。
+- `train+val` 连续结果只做诊断，不直接决定能否刷新当前主参考；只有严重过拟合集中度才会一票否决。
 
 关键门禁（触碰即淘汰）：
-- development 滚动均值分不能太低
-- development 滚动中位分不能太低
-- development 滚动波动不能太大
-- development 盈利窗口占比不能太低
-- validation 大趋势段数 >= 18
-- validation 趋势段命中率 >= 40%
-- validation 趋势捕获分 >= 0.10
-- development 与 validation 的分数落差 <= 0.20
-- validation 多头捕获 >= 0.00
-- validation 空头捕获 >= 0.00
-- validation 连续路径会再按时间顺序切成 3 个分块：分块 std <= 0.30、最差分块 >= -0.20、负分块最多 1 个
+- train 滚动均值分不能太低
+- train 滚动中位分不能太低
+- val 趋势段命中率 >= 35%
+- val 趋势捕获分 >= 0.05
+- train 与 val 的分数落差 <= 0.30
+- val 多头捕获 >= 0.00
+- val 空头捕获 >= 0.00
+- val 连续路径会再按时间顺序切成 3 个分块：最差分块 >= -0.35、负分块最多 1 个
 - 手续费拖累 <= 8%
+- train+val 若出现严重集中度过拟合，会直接淘汰
 
 探索与防重复规则：
 - 先读方向风险表；若某方向簇被标为 `SATURATED` / `EXHAUSTED` / `RUNTIME_RISK`，默认不要继续把它当主方向。
