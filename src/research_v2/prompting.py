@@ -10,19 +10,10 @@ from typing import Any
 
 EDITABLE_REGIONS = (
     "PARAMS",
-    "_sideways_release_flags",
     "_is_sideways_regime",
-    "_flow_signal_metrics",
     "_flow_confirmation_ok",
-    "_flow_entry_ok",
-    "_trend_quality_long",
-    "_trend_quality_short",
     "_trend_quality_ok",
-    "_trend_followthrough_long",
-    "_trend_followthrough_short",
     "_trend_followthrough_ok",
-    "_long_entry_signal",
-    "_short_entry_signal",
     "strategy",
 )
 
@@ -109,6 +100,12 @@ def build_strategy_research_prompt(
 
 你的任务不是机械拨参数，而是围绕一个可证伪的假设，修改 `src/strategy_macd_aggressive.py`，提升这套策略对 BTC 大趋势的捕获能力。
 
+新增硬性要求：
+- 本轮候选必须改变实际交易路径，而不只是产生源码 diff。
+- 主进程会先比较当前参考与候选在 smoke 窗口上的行为指纹；如果收益、交易数、信号统计、退出原因和交易摘要完全一致，会直接按 `behavioral_noop` 跳过 full eval。
+- 如果你主要修改 `_trend_followthrough_ok()`、`_trend_quality_ok()` 或 `_flow_confirmation_ok()`，必须确认 `strategy()` 里已有入场路径会实际触达这些变化；否则优先改 `strategy()` 的最终入场路径。
+- `change_plan` 和 `novelty_proof` 必须明确写出预计会新增、删除或移动哪类实际交易，例如早段多头突破、横盘假突破过滤、空头反手、趋势失效退出，而不是只说“提高确认质量”。
+
 当前 champion 参考晋级分：{previous_best_score:.2f}
 
 思考框架：
@@ -167,6 +164,7 @@ def build_strategy_research_prompt(
 - 若出现 `主簇过热（必须先读）`，默认必须切到不同方向簇；只有当你能明确举证“这次会改变不同交易路径”时，才允许留在热簇。
 - 若出现 `探索触发（必须执行）`，本轮必须满足以下至少一项：切换方向簇 / 切换 edited region family / 切换 long-short target。
 - 探索轮允许结果变差，但不允许只换 tag、只换措辞、只拨轻微阈值，或只在同一 edited region family 里做近邻微调。
+- 探索轮必须以改变实际交易行为为目标；如果只改后置确认但没有改变最终信号集合，会被系统按行为无变化拒收。
 - 若系统提示“同簇低变化近邻已被拒收”，下一次必须优先切到不同方向簇；若确实留在同簇，至少同时切换 edited region family 与 long-short target 或核心因子家族。
 - 若仍借鉴高风险轮次或留在热簇，`novelty_proof` 必须明确说明：本轮与最近失败方向的差异、会改变哪类交易路径、以及至少两个预计会明显变化的关键诊断。
 - 系统会根据真实代码 diff、参数变更族和 AST 结构自动派生 `system signature`；`edited_regions` / `change_tags` 只是你的说明，不能替代真实改动。
@@ -178,6 +176,7 @@ def build_strategy_research_prompt(
 - 不要删除、改名或只改一半仍被下游条件复用的共享中间变量；若重构某个布尔变量或上下文变量，必须同步更新全部引用，禁止留下未定义局部变量。
 - 不要引入网络、文件、随机数、外部依赖。
 - 每轮只做一个明确假设，最多改 `1` 到 `3` 个区域。
+- 若改动不包含 `strategy()`，必须在内部确认该 helper 的变化会改变现有 `strategy()` 触发结果；否则本轮应改 `strategy()`。
 - 不要为了显得“有改动”而重写无关逻辑、批量改名、做大面积格式化，或新增与本轮假设无关的分支。
 - 禁止 hard code 针对单个日期、单个窗口、单段行情、固定价格路径或历史结果表做特判。
 - 代码必须保持简洁、结构化、可读；优先最小必要改动，避免重复条件、冗余 helper、臃肿嵌套和一次性补丁式写法。
@@ -302,6 +301,7 @@ def build_strategy_exploration_repair_prompt(
 - 优先切到不同方向簇。
 - 若确实留在同簇，至少同时切换 edited region family，并切换 long-short target 或核心因子家族；否则系统仍会拒收。
 - 不要只换 tag、只换措辞、或只补一两条很像的条件。
+- 重生后的候选必须预计改变 smoke 窗口实际交易路径；如果上一版只是 helper / followthrough 变化但没有触发新交易，优先改 `strategy()` 的最终入场路径。
 - 仍然只允许修改 `src/strategy_macd_aggressive.py` 可编辑区域。
 - 不要引入网络、文件、随机数、外部依赖。
 - 代码仍必须保持简洁、结构化、可读。

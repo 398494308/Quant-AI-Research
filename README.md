@@ -43,11 +43,12 @@
 5. 主进程校验候选只修改了允许区域。
 6. 先做评估前硬约束检查；如果候选仍然是同簇低变化近邻，或命中锁簇，会在同一轮直接强制重生，而不是白跑评估。
 7. 通过前置检查后，先跑少量 `smoke` 窗口；如果运行报错，会在同一轮进入 repair loop，而不是直接开始下一轮。
-8. `smoke` 通过后，再跑整套 `development walk-forward + validation`。
-9. 只有 `gate` 通过，且相对当前 `champion` 的 `promotion_delta` 至少高 `0.02`，才刷新当前主参考。
-10. 如果当前还没有 `gate-passed champion`，而现有基线本身又没过 gate，那么第一条过 gate 的候选会直接晋升为新 `champion`。
-11. 刷新 `champion` 之后，才会额外跑一次隐藏 `test`；它只做验收，不参与 `champion` 选择，也不会喂给模型。
-12. 每轮结果都会写进 journal，包含 `accepted / rejected / duplicate_skipped / exploration_blocked / early_rejected / runtime_failed`。
+8. `smoke` 通过后，主进程还会对比候选和当前参考在 smoke 窗口里的行为指纹；如果收益、交易数、信号统计、退出原因和交易摘要完全一致，会直接按 `behavioral_noop` 跳过完整评估。
+9. 只有 smoke 行为真的变了，才会继续跑整套 `development walk-forward + validation`。
+10. 只有 `gate` 通过，且相对当前 `champion` 的 `promotion_delta` 至少高 `0.02`，才刷新当前主参考。
+11. 如果当前还没有 `gate-passed champion`，而现有基线本身又没过 gate，那么第一条过 gate 的候选会直接晋升为新 `champion`。
+12. 刷新 `champion` 之后，才会额外跑一次隐藏 `test`；它只做验收，不参与 `champion` 选择，也不会喂给模型。
+13. 每轮结果都会写进 journal，包含 `accepted / rejected / duplicate_skipped / behavioral_noop / exploration_blocked / early_rejected / runtime_failed`。
 
 ## 当前评分口径
 
@@ -133,6 +134,7 @@
 - 模型可以看到 `validation` 的聚合诊断，但完全看不到 hidden `test`。
 - prompt 会明确写出：只有 `gate` 通过且 `promotion_delta > 0.02` 才可能刷新当前 `champion`。
 - `edited_regions` 现在只允许填 `1-3` 个，而且系统会用真实代码 diff / AST 派生的 `system signature` 复核，不再只信模型自报元信息。
+- prompt 里的可编辑区域已清到当前策略文件真实存在的 `6` 个区域，减少把注意力浪费到不存在 helper 上的情况。
 - 最近轮次摘要拆成了“核心指标表 + 元信息摘要”，不再用超宽大表。
 
 ## 当前窗口配置
@@ -209,6 +211,7 @@ PY
 - 被拦截后不会立刻浪费下一轮，而是会在同一轮里强制重生候选
 - 如果同一方向簇反复触发该问题，会进入短期冷却锁，默认是 `3 -> 6 -> 10` 轮递增
 - 低变化近邻的判定不再主要靠 `change_tags / edited_regions` 自报，而会同时看真实 diff、参数族变化和 AST 派生的结构签名
+- `smoke` 现在还会比较行为指纹；如果候选和当前参考的 smoke 交易行为完全一致，会按 `behavioral_noop` 直接跳过完整评估
 
 ## Discord 播报说明
 
@@ -282,6 +285,9 @@ Discord 主表现在优先显示收益相关，再显示验证集与选择期诊
 
 - `status`
   当前状态，比如 `model_waiting`、`iteration_running`、`candidate_repairing`、`new_champion`、`sleeping`。
+
+- `behavioral_noop`
+  候选能运行，但 smoke 交易行为和当前参考完全一致，系统会直接跳过完整评估。
 
 - `phase`
   当前在哪个阶段，比如 `model_generate`、`model_repair`、`smoke_test`、`full_eval`、`selection_period_eval`、`hidden_test_eval`。

@@ -16,8 +16,14 @@ from research_v2.strategy_code import build_system_edit_signature
 
 
 COMPACT_INTERVAL = 20
-NEGATIVE_OUTCOMES = {"rejected", "early_rejected", "runtime_failed", "duplicate_skipped"}
-NO_OP_STOP_STAGES = {"duplicate_source", "duplicate_history", "empty_diff"}
+NEGATIVE_OUTCOMES = {
+    "rejected",
+    "early_rejected",
+    "runtime_failed",
+    "duplicate_skipped",
+    "behavioral_noop",
+}
+NO_OP_STOP_STAGES = {"duplicate_source", "duplicate_history", "empty_diff", "behavioral_noop"}
 
 CLUSTER_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ownership_cluster", ("ownership", "acceptance", "handoff", "transfer", "reset_reclaim")),
@@ -412,6 +418,7 @@ def _compact_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
     accepted = [e for e in entries if _outcome_bucket(str(e.get("outcome", ""))) == "accepted"]
     rejected = [e for e in entries if _outcome_bucket(str(e.get("outcome", ""))) == "rejected"]
     duplicate_skipped_count = sum(1 for e in entries if e.get("outcome") == "duplicate_skipped")
+    behavioral_noop_count = sum(1 for e in entries if e.get("outcome") == "behavioral_noop")
     exploration_blocked_count = sum(1 for e in entries if e.get("outcome") == "exploration_blocked")
     early_rejected_count = sum(1 for e in entries if e.get("outcome") == "early_rejected")
     runtime_failed_count = sum(1 for e in entries if e.get("outcome") == "runtime_failed")
@@ -528,6 +535,7 @@ def _compact_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "accepted_count": len(accepted),
         "rejected_count": len(rejected),
         "duplicate_skipped_count": duplicate_skipped_count,
+        "behavioral_noop_count": behavioral_noop_count,
         "exploration_blocked_count": exploration_blocked_count,
         "early_rejected_count": early_rejected_count,
         "runtime_failed_count": runtime_failed_count,
@@ -630,13 +638,14 @@ def _format_compact_for_prompt(
     skipped_rounds = len(all_rounds) - len(rounds)
     total_accepted = sum(r.get("accepted_count", 0) for r in rounds)
     total_rejected = sum(r.get("rejected_count", 0) for r in rounds)
+    total_behavioral_noop = sum(r.get("behavioral_noop_count", 0) for r in rounds)
     total_exploration_blocked = sum(r.get("exploration_blocked_count", 0) for r in rounds)
     total_early_rejected = sum(r.get("early_rejected_count", 0) for r in rounds)
     total_runtime_failed = sum(r.get("runtime_failed_count", 0) for r in rounds)
     total_entries = sum(r.get("entry_count", 0) for r in rounds)
     lines.append(
         f"共 {total_entries} 轮历史，{total_accepted} 次通过，"
-        f"{total_rejected} 次失败，探索拦截 {total_exploration_blocked} 次，其中提前淘汰 {total_early_rejected} 次，"
+        f"{total_rejected} 次失败，行为无变化 {total_behavioral_noop} 次，探索拦截 {total_exploration_blocked} 次，其中提前淘汰 {total_early_rejected} 次，"
         f"运行失败 {total_runtime_failed} 次，通过率 {total_accepted / total_entries:.0%}"
         if total_entries else "无历史"
     )
@@ -1271,7 +1280,7 @@ def _noop_tail(entries: list[dict[str, Any]], streak: int = LOW_CHANGE_STREAK) -
     if len(entries) < streak:
         return []
     tail = entries[-streak:]
-    if all(str(entry.get("outcome", "")) == "duplicate_skipped" for entry in tail):
+    if all(str(entry.get("outcome", "")) in {"duplicate_skipped", "behavioral_noop"} for entry in tail):
         return tail
     if all(str(entry.get("stop_stage", "")) in NO_OP_STOP_STAGES for entry in tail):
         return tail
@@ -1303,10 +1312,10 @@ def _exploration_trigger_lines(entries: list[dict[str, Any]], limit: int) -> lis
 
         return [
             "探索触发（必须执行）:",
-            f"最近 {LOW_CHANGE_STREAK} 轮都没有产生有效代码改动，已按重复探索记入历史。",
+            f"最近 {LOW_CHANGE_STREAK} 轮都没有产生有效代码改动或 smoke 交易行为变化，已按重复探索记入历史。",
             f"- 重复原因：{'；'.join(reasons[:limit]) or '-'}",
             f"- 近期近邻方向簇：{', '.join(clusters[:limit]) or '-'}；标签：{', '.join(tags[:limit]) or '-'}；高频区域：{', '.join(regions[:limit]) or '-'}",
-            "- 下一轮必须先产出有效 diff；若继续沿用相近方向，至少切换方向簇、edited region family、long-short target 中的一项。",
+            "- 下一轮必须先产出有效 diff，并且必须改变 smoke 窗口的实际交易路径；若继续沿用相近方向，至少切换方向簇、edited region family、long-short target 中的一项。",
         ]
 
     tail = _low_change_tail(entries)
@@ -1440,6 +1449,7 @@ def _display_outcome(raw_outcome: str) -> str:
         "accepted": "保留",
         "rejected": "未保留",
         "duplicate_skipped": "重复跳过",
+        "behavioral_noop": "行为无变化",
         "exploration_blocked": "探索拦截",
         "early_rejected": "提前淘汰",
         "runtime_failed": "运行失败",
@@ -1458,6 +1468,8 @@ def _display_stage(entry: dict[str, Any]) -> str:
         return "历史重复"
     if stage == "empty_diff":
         return "无有效diff"
+    if stage == "behavioral_noop":
+        return "行为无变化"
     if stage == "blocked_same_cluster":
         return "同簇近邻"
     if stage == "blocked_locked_cluster":
@@ -1765,6 +1777,7 @@ def build_journal_prompt_summary(
             accepted_count = sum(1 for entry in display_entries if entry.get("outcome") == "accepted")
             rejected_count = sum(1 for entry in display_entries if entry.get("outcome") == "rejected")
             duplicate_skipped_count = sum(1 for entry in display_entries if entry.get("outcome") == "duplicate_skipped")
+            behavioral_noop_count = sum(1 for entry in display_entries if entry.get("outcome") == "behavioral_noop")
             exploration_blocked_count = sum(1 for entry in display_entries if entry.get("outcome") == "exploration_blocked")
             early_rejected_count = sum(1 for entry in display_entries if entry.get("outcome") == "early_rejected")
             runtime_failed_count = sum(1 for entry in display_entries if entry.get("outcome") == "runtime_failed")
@@ -1772,6 +1785,7 @@ def build_journal_prompt_summary(
                 f"最近未压缩轮次共 {len(display_entries)} 条："
                 f"保留 {accepted_count}，未保留 {rejected_count}，"
                 f"重复跳过 {duplicate_skipped_count}，"
+                f"行为无变化 {behavioral_noop_count}，"
                 f"探索拦截 {exploration_blocked_count}，"
                 f"提前淘汰 {early_rejected_count}，运行失败 {runtime_failed_count}。"
             )

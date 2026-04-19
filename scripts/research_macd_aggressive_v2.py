@@ -276,6 +276,15 @@ class CandidateRepairExhausted(Exception):
         super().__init__(errors[-1] if errors else "candidate repair exhausted")
 
 
+class CandidateBehavioralNoop(Exception):
+    """候选能运行，但 smoke 行为与当前参考完全一致。"""
+
+    def __init__(self, candidate: StrategyCandidate, behavior_diff: dict[str, Any]):
+        self.candidate = candidate
+        self.behavior_diff = behavior_diff
+        super().__init__("candidate smoke behavior is identical to current reference")
+
+
 def select_smoke_windows(windows: list[Any], smoke_window_count: int) -> list[Any]:
     if smoke_window_count <= 0:
         return []
@@ -583,6 +592,122 @@ def smoke_test_current_strategy() -> None:
         heartbeat_phase="smoke_test",
         prepared_context=prepared_context,
     )
+
+
+def _round_behavior_value(value: Any) -> float:
+    try:
+        return round(float(value), 8)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _signal_stats_fingerprint(signal_stats: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
+    rows: list[tuple[Any, ...]] = []
+    for signal, payload in sorted(signal_stats.items()):
+        if not isinstance(payload, dict):
+            continue
+        rows.append(
+            (
+                str(signal),
+                int(payload.get("entries", 0) or 0),
+                int(payload.get("closed_trades", 0) or 0),
+                _round_behavior_value(payload.get("pnl_amount", 0.0)),
+                _round_behavior_value(payload.get("win_rate", 0.0)),
+            )
+        )
+    return tuple(rows)
+
+
+def _trade_summary_fingerprint(trades: list[dict[str, Any]]) -> tuple[tuple[Any, ...], ...]:
+    rows: list[tuple[Any, ...]] = []
+    for trade in trades:
+        rows.append(
+            (
+                str(trade.get("entry_signal", "")),
+                str(trade.get("reason", "")),
+                int(trade.get("hold_bars", 0) or 0),
+                int(trade.get("pyramids_done", 0) or 0),
+                _round_behavior_value(trade.get("pnl_pct", 0.0)),
+                _round_behavior_value(trade.get("pnl_amount", 0.0)),
+            )
+        )
+    return tuple(rows)
+
+
+def _window_behavior_fingerprint(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "return": _round_behavior_value(result.get("return", 0.0)),
+        "score": _round_behavior_value(result.get("score", 0.0)),
+        "max_drawdown": _round_behavior_value(result.get("max_drawdown", 0.0)),
+        "trades": int(result.get("trades", 0) or 0),
+        "win_rate": _round_behavior_value(result.get("win_rate", 0.0)),
+        "fee_drag_pct": _round_behavior_value(result.get("fee_drag_pct", 0.0)),
+        "liquidations": int(result.get("liquidations", 0) or 0),
+        "signal_stats": _signal_stats_fingerprint(result.get("signal_stats", {}) or {}),
+        "trade_reason_stats": tuple(sorted((result.get("trade_reason_stats", {}) or {}).items())),
+        "trades_detail": _trade_summary_fingerprint(result.get("trades_detail", []) or []),
+    }
+
+
+def _smoke_behavior_profile(*, heartbeat_phase: str) -> list[dict[str, Any]]:
+    prepared_context = _prepare_backtest_context()
+    results = _run_base_backtests(
+        windows=_selected_smoke_windows(),
+        include_diagnostics=True,
+        heartbeat_phase=heartbeat_phase,
+        prepared_context=prepared_context,
+    )
+    return [
+        {
+            "window": item["window"].label,
+            "fingerprint": _window_behavior_fingerprint(item["result"]),
+        }
+        for item in results
+    ]
+
+
+def _behavior_profile_changed(
+    base_profile: list[dict[str, Any]],
+    candidate_profile: list[dict[str, Any]],
+) -> bool:
+    return base_profile != candidate_profile
+
+
+def _behavior_profile_summary(profile: list[dict[str, Any]]) -> dict[str, Any]:
+    trades = sum(int(item["fingerprint"].get("trades", 0) or 0) for item in profile)
+    returns = [
+        float(item["fingerprint"].get("return", 0.0) or 0.0)
+        for item in profile
+    ]
+    signal_counts: dict[str, int] = {}
+    for item in profile:
+        for signal, entries, *_rest in item["fingerprint"].get("signal_stats", ()):
+            signal_counts[str(signal)] = signal_counts.get(str(signal), 0) + int(entries)
+    return {
+        "window_count": len(profile),
+        "total_trades": trades,
+        "returns": returns,
+        "signal_entries": signal_counts,
+    }
+
+
+def _behavior_diff_payload(
+    base_profile: list[dict[str, Any]],
+    candidate_profile: list[dict[str, Any]],
+) -> dict[str, Any]:
+    changed_windows = [
+        candidate_item["window"]
+        for base_item, candidate_item in zip(base_profile, candidate_profile)
+        if base_item != candidate_item
+    ]
+    if len(base_profile) != len(candidate_profile):
+        changed_windows.append("window_count_mismatch")
+    return {
+        "changed": _behavior_profile_changed(base_profile, candidate_profile),
+        "changed_windows": changed_windows,
+        "base": _behavior_profile_summary(base_profile),
+        "candidate": _behavior_profile_summary(candidate_profile),
+    }
 
 
 # ==================== 候选策略生成 ====================
@@ -1100,6 +1225,33 @@ def _record_exploration_block(
         log_info("研究日志已压缩")
 
 
+def _record_behavioral_noop(
+    *,
+    iteration_id: int,
+    candidate: StrategyCandidate,
+    base_source: str,
+    behavior_diff: dict[str, Any],
+) -> None:
+    append_journal_entry(
+        RUNTIME.paths.journal_file,
+        _build_journal_entry(
+            iteration_id=iteration_id,
+            candidate=candidate,
+            base_source=base_source,
+            candidate_report=None,
+            outcome="behavioral_noop",
+            stop_stage="behavioral_noop",
+            gate_reason="smoke 行为指纹与当前主参考完全一致",
+            note="候选源码有 diff 且可运行，但 smoke 窗口交易行为完全不变；已跳过 full eval。",
+            extra_fields={
+                "behavior_diff": behavior_diff,
+            },
+        ),
+    )
+    if maybe_compact(RUNTIME.paths.journal_file):
+        log_info("研究日志已压缩")
+
+
 def _activate_candidate(candidate: StrategyCandidate) -> None:
     write_strategy_source(RUNTIME.paths.strategy_backup_file, candidate.strategy_code)
     write_strategy_source(RUNTIME.paths.strategy_file, candidate.strategy_code)
@@ -1134,7 +1286,14 @@ def _candidate_with_repair(
     errors: list[str] = []
     for attempt in range(0, max(0, RUNTIME.max_repair_attempts) + 1):
         try:
+            write_strategy_source(RUNTIME.paths.strategy_file, base_source)
+            reload_strategy_module()
+            base_behavior = _smoke_behavior_profile(heartbeat_phase="base_smoke_behavior")
             _smoke_candidate(current)
+            candidate_behavior = _smoke_behavior_profile(heartbeat_phase="candidate_smoke_behavior")
+            behavior_diff = _behavior_diff_payload(base_behavior, candidate_behavior)
+            if not behavior_diff["changed"]:
+                raise CandidateBehavioralNoop(current, behavior_diff)
             report = _evaluate_candidate(current)
             return current, report
         except CandidateRuntimeFailure as exc:
@@ -1294,6 +1453,25 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 candidate,
                 workspace_root=workspace_root,
             )
+        except CandidateBehavioralNoop as exc:
+            write_strategy_source(RUNTIME.paths.strategy_file, best_source)
+            reload_strategy_module()
+            _record_behavioral_noop(
+                iteration_id=iteration_id,
+                candidate=exc.candidate,
+                base_source=best_source,
+                behavior_diff=exc.behavior_diff,
+            )
+            log_info(
+                f"第 {iteration_id} 轮跳过: smoke 行为指纹未变化 "
+                f"(trades={exc.behavior_diff['candidate']['total_trades']})"
+            )
+            write_heartbeat(
+                "iteration_behavioral_noop",
+                message=f"iteration {iteration_id} behavioral noop",
+                gate="smoke 行为指纹与当前主参考完全一致",
+            )
+            return "behavioral_noop"
         except EarlyRejection as exc:
             write_strategy_source(RUNTIME.paths.strategy_file, best_source)
             reload_strategy_module()
@@ -1540,7 +1718,14 @@ def main() -> int:
             continue
 
         if args.once:
-            return 0 if outcome in {"accepted", "rejected", "duplicate_skipped", "runtime_failed", "exploration_blocked"} else 1
+            return 0 if outcome in {
+                "accepted",
+                "rejected",
+                "duplicate_skipped",
+                "behavioral_noop",
+                "runtime_failed",
+                "exploration_blocked",
+            } else 1
 
         write_heartbeat(
             "sleeping",

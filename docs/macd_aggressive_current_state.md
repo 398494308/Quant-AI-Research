@@ -122,6 +122,7 @@
 - journal 里新增 `方向冷却表（系统硬约束）`
 - 防重复规则只保留一份，不再多处复写
 - `edited_regions` 最多 `1-3` 个，系统会用真实 diff / AST 派生的 `system signature` 复核
+- prompt 里的可编辑区域已收紧到当前策略文件真实存在的 `6` 个区域
 
 ## 当前 Discord 口径
 
@@ -146,13 +147,15 @@ Discord 现在优先播报：
 ## 当前运行保护
 
 - `smoke` 先跑少量窗口
+- `smoke` 通过后，还会比对候选和当前参考在 smoke 窗口里的行为指纹
+- 如果收益、交易数、信号统计、退出原因和交易摘要完全一致，会按 `behavioral_noop` 直接跳过完整评估
 - 候选报错时会在同一轮 repair
 - 同簇低变化近邻会在评估前被系统拦截，不再白跑 `smoke/full eval`
 - 被探索硬约束拦截后，会在同一轮里强制重生候选方向
 - 同一方向簇再次触发该机制后，会进入短期冷却锁
 - 冷却锁采用 `3 -> 6 -> 10` 轮递增
 - 低变化近邻判定会同时看真实 diff、参数族变化和 AST 派生结构签名
-- `duplicate source / duplicate hash / empty diff` 会写入 journal
+- `duplicate source / duplicate hash / empty diff / behavioral_noop` 会写入 journal
 - `exploration_blocked` 表示候选在评估前就被系统探索硬约束拒收
 - heartbeat 会写出当前阶段和窗口名
 - provider timeout 默认 `600s`
