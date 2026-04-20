@@ -44,12 +44,13 @@
 5. 主进程校验候选只修改了允许区域。
 6. 先做评估前硬约束检查；如果候选仍然是同簇低变化近邻，或命中锁簇，会在同一轮直接强制重生，而不是白跑评估。
 7. 通过前置检查后，先跑少量 `smoke` 窗口；如果运行报错，会在同一轮进入 repair loop，而不是直接开始下一轮。
-8. `smoke` 通过后，主进程还会对比候选和当前参考在 smoke 窗口里的行为指纹；如果收益、交易数、信号统计、退出原因和交易摘要完全一致，会直接按 `behavioral_noop` 跳过完整评估。
-9. 只有 smoke 行为真的变了，才会继续跑整套 `train walk-forward + val`。
-10. 只有 `gate` 通过，且相对当前 `champion` 的 `promotion_delta` 至少高 `0.02`，才刷新当前主参考。
-11. 如果当前还没有 `gate-passed champion`，而现有基线本身又没过 gate，那么第一条过 gate 的候选会直接晋升为新 `champion`。
-12. 刷新 `champion` 之后，才会额外跑一次隐藏 `test`；它只做验收，不参与 `champion` 选择，也不会喂给模型。
-13. 每轮结果都会写进 journal，包含 `accepted / rejected / duplicate_skipped / behavioral_noop / exploration_blocked / early_rejected / runtime_failed`。
+8. `smoke` 通过后，主进程还会对比候选和当前参考在 smoke 窗口里的行为指纹；如果收益、交易数、信号统计、退出原因和交易摘要完全一致，不会立刻结束本轮，而是把 smoke 摘要回灌给模型，在同一轮里强制重生候选。
+9. 只有连续重生后仍然无法改变 smoke 行为，才会正式记一次 `behavioral_noop`。
+10. 只有 smoke 行为真的变了，才会继续跑整套 `train walk-forward + val`。
+11. 只有 `gate` 通过，且相对当前 `champion` 的 `promotion_delta` 至少高 `0.02`，才刷新当前主参考。
+12. 如果当前还没有 `gate-passed champion`，而现有基线本身又没过 gate，那么第一条过 gate 的候选会直接晋升为新 `champion`。
+13. 刷新 `champion` 之后，才会额外跑一次隐藏 `test`；它只做验收，不参与 `champion` 选择，也不会喂给模型。
+14. 每轮结果都会写进 journal，包含 `accepted / rejected / duplicate_skipped / behavioral_noop / exploration_blocked / early_rejected / runtime_failed`。
 
 ## 当前评分口径
 
@@ -138,6 +139,7 @@
 - 防重复约束只保留一份，不再在多个位置重复同一句规则。
 - 模型可以看到 `val` 的聚合诊断，但完全看不到 `test`。
 - prompt 会明确写出：只有 `gate` 通过且 `promotion_delta > 0.02` 才可能刷新当前 `champion`。
+- 如果候选在 smoke 窗口上的行为完全不变，系统会在同一轮回灌 smoke 摘要并强制重生，而不是直接白白结束整轮。
 - `edited_regions` 现在只允许填 `1-3` 个，而且系统会用真实代码 diff / AST 派生的 `system signature` 复核，不再只信模型自报元信息。
 - prompt 里的可编辑区域已经扩成真实存在的命名规则块，允许模型直接动 `sideways / flow / trend_quality / followthrough / long_entry / short_entry / strategy` 这些结构块。
 - 最近轮次摘要拆成了“核心指标表 + 元信息摘要”，不再用超宽大表。
@@ -154,6 +156,7 @@
 - `MACD_V2_VALIDATION_END_DATE=2025-12-31`
 - `MACD_V2_TEST_START_DATE=2026-01-01`
 - `MACD_V2_TEST_END_DATE=2026-03-31`
+- `MACD_V2_SMOKE_WINDOW_COUNT=5`
 
 滚动窗口：
 
@@ -221,7 +224,8 @@ PY
 - 被拦截后不会立刻浪费下一轮，而是会在同一轮里强制重生候选
 - 如果同一方向簇反复触发该问题，会进入短期冷却锁，默认是 `3 -> 6 -> 10` 轮递增
 - 低变化近邻的判定不再主要靠 `change_tags / edited_regions` 自报，而会同时看真实 diff、参数族变化和 AST 派生的结构签名
-- `smoke` 现在还会比较行为指纹；如果候选和当前参考的 smoke 交易行为完全一致，会按 `behavioral_noop` 直接跳过完整评估
+- `smoke` 默认覆盖 `5` 个窗口，当前会取早 train / val / 中前段 train / 中段 train / 尾段 train
+- `smoke` 现在还会比较行为指纹；如果候选和当前参考的 smoke 交易行为完全一致，会先在同一轮回灌 smoke 摘要并强制重生，只有连续重生后仍不变化才记 `behavioral_noop`
 
 ## Discord 播报说明
 

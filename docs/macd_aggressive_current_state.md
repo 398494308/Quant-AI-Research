@@ -123,6 +123,7 @@ test 验收：
 - 最近轮次拆成“核心指标表 + 元信息摘要”
 - journal 里新增 `方向冷却表（系统硬约束）`
 - 防重复规则只保留一份，不再多处复写
+- 如果候选在 smoke 窗口上的行为完全不变，系统会在同一轮回灌 smoke 摘要并强制重生
 - `edited_regions` 最多 `1-3` 个，系统会用真实 diff / AST 派生的 `system signature` 复核
 - prompt 里的可编辑区域已切到真实存在的命名规则块，能直接改 `sideways / flow / trend_quality / followthrough / long_entry / short_entry / strategy`
 
@@ -135,6 +136,7 @@ Discord 现在只保留：
 - `train+val期间收益`
 - `val期间收益`
 - 新 `champion` 时额外播报 `test期间收益`
+- `Sharpe(train / val / test)`
 - `train+val交易数量`
 - 新 `champion` 时额外播报 `test交易数量`
 - `val多/空捕获`
@@ -142,9 +144,10 @@ Discord 现在只保留：
 
 ## 当前运行保护
 
-- `smoke` 先跑少量窗口
+- `smoke` 默认先跑 `5` 个窗口，当前会取早 train / val / 中前段 train / 中段 train / 尾段 train
 - `smoke` 通过后，还会比对候选和当前参考在 smoke 窗口里的行为指纹
-- 如果收益、交易数、信号统计、退出原因和交易摘要完全一致，会按 `behavioral_noop` 直接跳过完整评估
+- 如果收益、交易数、信号统计、退出原因和交易摘要完全一致，不会立刻结束本轮，而是把 smoke 摘要回灌给模型，在同一轮强制重生候选
+- 只有连续重生后仍然无法改变 smoke 行为，才会正式记一次 `behavioral_noop`
 - 候选报错时会在同一轮 repair
 - 同簇低变化近邻会在评估前被系统拦截，不再白跑 `smoke/full eval`
 - 被探索硬约束拦截后，会在同一轮里强制重生候选方向

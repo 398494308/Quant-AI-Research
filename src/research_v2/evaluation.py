@@ -956,6 +956,7 @@ def _validation_weakest_axis(
 def summarize_hidden_test_result(result: dict[str, Any] | None) -> dict[str, float]:
     trend_report = _trend_report_from_result(result)
     long_trades, short_trades = _trade_side_counts(result)
+    daily_returns = [float(value) for value in (result or {}).get("daily_returns", [])]
     return {
         "shadow_test_score": _period_score(trend_report),
         "shadow_test_trend_capture_score": trend_report.trend_score,
@@ -970,6 +971,8 @@ def summarize_hidden_test_result(result: dict[str, Any] | None) -> dict[str, flo
         "shadow_test_path_return_pct": trend_report.path_return_pct,
         "shadow_test_total_return_pct": float((result or {}).get("return", 0.0)),
         "shadow_test_max_drawdown": float((result or {}).get("max_drawdown", 0.0)),
+        "shadow_test_fee_drag_pct": float((result or {}).get("fee_drag_pct", 0.0)),
+        "shadow_test_sharpe_ratio": _annualized_sharpe(daily_returns),
         "shadow_test_closed_trades": float((result or {}).get("trades", long_trades + short_trades)),
         "shadow_test_long_closed_trades": float(long_trades),
         "shadow_test_short_closed_trades": float(short_trades),
@@ -1015,6 +1018,8 @@ def summarize_evaluation(
     eval_trades = sum(int(item["result"].get("trades", 0)) for item in eval_results)
     validation_trades = int(validation_source.get("trades", validation_results[0]["result"].get("trades", 0) if validation_results else 0))
 
+    eval_daily_path = _collect_daily_path(results, "eval")
+    validation_daily_path = _collect_daily_path(results, "validation")
     eval_path = _collect_trend_path(results, "eval")
     validation_path = _collect_trend_path(results, "validation")
 
@@ -1055,6 +1060,11 @@ def summarize_evaluation(
     selection_closed_trades = int(selection_source.get("trades", selection_long_trades + selection_short_trades))
     validation_weakest_axis = _validation_weakest_axis(validation_trend_report, validation_block_report)
     selection_total_return = float(selection_source.get("return", 0.0))
+    selection_max_drawdown = float(selection_source.get("max_drawdown", 0.0))
+    selection_fee_drag_pct = float(selection_source.get("fee_drag_pct", 0.0))
+    eval_sharpe_ratio = _annualized_sharpe(eval_daily_path.returns)
+    validation_sharpe_ratio = _annualized_sharpe(validation_daily_path.returns)
+    selection_sharpe_ratio = _annualized_sharpe([float(value) for value in selection_source.get("daily_returns", [])])
 
     gate_reasons: list[str] = []
     if development_mean_score < gates.min_development_mean_score:
@@ -1131,6 +1141,7 @@ def summarize_evaluation(
         f"train+val连续到来 / 陪跑 / 掉头: {selection_trend_report.arrival_score:.2f} / {selection_trend_report.escort_score:.2f} / {selection_trend_report.turn_score:.2f}",
         f"train+val连续多头 / 空头捕获: {selection_trend_report.bull_score:.2f} / {selection_trend_report.bear_score:.2f}",
         f"train+val期间收益 / 路径收益: {selection_total_return:.2f}% / {selection_trend_report.path_return_pct:.2f}%",
+        f"Sharpe(train / val / train+val): {eval_sharpe_ratio:.2f} / {validation_sharpe_ratio:.2f} / {selection_sharpe_ratio:.2f}",
         f"train窗口收益均值 / 中位 / P25 / 最差: {eval_avg_return:.2f}% / {eval_median_return:.2f}% / {eval_p25_return:.2f}% / {eval_worst_return:.2f}%",
         f"val窗口收益均值 / 最差: {validation_avg_return:.2f}% / {validation_worst_return:.2f}%",
         f"train/val分数落差: {promotion_gap:.2f}",
@@ -1203,6 +1214,7 @@ def summarize_evaluation(
             f"val期间收益={float(validation_source.get('return', validation_avg_return)):.2f}%，"
             f"最大回撤={worst_drawdown:.2f}%"
         ),
+        f"Sharpe(train/val/train+val)={eval_sharpe_ratio:.2f}/{validation_sharpe_ratio:.2f}/{selection_sharpe_ratio:.2f}",
         (
             f"funding覆盖(train均值/val/train+val)="
             f"{eval_funding_coverage:.0%}/{validation_funding_coverage:.0%}/{selection_funding_coverage:.0%}"
@@ -1297,6 +1309,11 @@ def summarize_evaluation(
         "validation_total_return_pct": float(validation_source.get("return", validation_avg_return)),
         "selection_path_return_pct": selection_trend_report.path_return_pct,
         "selection_total_return_pct": selection_total_return,
+        "selection_max_drawdown": selection_max_drawdown,
+        "selection_fee_drag_pct": selection_fee_drag_pct,
+        "eval_sharpe_ratio": eval_sharpe_ratio,
+        "validation_sharpe_ratio": validation_sharpe_ratio,
+        "selection_sharpe_ratio": selection_sharpe_ratio,
         "combined_path_return_pct": selection_trend_report.path_return_pct,
         "full_period_return_pct": selection_total_return,
         "capture_drop": capture_drop,

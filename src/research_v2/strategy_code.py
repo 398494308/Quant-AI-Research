@@ -102,6 +102,23 @@ PARAM_RELATIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 STRUCTURAL_LITERAL_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,}")
+REQUIRED_FUNCTIONS: tuple[str, ...] = (
+    "_sideways_release_flags",
+    "_is_sideways_regime",
+    "_flow_signal_metrics",
+    "_flow_confirmation_ok",
+    "_flow_entry_ok",
+    "_trend_quality_long",
+    "_trend_quality_short",
+    "_trend_quality_ok",
+    "_trend_followthrough_long",
+    "_trend_followthrough_short",
+    "_trend_followthrough_ok",
+    "_long_entry_signal",
+    "_short_entry_signal",
+    "strategy",
+)
+REQUIRED_FUNCTION_SET = frozenset(REQUIRED_FUNCTIONS)
 
 def load_strategy_source(path: Path) -> str:
     return path.read_text()
@@ -204,6 +221,22 @@ def _editable_region_source_map(source: str, editable_regions: tuple[str, ...]) 
     }
 
 
+def _rebuild_source_from_regions(
+    base_source: str,
+    region_sources: dict[str, str],
+    editable_regions: tuple[str, ...],
+) -> str:
+    normalized_base = normalize_strategy_source(base_source)
+    parts: list[str] = []
+    cursor = 0
+    for start, end, region_name in _editable_spans(normalized_base, editable_regions):
+        parts.append(normalized_base[cursor:start])
+        parts.append(region_sources.get(region_name, normalized_base[start:end]))
+        cursor = end
+    parts.append(normalized_base[cursor:])
+    return normalize_strategy_source("".join(parts))
+
+
 def changed_editable_regions(
     base_source: str,
     candidate_source: str,
@@ -217,6 +250,40 @@ def changed_editable_regions(
         if base_regions.get(region_name, "") != candidate_regions.get(region_name, "")
     ]
     return tuple(changed)
+
+
+def missing_required_functions(source: str) -> tuple[str, ...]:
+    normalized = normalize_strategy_source(source)
+    try:
+        tree = ast.parse(normalized)
+    except SyntaxError as exc:
+        raise StrategySourceError(f"strategy source has syntax error: line {exc.lineno} {exc.msg}") from exc
+    function_names = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
+    return tuple(sorted(REQUIRED_FUNCTION_SET - function_names))
+
+
+def repair_missing_required_functions(
+    base_source: str,
+    candidate_source: str,
+    editable_regions: tuple[str, ...],
+) -> tuple[str, tuple[str, ...]]:
+    normalized_candidate = normalize_strategy_source(candidate_source)
+    missing = missing_required_functions(normalized_candidate)
+    repairable_missing = tuple(
+        function_name
+        for function_name in missing
+        if function_name in editable_regions
+    )
+    if not repairable_missing:
+        return normalized_candidate, ()
+
+    candidate_regions = _editable_region_source_map(normalized_candidate, editable_regions)
+    repaired_source = _rebuild_source_from_regions(
+        base_source,
+        candidate_regions,
+        editable_regions,
+    )
+    return repaired_source, repairable_missing
 
 
 def _function_node_map(source: str, region_names: tuple[str, ...]) -> dict[str, ast.FunctionDef]:
@@ -362,31 +429,11 @@ def validate_editable_region_boundaries(
 
 def validate_strategy_source(source: str) -> None:
     normalized = normalize_strategy_source(source)
-    try:
-        tree = ast.parse(normalized)
-    except SyntaxError as exc:
-        raise StrategySourceError(f"strategy source has syntax error: line {exc.lineno} {exc.msg}") from exc
-
-    function_names = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
-    required_functions = {
-        "_sideways_release_flags",
-        "_is_sideways_regime",
-        "_flow_signal_metrics",
-        "_flow_confirmation_ok",
-        "_flow_entry_ok",
-        "_trend_quality_long",
-        "_trend_quality_short",
-        "_trend_quality_ok",
-        "_trend_followthrough_long",
-        "_trend_followthrough_short",
-        "_trend_followthrough_ok",
-        "_long_entry_signal",
-        "_short_entry_signal",
-        "strategy",
-    }
-    missing_functions = required_functions - function_names
+    missing_functions = missing_required_functions(normalized)
     if missing_functions:
         raise StrategySourceError(f"missing required functions: {sorted(missing_functions)}")
+
+    tree = ast.parse(normalized)
 
     if not any(isinstance(node, ast.Assign) and any(getattr(target, "id", "") == "PARAMS" for target in node.targets) for node in tree.body):
         raise StrategySourceError("missing top-level PARAMS assignment")

@@ -58,23 +58,45 @@ def render_performance_chart(
     output_path: Path,
     title: str,
     subtitle: str,
+    secondary_daily_equity_curve: list[dict[str, Any]] | None = None,
+    secondary_title: str | None = None,
+    secondary_subtitle: str | None = None,
 ) -> Path | None:
     matplotlib, mdates, plt = _load_matplotlib()
     if matplotlib is None or mdates is None or plt is None:
         return None
 
     dates, strategy_nav, market_nav, drawdown = _normalized_series(daily_equity_curve)
+    has_secondary_panel = bool(secondary_daily_equity_curve and len(secondary_daily_equity_curve) >= 2)
+    secondary_dates: list[str] = []
+    secondary_strategy_nav: list[float] = []
+    secondary_market_nav: list[float] = []
+    if has_secondary_panel:
+        secondary_dates, secondary_strategy_nav, secondary_market_nav, _secondary_drawdown = _normalized_series(
+            secondary_daily_equity_curve or []
+        )
 
-    fig, (ax_top, ax_bottom) = plt.subplots(
-        2,
-        1,
-        figsize=(12.8, 7.2),
-        dpi=120,
-        gridspec_kw={"height_ratios": [3.2, 1.2]},
-        sharex=True,
-    )
+    if has_secondary_panel:
+        fig = plt.figure(figsize=(12.8, 10.2), dpi=120)
+        grid = fig.add_gridspec(3, 1, height_ratios=[3.2, 1.2, 2.5])
+        ax_top = fig.add_subplot(grid[0])
+        ax_bottom = fig.add_subplot(grid[1], sharex=ax_top)
+        ax_secondary = fig.add_subplot(grid[2])
+    else:
+        fig, (ax_top, ax_bottom) = plt.subplots(
+            2,
+            1,
+            figsize=(12.8, 7.2),
+            dpi=120,
+            gridspec_kw={"height_ratios": [3.2, 1.2]},
+            sharex=True,
+        )
+        ax_secondary = None
     fig.patch.set_facecolor("#f7f4ed")
-    for axis in (ax_top, ax_bottom):
+    styled_axes = [ax_top, ax_bottom]
+    if ax_secondary is not None:
+        styled_axes.append(ax_secondary)
+    for axis in styled_axes:
         axis.set_facecolor("#fffdf8")
         axis.grid(True, alpha=0.22, color="#7c6a46", linewidth=0.8)
 
@@ -109,6 +131,46 @@ def render_performance_chart(
         color="#5f5648",
         va="bottom",
     )
+    if ax_secondary is not None:
+        secondary_x_values = [mdates.datestr2num(item) for item in secondary_dates]
+        ax_secondary.plot(
+            secondary_x_values,
+            secondary_strategy_nav,
+            color=strategy_color,
+            linewidth=2.2,
+            label="Test Strategy",
+        )
+        ax_secondary.plot(
+            secondary_x_values,
+            secondary_market_nav,
+            color=market_color,
+            linewidth=2.0,
+            alpha=0.92,
+            label="Test BTC",
+        )
+        ax_secondary.legend(loc="upper left", frameon=False)
+        ax_secondary.set_ylabel("Normalized")
+        ax_secondary.set_xlabel("Date")
+        ax_secondary.set_title(
+            secondary_title or "Test Comparison",
+            loc="left",
+            fontsize=12,
+            fontweight="bold",
+        )
+        if secondary_subtitle:
+            ax_secondary.text(
+                0.0,
+                1.02,
+                secondary_subtitle,
+                transform=ax_secondary.transAxes,
+                fontsize=10,
+                color="#5f5648",
+                va="bottom",
+            )
+        secondary_locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
+        secondary_formatter = mdates.ConciseDateFormatter(secondary_locator)
+        ax_secondary.xaxis.set_major_locator(secondary_locator)
+        ax_secondary.xaxis.set_major_formatter(secondary_formatter)
 
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)

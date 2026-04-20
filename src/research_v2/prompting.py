@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from research_v2.journal import ORDINARY_REGION_FAMILIES
+from research_v2.strategy_code import REQUIRED_FUNCTIONS
 
 # ==================== 编辑边界 ====================
 
@@ -25,6 +27,15 @@ EDITABLE_REGIONS = (
     "_short_entry_signal",
     "strategy",
 )
+
+
+def _required_symbol_text() -> str:
+    function_symbols = "、".join(f"`{function_name}()`" for function_name in REQUIRED_FUNCTIONS)
+    return f"`PARAMS`、{function_symbols}"
+
+
+def _ordinary_family_text() -> str:
+    return " / ".join(f"`{family_name}`" for family_name in ORDINARY_REGION_FAMILIES)
 
 
 # ==================== 结构化输出 ====================
@@ -49,7 +60,7 @@ def build_candidate_response_schema() -> dict[str, Any]:
                 "type": "array",
                 "items": {"type": "string", "enum": list(EDITABLE_REGIONS)},
                 "minItems": 1,
-                "maxItems": 3,
+                "maxItems": len(EDITABLE_REGIONS),
             },
             "expected_effects": {
                 "type": "array",
@@ -151,6 +162,8 @@ def build_strategy_research_prompt(
 新增硬性要求：
 - 本轮候选必须改变实际交易路径，而不只是产生源码 diff。
 - 主进程会先比较当前参考与候选在 smoke 窗口上的行为指纹；如果收益、交易数、信号统计、退出原因和交易摘要完全一致，会直接按 `behavioral_noop` 跳过 full eval。
+- 如果候选在 smoke 窗口上的行为完全不变，系统会在同一轮把 smoke 摘要回灌给你并强制重生；只有连续重生后仍然不变，才会记一次 `behavioral_noop`。
+- 如果最近已经连续多次 `behavioral_noop`，本轮默认必须明显加大步长：优先切不同方向簇，或改 `2-3` 个普通 family，而不是继续只调局部门槛。
 - 如果你主要修改 `_trend_followthrough_ok()`、`_trend_quality_ok()` 或 `_flow_confirmation_ok()`，必须确认 `strategy()` 里已有入场路径会实际触达这些变化；否则优先改 `strategy()` 的最终入场路径。
 - `change_plan` 和 `novelty_proof` 必须明确写出预计会新增、删除或移动哪类实际交易，例如早段多头突破、横盘假突破过滤、空头反手、趋势失效退出，而不是只说“提高确认质量”。
 - 当前策略已经拆成命名规则块；优先围绕具体规则块或 path 提出假设，不要再用“顺手补几个条件”的方式做补丁式堆叠。
@@ -211,20 +224,20 @@ def build_strategy_research_prompt(
 - 先读方向风险表；若某方向簇被标为 `SATURATED` / `EXHAUSTED` / `RUNTIME_RISK`，默认不要继续把它当主方向。
 - 再读 `方向冷却表（系统硬约束）`；若某方向簇处于 `COOLING`，本轮系统不会接受该簇，继续沿用只会被评估前拦截。
 - 若出现 `主簇过热（必须先读）`，默认必须切到不同方向簇；只有当你能明确举证“这次会改变不同交易路径”时，才允许留在热簇。
-- 若出现 `探索触发（必须执行）`，本轮必须满足以下至少一项：切换方向簇 / 切换 edited region family / 切换 long-short target。
-- 探索轮允许结果变差，但不允许只换 tag、只换措辞、只拨轻微阈值，或只在同一 edited region family 里做近邻微调。
+- 若出现 `探索触发（必须执行）`，本轮必须满足以下至少一项：切换方向簇 / 切换普通 family / 切换 long-short target。
+- 探索轮允许结果变差，但不允许只换 tag、只换措辞、只拨轻微阈值，或只在同一普通 family 里做近邻微调。
 - 探索轮必须以改变实际交易行为为目标；如果只改后置确认但没有改变最终信号集合，会被系统按行为无变化拒收。
-- 若系统提示“同簇低变化近邻已被拒收”，下一次必须优先切到不同方向簇；若确实留在同簇，至少同时切换 edited region family 与 long-short target 或核心因子家族。
+- 若系统提示“同簇低变化近邻已被拒收”，下一次必须优先切到不同方向簇；若确实留在同簇，至少同时切换普通 family 与 long-short target 或核心因子家族。
 - 若仍借鉴高风险轮次或留在热簇，`novelty_proof` 必须明确说明：本轮与最近失败方向的差异、会改变哪类交易路径、以及至少两个预计会明显变化的关键诊断。
 - 系统会根据真实代码 diff、参数变更族和 AST 结构自动派生 `system signature`；`edited_regions` / `change_tags` 只是你的说明，不能替代真实改动。
 
 硬约束：
 - 只允许修改 `src/strategy_macd_aggressive.py`。
-- 只允许改这些区域：{", ".join(EDITABLE_REGIONS)}。
-- 保留 `PARAMS`、`strategy()`、`_is_sideways_regime()`、`_trend_quality_ok()`、`_trend_followthrough_ok()`、`_long_entry_signal()`、`_short_entry_signal()` 这些符号。
+- 只允许改这些区域：{", ".join(EDITABLE_REGIONS)}；其中 `entry_path` 这个普通 family 包含 `_trend_followthrough_ok()` / `_trend_followthrough_long()` / `_trend_followthrough_short()` / `_long_entry_signal()` / `_short_entry_signal()`。
+- 必须保留这些符号，不允许删除、改名或合并回旧结构：{_required_symbol_text()}。
 - 不要删除、改名或只改一半仍被下游条件复用的共享中间变量；若重构某个布尔变量或上下文变量，必须同步更新全部引用，禁止留下未定义局部变量。
 - 不要引入网络、文件、随机数、外部依赖。
-- 每轮只做一个明确假设，最多改 `1` 到 `3` 个区域。
+- 每轮只做一个明确假设；`strategy()` 与 `PARAMS` 属于特殊区域，可随假设一起修改但不计入普通 family 预算；除它们外，本轮必须从 {_ordinary_family_text()} 中选择 `1-3` 个普通 family，且选中的 family 内可同时修改多个区域。
 - 若改动不包含 `strategy()`，必须在内部确认该 helper 的变化会改变现有 `strategy()` 触发结果；否则本轮应改 `strategy()`。
 - 不要为了显得“有改动”而重写无关逻辑、批量改名、做大面积格式化，或新增与本轮假设无关的分支。
 - 禁止 hard code 针对单个日期、单个窗口、单段行情、固定价格路径或历史结果表做特判。
@@ -288,6 +301,7 @@ def build_strategy_runtime_repair_prompt(
 修复规则：
 - 这是同一轮 repair，不要换研究主题，不要大幅改 hypothesis。
 - 优先做最小必要修复，先保证代码可运行。
+- 若报错涉及缺失 helper / 缺失命名规则块，优先恢复缺失的原函数定义，保留拆分后的结构，不要把多个 helper 合并回旧函数。
 - 若报错涉及 `UnboundLocalError` / `NameError` / 条件变量缺失，优先恢复缺失变量定义，或把该变量的所有引用同步替换到新的等价变量；禁止只修一处而留下半残引用。
 - 除非原标签明显不准确，否则尽量保持 `change_tags`、`edited_regions`、`closest_failed_cluster` 不变。
 - 只允许修改 `src/strategy_macd_aggressive.py` 可编辑区域。
@@ -316,8 +330,10 @@ def build_strategy_exploration_repair_prompt(
     blocked_reason: str,
     locked_clusters: tuple[str, ...],
     regeneration_attempt: int,
+    feedback_note: str = "",
 ) -> str:
     locked_cluster_text = "；".join(locked_clusters) if locked_clusters else "无"
+    feedback_block = f"\n附加反馈（本次必须处理）:\n{feedback_note}\n" if feedback_note else "\n"
     return f"""你正在同一轮里重生候选方向，不是开始新一轮研究。
 
 这是第 {regeneration_attempt} 次同轮重生。目标是：保持本轮总目标不变，但必须绕开系统刚刚拒收的近邻方向，改成一个可进入评估的新方向。
@@ -337,6 +353,7 @@ def build_strategy_exploration_repair_prompt(
 - blocked_cluster: {blocked_cluster}
 - blocked_reason: {blocked_reason}
 - 当前处于冷却锁定的方向簇: {locked_cluster_text}
+{feedback_block}
 
 工作区说明：
 - 当前工作区里的 `src/strategy_macd_aggressive.py` 仍然是刚才被系统拒收的候选版本
@@ -348,14 +365,15 @@ def build_strategy_exploration_repair_prompt(
 - 这不是代码修错；不要只做微小阈值近邻调整然后原样留在被拒簇。
 - 若 `blocked_cluster` 正处于系统冷却中，本轮禁止继续使用该簇。
 - 优先切到不同方向簇。
-- 若确实留在同簇，至少同时切换 edited region family，并切换 long-short target 或核心因子家族；否则系统仍会拒收。
+- 若确实留在同簇，至少同时切换普通 family，并切换 long-short target 或核心因子家族；否则系统仍会拒收。
 - 不要只换 tag、只换措辞、或只补一两条很像的条件。
 - 重生后的候选必须预计改变 smoke 窗口实际交易路径；如果上一版只是 helper / followthrough 变化但没有触发新交易，优先改 `strategy()` 的最终入场路径。
+- 如果附加反馈显示 smoke 窗口的交易数、收益和信号统计完全没变，默认说明你上一版改动没有触达真实交易路径；这次必须优先改能改变最终信号集合或退出集合的规则块，而不是继续只拨不会触发的细阈值。
 - 仍然只允许修改 `src/strategy_macd_aggressive.py` 可编辑区域。
 - 不要引入网络、文件、随机数、外部依赖。
 - 代码仍必须保持简洁、结构化、可读。
 
 输出要求：
 - 仍然只输出 JSON。
-- `novelty_proof` 必须明确说明这次相对刚才被拒方向，具体换了哪一个方向簇/edited region family/long-short target/核心因子家族。
+- `novelty_proof` 必须明确说明这次相对刚才被拒方向，具体换了哪一个方向簇/普通 family/long-short target/核心因子家族。
 """

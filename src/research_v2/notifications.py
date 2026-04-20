@@ -256,6 +256,16 @@ def build_discord_summary_message(
         ("本轮窗口", window_text),
         ("train+val期间收益", f"{selection_return_pct:.2f}%"),
         ("val期间收益", f"{validation_return_pct:.2f}%" if validation_window_count > 0 else "-"),
+        (
+            "Sharpe(train / val / test)",
+            (
+                f"{metrics.get('eval_sharpe_ratio', 0.0):.2f} / "
+                f"{metrics.get('validation_sharpe_ratio', 0.0):.2f} / "
+                f"{shadow_test_metrics.get('shadow_test_sharpe_ratio', 0.0):.2f}"
+            )
+            if shadow_test_metrics is not None
+            else f"{metrics.get('eval_sharpe_ratio', 0.0):.2f} / {metrics.get('validation_sharpe_ratio', 0.0):.2f} / -"
+        ),
         ("train+val交易数量", str(selection_trade_count)),
         (
             "val多/空捕获",
@@ -263,13 +273,24 @@ def build_discord_summary_message(
             f"{metrics.get('validation_bear_capture_score', 0.0):.2f}"
             if validation_window_count > 0 else "-",
         ),
-        ("最大回撤/手续费拖累", f"{metrics['worst_drawdown']:.2f}% / {metrics['avg_fee_drag']:.2f}%"),
+        (
+            "train+val期间回撤/手续费拖累",
+            f"{metrics.get('selection_max_drawdown', metrics.get('worst_drawdown', 0.0)):.2f}% / "
+            f"{metrics.get('selection_fee_drag_pct', metrics.get('avg_fee_drag', 0.0)):.2f}%"
+        ),
     ]
     if shadow_test_metrics is not None:
         rows[4:4] = [
             ("test期间收益", f"{shadow_test_metrics.get('shadow_test_total_return_pct', 0.0):.2f}%"),
             ("test交易数量", str(int(shadow_test_metrics.get("shadow_test_closed_trades", 0.0)))),
         ]
+        rows.append(
+            (
+                "test期间回撤/手续费拖累",
+                f"{shadow_test_metrics.get('shadow_test_max_drawdown', 0.0):.2f}% / "
+                f"{shadow_test_metrics.get('shadow_test_fee_drag_pct', 0.0):.2f}%"
+            )
+        )
 
     parts = [
         f"**{title}**",

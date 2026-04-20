@@ -3,6 +3,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -18,6 +19,7 @@ from codex_exec_client import StrategyClientConfig, StrategyGenerationTransientE
 import freqtrade_macd_aggressive as ft_adapter
 from market_data_catalog import default_market_data_paths
 import scripts.research_macd_aggressive_v2 as research_script
+import strategy_macd_aggressive as strategy_module
 from scripts.research_macd_aggressive_v2 import select_smoke_windows
 from research_v2.config import GateConfig
 from research_v2.evaluation import (
@@ -30,6 +32,7 @@ from research_v2.evaluation import (
 )
 from research_v2.charting import charts_available, render_performance_chart
 from research_v2.journal import (
+    ORDINARY_REGION_FAMILIES,
     build_exploration_guard_state,
     _format_compact_for_prompt,
     build_journal_prompt_summary,
@@ -37,6 +40,8 @@ from research_v2.journal import (
     cluster_key_for_components,
     cluster_key_for_entry,
     evaluate_candidate_exploration_guard,
+    ordinary_region_families,
+    region_families_for_regions,
 )
 from research_v2.notifications import build_discord_summary_message
 from research_v2.prompting import (
@@ -46,10 +51,12 @@ from research_v2.prompting import (
     build_strategy_research_prompt,
 )
 from research_v2.strategy_code import (
+    REQUIRED_FUNCTIONS,
     StrategyCandidate,
     StrategyCoreFactor,
     StrategySourceError,
     build_system_edit_signature,
+    repair_missing_required_functions,
     validate_editable_region_boundaries,
     validate_strategy_source,
 )
@@ -565,6 +572,48 @@ class EvaluationFixesTest(unittest.TestCase):
 
 
 class StrategyValidationFixesTest(unittest.TestCase):
+    def test_live_strategy_source_validates(self):
+        source = (REPO_ROOT / "src/strategy_macd_aggressive.py").read_text()
+
+        validate_strategy_source(source)
+
+    def test_backup_strategy_source_validates(self):
+        source = (REPO_ROOT / "backups/strategy_macd_aggressive_v2_best.py").read_text()
+
+        validate_strategy_source(source)
+
+    def test_is_sideways_regime_handles_bull_front_run_path(self):
+        market_state = {
+            "ema_fast": 101.5,
+            "ema_slow": 100.0,
+            "prev_ema_slow": 99.8,
+            "hourly": {"trend_spread_pct": 0.01, "adx": 18.0},
+            "four_hour": {"trend_spread_pct": 0.01, "adx": 16.0},
+            "atr_ratio": 0.01,
+        }
+        release_flags = {
+            "intraday_spread": 0.02,
+            "hourly_spread": 0.01,
+            "fourh_spread": 0.01,
+            "hourly_slope": 0.0002,
+            "fourh_slope": 0.0001,
+            "intraday_chop": 45.0,
+            "hourly_chop": 54.0,
+            "atr_ratio": 0.01,
+            "adx_soft": False,
+            "aligned_trend": True,
+            "convexity_release": False,
+            "trend_awakening": False,
+            "fresh_directional_expansion": False,
+            "exhausted_drift": False,
+            "hard_sideways": False,
+        }
+
+        with mock.patch.object(strategy_module, "_sideways_release_flags", return_value=release_flags):
+            result = strategy_module._is_sideways_regime(market_state)
+
+        self.assertIsInstance(result, bool)
+
     def test_validate_strategy_source_accepts_new_flow_params(self):
         source = """
 # PARAMS_START
@@ -782,12 +831,128 @@ def strategy(*args, **kwargs):
 
         validate_editable_region_boundaries(base_source, candidate_source, EDITABLE_REGIONS)
 
+    def test_repair_missing_required_functions_restores_deleted_helpers_from_base(self):
+        base_source = """
+# PARAMS_START
+PARAMS = {'intraday_adx_min': 10}
+# PARAMS_END
+
+def helper():
+    return 1
+
+def _sideways_release_flags(*args, **kwargs):
+    return {}
+
+def _is_sideways_regime(*args, **kwargs):
+    return False
+
+def _flow_signal_metrics(*args, **kwargs):
+    return {'bias': 0.0}
+
+def _flow_confirmation_ok(*args, **kwargs):
+    return True
+
+def _flow_entry_ok(*args, **kwargs):
+    return True
+
+def _trend_quality_long(*args, **kwargs):
+    return True
+
+def _trend_quality_short(*args, **kwargs):
+    return True
+
+def _trend_quality_ok(*args, **kwargs):
+    return True
+
+def _trend_followthrough_long(*args, **kwargs):
+    return True
+
+def _trend_followthrough_short(*args, **kwargs):
+    return True
+
+def _trend_followthrough_ok(*args, **kwargs):
+    return True
+
+def _long_entry_signal(*args, **kwargs):
+    return False
+
+def _short_entry_signal(*args, **kwargs):
+    return False
+
+def strategy(*args, **kwargs):
+    return helper()
+"""
+        candidate_source = """
+# PARAMS_START
+PARAMS = {'intraday_adx_min': 12}
+# PARAMS_END
+
+def helper():
+    return 1
+
+def _is_sideways_regime(*args, **kwargs):
+    return False
+
+def _flow_confirmation_ok(*args, **kwargs):
+    return True
+
+def _trend_quality_ok(*args, **kwargs):
+    return True
+
+def _trend_followthrough_ok(*args, **kwargs):
+    return True
+
+def strategy(*args, **kwargs):
+    return None
+"""
+        repaired_source, restored_functions = repair_missing_required_functions(
+            base_source,
+            candidate_source,
+            EDITABLE_REGIONS,
+        )
+
+        self.assertIn("_sideways_release_flags", restored_functions)
+        self.assertIn("_long_entry_signal", restored_functions)
+        validate_strategy_source(repaired_source)
+        validate_editable_region_boundaries(base_source, repaired_source, EDITABLE_REGIONS)
+        self.assertIn("PARAMS = {'intraday_adx_min': 12}", repaired_source)
+        self.assertIn("def strategy(*args, **kwargs):\n    return None", repaired_source)
+
 
 class JournalPromptFixesTest(unittest.TestCase):
-    def test_candidate_schema_limits_edited_regions_to_three(self):
+    def _minimal_strategy_source(self):
+        body_by_function = {
+            "_sideways_release_flags": "return {}",
+            "_is_sideways_regime": "return False",
+            "_flow_signal_metrics": "return {}",
+            "_flow_confirmation_ok": "return True",
+            "_flow_entry_ok": "return True",
+            "_trend_quality_long": "return True",
+            "_trend_quality_short": "return True",
+            "_trend_quality_ok": "return True",
+            "_trend_followthrough_long": "return True",
+            "_trend_followthrough_short": "return True",
+            "_trend_followthrough_ok": "return True",
+            "_long_entry_signal": "return None",
+            "_short_entry_signal": "return None",
+            "strategy": "return None",
+        }
+        blocks = [
+            "# PARAMS_START",
+            "PARAMS = {'breakout_volume_ratio_min': 1.0}",
+            "# PARAMS_END",
+            "",
+        ]
+        for function_name in REQUIRED_FUNCTIONS:
+            blocks.append(f"def {function_name}(*args, **kwargs):")
+            blocks.append(f"    {body_by_function[function_name]}")
+            blocks.append("")
+        return "\n".join(blocks)
+
+    def test_candidate_schema_allows_listing_all_touched_regions(self):
         schema = build_candidate_response_schema()
 
-        self.assertEqual(schema["properties"]["edited_regions"]["maxItems"], 3)
+        self.assertEqual(schema["properties"]["edited_regions"]["maxItems"], len(EDITABLE_REGIONS))
 
     def test_build_strategy_prompt_mentions_15m_single_source_and_flow(self):
         prompt = build_strategy_research_prompt(
@@ -799,6 +964,28 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("15m` 是唯一事实源", prompt)
         self.assertIn("方向流量代理", prompt)
         self.assertIn("promotion_delta > 0.02", prompt)
+
+    def test_build_strategy_prompt_mentions_all_required_symbols(self):
+        prompt = build_strategy_research_prompt(
+            evaluation_summary="诊断",
+            journal_summary="记忆",
+            previous_best_score=1.23,
+        )
+
+        for function_name in REQUIRED_FUNCTIONS:
+            self.assertIn(f"`{function_name}()`", prompt)
+
+    def test_build_strategy_prompt_mentions_ordinary_family_budget(self):
+        prompt = build_strategy_research_prompt(
+            evaluation_summary="诊断",
+            journal_summary="记忆",
+            previous_best_score=1.23,
+        )
+
+        self.assertIn("`strategy()` 与 `PARAMS` 属于特殊区域", prompt)
+        for family_name in ORDINARY_REGION_FAMILIES:
+            self.assertIn(f"`{family_name}`", prompt)
+        self.assertIn("选择 `1-3` 个普通 family", prompt)
 
     def test_build_strategy_exploration_repair_prompt_mentions_blocked_cluster(self):
         prompt = build_strategy_exploration_repair_prompt(
@@ -820,6 +1007,120 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("blocked_cluster: ownership_cluster", prompt)
         self.assertIn("ownership_cluster(剩余3轮)", prompt)
         self.assertIn("必须绕开系统刚刚拒收的近邻方向", prompt)
+
+    def test_build_strategy_exploration_repair_prompt_mentions_feedback_note(self):
+        prompt = build_strategy_exploration_repair_prompt(
+            candidate_id="candidate_1",
+            hypothesis="继续优化多头上车",
+            change_plan="调整 ownership 方向过滤",
+            change_tags=("ownership_takeover", "acceptance_continuity"),
+            edited_regions=("strategy",),
+            expected_effects=("提高多头到来阶段捕获",),
+            closest_failed_cluster="ownership_cluster",
+            novelty_proof="和最近失败方向相比，这次会换交易路径。",
+            block_kind="behavioral_noop",
+            blocked_cluster="ownership_cluster",
+            blocked_reason="smoke 行为指纹未变化",
+            locked_clusters=(),
+            regeneration_attempt=1,
+            feedback_note="- smoke窗口: train1, val1, train14\n- 最近连续 behavioral_noop: 2",
+        )
+
+        self.assertIn("附加反馈（本次必须处理）", prompt)
+        self.assertIn("最近连续 behavioral_noop: 2", prompt)
+
+    def test_region_family_mapping_merges_entry_path_blocks(self):
+        region_families = region_families_for_regions(
+            ("_trend_followthrough_long", "_short_entry_signal", "_flow_entry_ok", "strategy", "PARAMS")
+        )
+
+        self.assertEqual(region_families, ("entry_path", "flow", "strategy", "params"))
+        self.assertEqual(ordinary_region_families(region_families), ("entry_path", "flow"))
+
+    def test_candidate_from_payload_rejects_strategy_without_ordinary_family(self):
+        base_source = self._minimal_strategy_source()
+        candidate_source = base_source.replace(
+            "def strategy(*args, **kwargs):\n    return None\n",
+            "def strategy(*args, **kwargs):\n    return 1\n",
+            1,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_strategy_file = Path(temp_dir) / "src/strategy_macd_aggressive.py"
+            workspace_strategy_file.parent.mkdir(parents=True, exist_ok=True)
+            workspace_strategy_file.write_text(candidate_source)
+
+            payload = {
+                "candidate_id": "candidate_only_strategy",
+                "hypothesis": "只改最终入场",
+                "change_plan": "调整 strategy",
+                "closest_failed_cluster": "ownership_cluster",
+                "novelty_proof": "这次会改变交易路径。",
+                "change_tags": ["ownership_takeover"],
+                "edited_regions": ["strategy"],
+                "expected_effects": ["提高多头上车"],
+                "core_factors": [],
+            }
+
+            with self.assertRaisesRegex(StrategySourceError, "strategy/PARAMS alone are not enough"):
+                research_script._candidate_from_payload(
+                    payload,
+                    workspace_strategy_file=workspace_strategy_file,
+                    base_source=base_source,
+                )
+
+    def test_candidate_from_payload_rejects_more_than_three_ordinary_families(self):
+        base_source = self._minimal_strategy_source()
+        candidate_source = base_source
+        candidate_source = candidate_source.replace(
+            "def _is_sideways_regime(*args, **kwargs):\n    return False\n",
+            "def _is_sideways_regime(*args, **kwargs):\n    return True\n",
+            1,
+        )
+        candidate_source = candidate_source.replace(
+            "def _flow_confirmation_ok(*args, **kwargs):\n    return True\n",
+            "def _flow_confirmation_ok(*args, **kwargs):\n    return False\n",
+            1,
+        )
+        candidate_source = candidate_source.replace(
+            "def _trend_quality_ok(*args, **kwargs):\n    return True\n",
+            "def _trend_quality_ok(*args, **kwargs):\n    return False\n",
+            1,
+        )
+        candidate_source = candidate_source.replace(
+            "def _long_entry_signal(*args, **kwargs):\n    return None\n",
+            "def _long_entry_signal(*args, **kwargs):\n    return True\n",
+            1,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_strategy_file = Path(temp_dir) / "src/strategy_macd_aggressive.py"
+            workspace_strategy_file.parent.mkdir(parents=True, exist_ok=True)
+            workspace_strategy_file.write_text(candidate_source)
+
+            payload = {
+                "candidate_id": "candidate_four_families",
+                "hypothesis": "一次覆盖四个普通 family",
+                "change_plan": "同时调整横盘、流量、质量和入场路径",
+                "closest_failed_cluster": "ownership_cluster",
+                "novelty_proof": "这次会改变交易路径。",
+                "change_tags": ["ownership_takeover"],
+                "edited_regions": [
+                    "_is_sideways_regime",
+                    "_flow_confirmation_ok",
+                    "_trend_quality_ok",
+                    "_long_entry_signal",
+                ],
+                "expected_effects": ["提高多头上车"],
+                "core_factors": [],
+            }
+
+            with self.assertRaisesRegex(StrategySourceError, "ordinary region families exceed 3"):
+                research_script._candidate_from_payload(
+                    payload,
+                    workspace_strategy_file=workspace_strategy_file,
+                    base_source=base_source,
+                )
 
     def test_cluster_for_tags_groups_ownership_variants(self):
         self.assertEqual(cluster_for_tags(["acceptance_continuity", "ownership_transfer"]), "ownership_cluster")
@@ -1677,6 +1978,23 @@ class SmokeWindowSelectionTest(unittest.TestCase):
 
         self.assertEqual([window.label for window in selected], ["train1", "val1", "train3"])
 
+    def test_select_smoke_windows_spreads_coverage_when_count_is_five(self):
+        Window = type("Window", (), {})
+        windows = []
+        for idx in range(1, 27):
+            window = Window()
+            window.group = "eval"
+            window.label = f"train{idx}"
+            windows.append(window)
+        validation = Window()
+        validation.group = "validation"
+        validation.label = "val1"
+        windows.append(validation)
+
+        selected = select_smoke_windows(windows, 5)
+
+        self.assertEqual([window.label for window in selected], ["train1", "val1", "train9", "train14", "train26"])
+
 
 class CodexExecClientTest(unittest.TestCase):
     def test_generate_json_object_emits_progress_heartbeats(self):
@@ -1882,6 +2200,73 @@ class ReferenceStateFixesTest(unittest.TestCase):
         self.assertTrue(accepted)
         self.assertIn("首个 gate-passed champion", reason)
 
+    def test_initialize_best_state_falls_back_when_saved_reference_source_is_invalid(self):
+        valid_source = (REPO_ROOT / "src/strategy_macd_aggressive.py").read_text()
+        invalid_saved_source = valid_source.replace("def _flow_entry_ok(", "def _flow_entry_missing(", 1)
+        report = EvaluationReport(
+            metrics={"promotion_score": 0.31, "quality_score": 0.22},
+            gate_passed=False,
+            gate_reason="baseline",
+            summary_text="summary",
+            prompt_summary_text="prompt summary",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            temp_paths = replace(
+                research_script.RUNTIME.paths,
+                repo_root=temp_root,
+                strategy_file=temp_root / "src/strategy_macd_aggressive.py",
+                log_file=temp_root / "logs/research.log",
+                journal_file=temp_root / "state/journal.jsonl",
+                heartbeat_file=temp_root / "state/heartbeat.json",
+                best_state_file=temp_root / "state/best.json",
+                best_strategy_file=temp_root / "backups/best.py",
+                stop_file=temp_root / "state/stop",
+                strategy_backup_file=temp_root / "backups/candidate.py",
+            )
+            temp_runtime = replace(research_script.RUNTIME, paths=temp_paths)
+            temp_paths.strategy_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_paths.best_strategy_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_paths.best_state_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_paths.strategy_file.write_text(valid_source)
+            temp_paths.best_strategy_file.write_text(invalid_saved_source)
+            temp_paths.best_state_file.write_text(
+                json.dumps(
+                    {
+                        "score_regime": research_script.SCORE_REGIME,
+                        "reference_role": "champion",
+                        "reference": {"code_hash": "bad-source"},
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+            with mock.patch.object(research_script, "RUNTIME", temp_runtime), mock.patch.object(
+                research_script, "best_source", ""
+            ), mock.patch.object(research_script, "best_report", None), mock.patch.object(
+                research_script, "champion_report", None
+            ), mock.patch.object(research_script, "reload_strategy_module"), mock.patch.object(
+                research_script, "evaluate_current_strategy", return_value=report
+            ) as evaluate_current_strategy, mock.patch.object(
+                research_script, "maybe_send_discord"
+            ), mock.patch.object(
+                research_script, "build_discord_summary_message", return_value="msg"
+            ), mock.patch.object(
+                research_script, "write_heartbeat"
+            ), mock.patch.object(
+                research_script, "log_info"
+            ) as log_info:
+                research_script.initialize_best_state()
+                self.assertEqual(research_script.best_source, valid_source)
+                self.assertIs(research_script.best_report, report)
+                self.assertIsNone(research_script.champion_report)
+
+            self.assertEqual(temp_paths.best_strategy_file.read_text(), valid_source)
+            self.assertEqual(evaluate_current_strategy.call_count, 1)
+            log_messages = [call.args[0] for call in log_info.call_args_list if call.args]
+            self.assertTrue(any("已保存主参考无效" in message for message in log_messages))
+
 
 class DiscordSummaryFormattingTest(unittest.TestCase):
     def test_discord_summary_uses_comparable_eval_validation_rows(self):
@@ -1921,7 +2306,11 @@ class DiscordSummaryFormattingTest(unittest.TestCase):
                 "segment_hit_rate": 0.50,
                 "major_segment_count": 22.0,
                 "selection_total_return_pct": 123.4,
+                "selection_max_drawdown": 16.4,
+                "selection_fee_drag_pct": 1.4,
                 "selection_closed_trades": 123.0,
+                "eval_sharpe_ratio": 1.11,
+                "validation_sharpe_ratio": 0.56,
                 "eval_avg_return": 1.23,
                 "validation_total_return_pct": 34.5,
                 "overfit_risk_score": 20.0,
@@ -1953,14 +2342,59 @@ class DiscordSummaryFormattingTest(unittest.TestCase):
         self.assertIn("本轮窗口", message)
         self.assertIn("train+val期间收益", message)
         self.assertIn("val期间收益", message)
+        self.assertIn("Sharpe(train / val / test)", message)
+        self.assertIn("1.11 / 0.56 / -", message)
         self.assertIn("train+val交易数量", message)
         self.assertIn("val多/空捕获", message)
-        self.assertIn("最大回撤/手续费拖累", message)
+        self.assertIn("train+val期间回撤/手续费拖累", message)
         self.assertIn("test 仅新 champion 时运行", message)
         self.assertNotIn("train滚动分", message)
         self.assertNotIn("val趋势/收益分", message)
         self.assertNotIn("train+val趋势/收益分", message)
         self.assertNotIn("test期间收益", message)
+        self.assertNotIn("最大回撤/手续费拖累", message)
+
+    def test_discord_summary_shows_test_drawdown_and_fee_when_test_metrics_present(self):
+        report = EvaluationReport(
+            metrics={
+                "selection_total_return_pct": 12.3,
+                "selection_closed_trades": 18.0,
+                "validation_total_return_pct": 4.5,
+                "eval_sharpe_ratio": 0.88,
+                "validation_sharpe_ratio": 0.42,
+                "validation_bull_capture_score": 0.05,
+                "validation_bear_capture_score": 0.44,
+                "selection_max_drawdown": 18.2,
+                "selection_fee_drag_pct": 1.8,
+            },
+            gate_passed=True,
+            gate_reason="通过",
+            summary_text="",
+            prompt_summary_text="",
+        )
+
+        message = build_discord_summary_message(
+            title="test",
+            report=report,
+            eval_window_count=29,
+            validation_window_count=1,
+            test_window_count=1,
+            data_range_text="train 2023-07-01~2024-12-31 / val 2025-01-01~2025-12-31 / test 2026-01-01~2026-03-31",
+            shadow_test_metrics={
+                "shadow_test_total_return_pct": 3.21,
+                "shadow_test_closed_trades": 9.0,
+                "shadow_test_max_drawdown": 7.4,
+                "shadow_test_fee_drag_pct": 0.6,
+                "shadow_test_sharpe_ratio": 0.35,
+            },
+        )
+
+        self.assertIn("test期间收益", message)
+        self.assertIn("test交易数量", message)
+        self.assertIn("test期间回撤/手续费拖累", message)
+        self.assertIn("Sharpe(train / val / test)", message)
+        self.assertIn("0.88 / 0.42 / 0.35", message)
+        self.assertIn("7.40% / 0.60%", message)
 
 
 class ChartRenderingTest(unittest.TestCase):
@@ -1982,6 +2416,39 @@ class ChartRenderingTest(unittest.TestCase):
                 output_path=output_path,
                 title="Test",
                 subtitle="Window",
+            )
+
+            self.assertEqual(result, output_path)
+            self.assertTrue(output_path.exists())
+            self.assertGreater(output_path.stat().st_size, 0)
+            self.assertEqual(output_path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_render_performance_chart_writes_png_with_secondary_test_panel(self):
+        if not charts_available():
+            self.skipTest("matplotlib not installed for current interpreter")
+
+        validation_curve = [
+            {"date": "2026-01-01", "equity": 100000.0, "market_close": 50000.0},
+            {"date": "2026-01-02", "equity": 103000.0, "market_close": 51000.0},
+            {"date": "2026-01-03", "equity": 101000.0, "market_close": 50800.0},
+            {"date": "2026-01-04", "equity": 108000.0, "market_close": 52000.0},
+        ]
+        test_curve = [
+            {"date": "2026-02-01", "equity": 100000.0, "market_close": 52000.0},
+            {"date": "2026-02-02", "equity": 98000.0, "market_close": 51500.0},
+            {"date": "2026-02-03", "equity": 104000.0, "market_close": 53000.0},
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "chart_with_test.png"
+            result = render_performance_chart(
+                daily_equity_curve=validation_curve,
+                output_path=output_path,
+                title="Validation",
+                subtitle="Val Window",
+                secondary_daily_equity_curve=test_curve,
+                secondary_title="Test",
+                secondary_subtitle="Test Window",
             )
 
             self.assertEqual(result, output_path)

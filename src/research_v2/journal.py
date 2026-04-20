@@ -69,6 +69,11 @@ SHORT_TARGET_KEYWORDS = (
     "下跌",
     "做空",
 )
+SPECIAL_REGION_NAMES = frozenset({"PARAMS", "strategy"})
+SPECIAL_REGION_FAMILIES = ("params", "strategy")
+SPECIAL_REGION_FAMILY_SET = frozenset(SPECIAL_REGION_FAMILIES)
+ORDINARY_REGION_FAMILIES = ("sideways", "flow", "trend_quality", "entry_path")
+ORDINARY_REGION_FAMILY_SET = frozenset(ORDINARY_REGION_FAMILIES)
 
 
 # ==================== 基础读写 ====================
@@ -230,11 +235,11 @@ def region_families_for_regions(regions: list[str] | tuple[str, ...]) -> tuple[s
         "_trend_quality_ok": "trend_quality",
         "_trend_quality_long": "trend_quality",
         "_trend_quality_short": "trend_quality",
-        "_trend_followthrough_ok": "followthrough",
-        "_trend_followthrough_long": "followthrough",
-        "_trend_followthrough_short": "followthrough",
-        "_long_entry_signal": "long_entry",
-        "_short_entry_signal": "short_entry",
+        "_trend_followthrough_ok": "entry_path",
+        "_trend_followthrough_long": "entry_path",
+        "_trend_followthrough_short": "entry_path",
+        "_long_entry_signal": "entry_path",
+        "_short_entry_signal": "entry_path",
         "strategy": "strategy",
     }
     normalized = []
@@ -243,6 +248,38 @@ def region_families_for_regions(regions: list[str] | tuple[str, ...]) -> tuple[s
         family = family_map.get(name, name)
         if family and family not in normalized:
             normalized.append(family)
+    return tuple(normalized)
+
+
+def ordinary_region_families(region_families: list[str] | tuple[str, ...] | set[str]) -> tuple[str, ...]:
+    normalized = []
+    for family in region_families:
+        family_name = str(family).strip()
+        if family_name in ORDINARY_REGION_FAMILY_SET and family_name not in normalized:
+            normalized.append(family_name)
+    return tuple(normalized)
+
+
+def special_region_families(region_families: list[str] | tuple[str, ...] | set[str]) -> tuple[str, ...]:
+    normalized = []
+    for family in region_families:
+        family_name = str(family).strip()
+        if family_name in SPECIAL_REGION_FAMILY_SET and family_name not in normalized:
+            normalized.append(family_name)
+    return tuple(normalized)
+
+
+def ordinary_changed_regions(regions: list[str] | tuple[str, ...] | set[str]) -> tuple[str, ...]:
+    normalized = []
+    for region in regions:
+        region_name = str(region).strip()
+        if not region_name or region_name in SPECIAL_REGION_NAMES:
+            continue
+        region_families = region_families_for_regions((region_name,))
+        if not region_families:
+            continue
+        if region_families[0] in ORDINARY_REGION_FAMILY_SET and region_name not in normalized:
+            normalized.append(region_name)
     return tuple(normalized)
 
 
@@ -284,6 +321,35 @@ def exploration_signature_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
         for item in stored_changed_regions
         if str(item).strip()
     }
+    stored_ordinary_region_families = entry.get("system_ordinary_region_families", []) or entry.get("ordinary_region_families", [])
+    if stored_ordinary_region_families:
+        ordinary_region_family_set = {
+            str(item).strip()
+            for item in stored_ordinary_region_families
+            if str(item).strip()
+        }
+    else:
+        ordinary_region_family_set = set(ordinary_region_families(region_families))
+
+    stored_special_region_families = entry.get("system_special_region_families", []) or entry.get("special_region_families", [])
+    if stored_special_region_families:
+        special_region_family_set = {
+            str(item).strip()
+            for item in stored_special_region_families
+            if str(item).strip()
+        }
+    else:
+        special_region_family_set = set(special_region_families(region_families))
+
+    stored_ordinary_changed_regions = entry.get("system_ordinary_changed_regions", []) or entry.get("ordinary_changed_regions", [])
+    if stored_ordinary_changed_regions:
+        ordinary_changed_region_set = {
+            str(item).strip()
+            for item in stored_ordinary_changed_regions
+            if str(item).strip()
+        }
+    else:
+        ordinary_changed_region_set = set(ordinary_changed_regions(changed_regions))
 
     stored_target = str(entry.get("target_family", "")).strip()
     if stored_target:
@@ -329,6 +395,9 @@ def exploration_signature_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
         },
         "region_families": set(region_families),
         "changed_regions": changed_regions,
+        "ordinary_region_families": ordinary_region_family_set,
+        "special_region_families": special_region_family_set,
+        "ordinary_changed_regions": ordinary_changed_region_set,
         "target_family": target_family,
         "core_factor_names": core_factor_names,
         "param_families": param_families,
@@ -382,6 +451,10 @@ def exploration_signature_for_candidate(
         structural_tokens = set()
         signature_hash = ""
 
+    ordinary_region_family_set = set(ordinary_region_families(region_families))
+    special_region_family_set = set(special_region_families(region_families))
+    ordinary_changed_region_set = set(ordinary_changed_regions(changed_regions))
+
     return {
         "cluster_key": cluster_key_for_components(
             getattr(candidate, "closest_failed_cluster", ""),
@@ -394,6 +467,9 @@ def exploration_signature_for_candidate(
         },
         "region_families": region_families,
         "changed_regions": changed_regions,
+        "ordinary_region_families": ordinary_region_family_set,
+        "special_region_families": special_region_family_set,
+        "ordinary_changed_regions": ordinary_changed_region_set,
         "target_family": target_family_from_text(
             getattr(candidate, "change_tags", ()),
             getattr(candidate, "hypothesis", ""),
@@ -887,6 +963,9 @@ def _same_cluster_low_change_context(entries: list[dict[str, Any]], score_regime
     tag_union: set[str] = set()
     region_families: set[str] = set()
     changed_regions: set[str] = set()
+    ordinary_region_families_set: set[str] = set()
+    special_region_families_set: set[str] = set()
+    ordinary_changed_regions_set: set[str] = set()
     target_families: set[str] = set()
     core_factor_names: set[str] = set()
     param_families: set[str] = set()
@@ -899,6 +978,9 @@ def _same_cluster_low_change_context(entries: list[dict[str, Any]], score_regime
         tag_union.update(signature["tags"])
         region_families.update(signature["region_families"])
         changed_regions.update(signature["changed_regions"])
+        ordinary_region_families_set.update(signature["ordinary_region_families"])
+        special_region_families_set.update(signature["special_region_families"])
+        ordinary_changed_regions_set.update(signature["ordinary_changed_regions"])
         if signature["target_family"] not in {"", "unknown"}:
             target_families.add(signature["target_family"])
         core_factor_names.update(signature["core_factor_names"])
@@ -914,6 +996,9 @@ def _same_cluster_low_change_context(entries: list[dict[str, Any]], score_regime
         "tag_union": tag_union,
         "region_families": region_families,
         "changed_regions": changed_regions,
+        "ordinary_region_families": ordinary_region_families_set,
+        "special_region_families": special_region_families_set,
+        "ordinary_changed_regions": ordinary_changed_regions_set,
         "target_families": target_families,
         "core_factor_names": core_factor_names,
         "param_families": param_families,
@@ -926,8 +1011,8 @@ def _candidate_has_structural_novelty(
     candidate_signature: dict[str, Any],
     low_change_context: dict[str, Any],
 ) -> bool:
-    candidate_regions = candidate_signature["region_families"]
-    candidate_changed_regions = candidate_signature["changed_regions"]
+    candidate_regions = candidate_signature["ordinary_region_families"]
+    candidate_changed_regions = candidate_signature["ordinary_changed_regions"]
     candidate_target = candidate_signature["target_family"]
     candidate_factors = candidate_signature["core_factor_names"]
     candidate_tags = candidate_signature["tags"]
@@ -935,23 +1020,23 @@ def _candidate_has_structural_novelty(
     candidate_structural_tokens = candidate_signature["structural_tokens"]
     candidate_signature_hash = candidate_signature["signature_hash"]
 
-    if candidate_regions and not candidate_regions.issubset(low_change_context["region_families"]):
+    if candidate_regions and not candidate_regions.issubset(low_change_context["ordinary_region_families"]):
         return True
-    if candidate_changed_regions and not candidate_changed_regions.issubset(low_change_context["changed_regions"]):
+    if candidate_changed_regions and not candidate_changed_regions.issubset(low_change_context["ordinary_changed_regions"]):
         return True
     if candidate_target in {"long", "short"} and candidate_target not in low_change_context["target_families"]:
         return True
     if candidate_factors - low_change_context["core_factor_names"]:
         return True
-    if candidate_param_families - low_change_context["param_families"]:
+    if candidate_regions and candidate_param_families - low_change_context["param_families"]:
         return True
     if candidate_signature_hash and candidate_signature_hash in low_change_context["signature_hashes"]:
         return False
-    if candidate_structural_tokens:
+    if candidate_regions and candidate_structural_tokens:
         overlap_ratio = len(candidate_structural_tokens & low_change_context["structural_tokens"]) / max(len(candidate_structural_tokens), 1)
         if len(candidate_structural_tokens) >= 4 and overlap_ratio <= STRUCTURAL_TOKEN_NOVELTY_MAX_OVERLAP:
             return True
-    if candidate_tags:
+    if candidate_regions and candidate_tags:
         overlap_ratio = len(candidate_tags & low_change_context["tag_union"]) / max(len(candidate_tags), 1)
         if len(candidate_tags) >= 2 and overlap_ratio <= TAG_NOVELTY_MAX_OVERLAP:
             return True
@@ -1076,8 +1161,8 @@ def evaluate_candidate_exploration_guard(
         "lock_expires_before_iteration": lock_expires_before_iteration,
         "low_change_cluster": candidate_cluster,
         "low_change_tags": tuple(sorted(low_change_context["tag_union"])),
-        "low_change_regions": tuple(sorted(low_change_context["region_families"])),
-        "low_change_changed_regions": tuple(sorted(low_change_context["changed_regions"])),
+        "low_change_regions": tuple(sorted(low_change_context["ordinary_region_families"])),
+        "low_change_changed_regions": tuple(sorted(low_change_context["ordinary_changed_regions"])),
         "low_change_targets": tuple(sorted(low_change_context["target_families"])),
         "low_change_factors": tuple(sorted(low_change_context["core_factor_names"])),
         "low_change_param_families": tuple(sorted(low_change_context["param_families"])),
@@ -1315,7 +1400,7 @@ def _exploration_trigger_lines(entries: list[dict[str, Any]], limit: int) -> lis
             f"最近 {LOW_CHANGE_STREAK} 轮都没有产生有效代码改动或 smoke 交易行为变化，已按重复探索记入历史。",
             f"- 重复原因：{'；'.join(reasons[:limit]) or '-'}",
             f"- 近期近邻方向簇：{', '.join(clusters[:limit]) or '-'}；标签：{', '.join(tags[:limit]) or '-'}；高频区域：{', '.join(regions[:limit]) or '-'}",
-            "- 下一轮必须先产出有效 diff，并且必须改变 smoke 窗口的实际交易路径；若继续沿用相近方向，至少切换方向簇、edited region family、long-short target 中的一项。",
+            "- 下一轮必须先产出有效 diff，并且必须改变 smoke 窗口的实际交易路径；若继续沿用相近方向，至少切换方向簇、普通 family、long-short target 中的一项。",
         ]
 
     tail = _low_change_tail(entries)
@@ -1349,7 +1434,7 @@ def _exploration_trigger_lines(entries: list[dict[str, Any]], limit: int) -> lis
         "探索触发（必须执行）:",
         f"最近 {LOW_CHANGE_STREAK} 轮都属于低变化轮次：晋级分没有实质提升，且 trend_score / hit_rate / bull_bear_capture / fee_drag 基本不变。",
         f"- 近期近邻方向簇：{', '.join(clusters[:limit]) or '-'}；标签：{', '.join(tags[:limit]) or '-'}；核心因子：{', '.join(factors[:limit]) or '-'}；高频区域：{', '.join(regions[:limit]) or '-'}",
-        "- 下一轮必须把它当作探索轮：优先切簇；若无法切簇，至少切换 edited region family、long-short target 或核心因子家族中的一项。",
+        "- 下一轮必须把它当作探索轮：优先切簇；若无法切簇，至少切换普通 family、long-short target 或核心因子家族中的一项。",
         "- 目标是让 segment_hit_rate、bull_capture_score、bear_capture_score、avg_fee_drag、total_trades 中至少两项明显变化。",
     ]
     return lines

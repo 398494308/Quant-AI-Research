@@ -266,6 +266,16 @@ def _flow_confirmation_ok(market_state, hourly, fourh, params, side, strong=Fals
     )
 
 
+def _flow_signal_metrics(market_state, hourly, fourh, params, side):
+    return {
+        'score': _flow_alignment_score(market_state, hourly, fourh, params, side),
+    }
+
+
+def _flow_entry_ok(market_state, hourly, fourh, params, side, strong=False):
+    return _flow_confirmation_ok(market_state, hourly, fourh, params, side, strong=strong)
+
+
 def _build_signal_context(data, idx, market_state, params):
     current = data[idx]
     prev = data[idx - 1]
@@ -400,7 +410,7 @@ def _build_short_trend_state(context, market_state, params):
     }
 
 
-def _is_sideways_regime(market_state):
+def _sideways_release_flags(market_state):
     hourly = market_state['hourly']
     fourh = market_state['four_hour']
     intraday = _intraday_trend_metrics(market_state)
@@ -463,7 +473,6 @@ def _is_sideways_regime(market_state):
         and fourh_slope < max(fourh_spread * 0.08, atr_ratio * 0.032)
         and (intraday_chop >= SIDEWAYS_INTRADAY_CHOP_MIN - 2.0 or hourly_chop >= SIDEWAYS_HOURLY_CHOP_MIN - 2.0)
     )
-
     hard_sideways = (
         (
             intraday_chop >= SIDEWAYS_HARD_INTRADAY_CHOP_MIN
@@ -483,6 +492,45 @@ def _is_sideways_regime(market_state):
             and fourh_slope < atr_ratio * 0.03
         )
     )
+    return {
+        'intraday_spread': intraday_spread,
+        'hourly_spread': hourly_spread,
+        'fourh_spread': fourh_spread,
+        'hourly_slope': hourly_slope,
+        'fourh_slope': fourh_slope,
+        'intraday_chop': intraday_chop,
+        'hourly_chop': hourly_chop,
+        'atr_ratio': atr_ratio,
+        'adx_soft': adx_soft,
+        'aligned_trend': aligned_trend,
+        'convexity_release': convexity_release,
+        'trend_awakening': trend_awakening,
+        'fresh_directional_expansion': fresh_directional_expansion,
+        'exhausted_drift': exhausted_drift,
+        'hard_sideways': hard_sideways,
+    }
+
+
+def _is_sideways_regime(market_state):
+    intraday = _intraday_trend_metrics(market_state)
+    hourly = market_state['hourly']
+    fourh = market_state['four_hour']
+    release_flags = _sideways_release_flags(market_state)
+    intraday_spread = release_flags['intraday_spread']
+    hourly_spread = release_flags['hourly_spread']
+    fourh_spread = release_flags['fourh_spread']
+    hourly_slope = release_flags['hourly_slope']
+    fourh_slope = release_flags['fourh_slope']
+    intraday_chop = release_flags['intraday_chop']
+    hourly_chop = release_flags['hourly_chop']
+    atr_ratio = release_flags['atr_ratio']
+    adx_soft = release_flags['adx_soft']
+    aligned_trend = release_flags['aligned_trend']
+    convexity_release = release_flags['convexity_release']
+    trend_awakening = release_flags['trend_awakening']
+    fresh_directional_expansion = release_flags['fresh_directional_expansion']
+    exhausted_drift = release_flags['exhausted_drift']
+    hard_sideways = release_flags['hard_sideways']
     if hard_sideways:
         return True
     if exhausted_drift and not convexity_release:
@@ -761,6 +809,14 @@ def _trend_quality_ok(market_state, side):
         return False
 
     return short_acceleration_exception or short_fresh_pressure_exception
+
+
+def _trend_quality_long(market_state):
+    return _trend_quality_ok(market_state, 'long')
+
+
+def _trend_quality_short(market_state):
+    return _trend_quality_ok(market_state, 'short')
 
 
 def _trend_followthrough_ok(market_state, side, trigger_price, current_close):
@@ -1196,6 +1252,24 @@ def _trend_followthrough_ok(market_state, side, trigger_price, current_close):
     return confirms >= required_confirms
 
 
+def _trend_followthrough_long(market_state, trigger_price, current_close):
+    return _trend_followthrough_ok(market_state, 'long', trigger_price, current_close)
+
+
+def _trend_followthrough_short(market_state, trigger_price, current_close):
+    return _trend_followthrough_ok(market_state, 'short', trigger_price, current_close)
+
+
+def _long_entry_signal(data, idx, positions, market_state):
+    signal = strategy(data, idx, positions, market_state)
+    return signal if signal == 'long_breakout' else None
+
+
+def _short_entry_signal(data, idx, positions, market_state):
+    signal = strategy(data, idx, positions, market_state)
+    return signal if signal == 'short_breakdown' else None
+
+
 def strategy(data, idx, positions, market_state):
     p = PARAMS
     if idx < p['min_history']:
@@ -1271,10 +1345,11 @@ def strategy(data, idx, positions, market_state):
         long_state['fourh_bull_turn'],
     )
 
-    if intraday_bull and hourly_bull and fourh_bull_base and _trend_quality_ok(market_state, 'long'):
-        long_flow_score = _flow_alignment_score(market_state, hourly, fourh, p, 'long')
-        long_flow_entry_ok = _flow_confirmation_ok(market_state, hourly, fourh, p, 'long', strong=False)
-        long_flow_impulse_ok = _flow_confirmation_ok(market_state, hourly, fourh, p, 'long', strong=True)
+    if intraday_bull and hourly_bull and fourh_bull_base and _trend_quality_long(market_state):
+        long_flow_metrics = _flow_signal_metrics(market_state, hourly, fourh, p, 'long')
+        long_flow_score = long_flow_metrics['score']
+        long_flow_entry_ok = _flow_entry_ok(market_state, hourly, fourh, p, 'long', strong=False)
+        long_flow_impulse_ok = _flow_entry_ok(market_state, hourly, fourh, p, 'long', strong=True)
         long_trend_expansion_ok = (
             hourly['trend_spread_pct'] >= max(SIDEWAYS_MIN_HOURLY_SPREAD_PCT * 1.55, atr_ratio * 1.00)
             and fourh['trend_spread_pct'] >= max(SIDEWAYS_MIN_FOURH_SPREAD_PCT * 1.26, atr_ratio * 1.14)
@@ -1843,7 +1918,7 @@ def strategy(data, idx, positions, market_state):
                     or prev_already_discovered_breakout
                 )
             )
-            and _trend_followthrough_ok(market_state, 'long', breakout_high, current['close'])
+            and _trend_followthrough_long(market_state, breakout_high, current['close'])
         ):
             return 'long_breakout'
 
@@ -1851,8 +1926,9 @@ def strategy(data, idx, positions, market_state):
     intraday_bear, hourly_bear = short_state['intraday_bear'], short_state['hourly_bear']
     fourh_bear, fourh_bear_confirmed = short_state['fourh_bear'], short_state['fourh_bear_confirmed']
 
-    if intraday_bear and hourly_bear and fourh_bear and _trend_quality_ok(market_state, 'short'):
-        short_flow_score = _flow_alignment_score(market_state, hourly, fourh, p, 'short')
+    if intraday_bear and hourly_bear and fourh_bear and _trend_quality_short(market_state):
+        short_flow_metrics = _flow_signal_metrics(market_state, hourly, fourh, p, 'short')
+        short_flow_score = short_flow_metrics['score']
         short_trend_expansion_ok = (
             hourly['trend_spread_pct'] <= -max(SIDEWAYS_MIN_HOURLY_SPREAD_PCT * 1.28, atr_ratio * 0.82)
             and fourh['trend_spread_pct'] <= -max(SIDEWAYS_MIN_FOURH_SPREAD_PCT * 1.08, atr_ratio * 1.00)
@@ -2092,7 +2168,7 @@ def strategy(data, idx, positions, market_state):
                 )
             )
             and breakdown_ready
-            and _trend_followthrough_ok(market_state, 'short', breakdown_low, current['close'])
+            and _trend_followthrough_short(market_state, breakdown_low, current['close'])
         ):
             return 'short_breakdown'
 

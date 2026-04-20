@@ -46,6 +46,7 @@ from research_v2.evaluation import (
     summarize_hidden_test_result,
 )
 from research_v2.journal import (
+    ORDINARY_REGION_FAMILIES,
     append_journal_entry,
     build_journal_prompt_summary,
     evaluate_candidate_exploration_guard,
@@ -66,12 +67,14 @@ from research_v2.prompting import (
     build_strategy_runtime_repair_prompt,
 )
 from research_v2.strategy_code import (
+    REQUIRED_FUNCTIONS,
     StrategyCandidate,
     StrategyCoreFactor,
     StrategySourceError,
     build_diff_summary,
     load_strategy_source,
     normalize_strategy_source,
+    repair_missing_required_functions,
     source_hash,
     validate_editable_region_boundaries,
     validate_strategy_source,
@@ -304,9 +307,23 @@ def select_smoke_windows(windows: list[Any], smoke_window_count: int) -> list[An
     if validation_windows:
         candidates.append(validation_windows[0])
     if eval_windows:
-        candidates.append(eval_windows[len(eval_windows) // 2])
-    if len(eval_windows) > 1:
-        candidates.append(eval_windows[-1])
+        if smoke_window_count <= 3:
+            candidates.append(eval_windows[len(eval_windows) // 2])
+        elif smoke_window_count == 4:
+            candidates.append(eval_windows[len(eval_windows) // 2])
+            if len(eval_windows) > 1:
+                candidates.append(eval_windows[-1])
+        elif validation_windows:
+            candidates.append(eval_windows[len(eval_windows) // 3])
+            candidates.append(eval_windows[len(eval_windows) // 2])
+            if len(eval_windows) > 1:
+                candidates.append(eval_windows[-1])
+        else:
+            candidates.append(eval_windows[len(eval_windows) // 4])
+            candidates.append(eval_windows[len(eval_windows) // 2])
+            candidates.append(eval_windows[(len(eval_windows) * 3) // 4])
+            if len(eval_windows) > 1:
+                candidates.append(eval_windows[-1])
 
     selected: list[Any] = []
     for window in candidates:
@@ -497,17 +514,22 @@ def _write_chart_copy(source: Path, target: Path) -> None:
 def _build_chart_note(message: str) -> str:
     return (
         f"{message}\n"
-        "图表：上图蓝线=策略累计增长，橙线=BTC累计增长；下图红区=策略相对自身峰值的回撤。"
+        "图表：上图蓝线=val期间策略累计增长，橙线=val期间BTC累计增长；中图红区=val期间策略相对自身峰值的回撤；若底部还有第三图，则为test期间策略与BTC累计增长对比。"
     )
 
 
-def _generate_new_champion_charts(iteration_id: int) -> PerformanceChartPaths:
+def _generate_new_champion_charts(
+    iteration_id: int,
+    *,
+    hidden_test_result: dict[str, Any] | None = None,
+) -> PerformanceChartPaths:
     if not charts_available():
         log_info("跳过新 champion 图表：matplotlib 不可用")
         return PerformanceChartPaths(validation_chart=None, selection_chart=None)
 
     chart_dir = _chart_output_dir()
     validation_window = _validation_window()
+    test_window = _test_window()
     prepared_context = _prepare_backtest_context()
 
     write_heartbeat(
@@ -548,6 +570,9 @@ def _generate_new_champion_charts(iteration_id: int) -> PerformanceChartPaths:
         output_path=validation_chart,
         title=f"New Champion #{iteration_id} Validation",
         subtitle=f"{validation_window.start_date} to {validation_window.end_date}",
+        secondary_daily_equity_curve=(hidden_test_result or {}).get("daily_equity_curve", []),
+        secondary_title=f"New Champion #{iteration_id} Test",
+        secondary_subtitle=f"{test_window.start_date} to {test_window.end_date}",
     )
     selection_chart = render_performance_chart(
         daily_equity_curve=selection_result.get("daily_equity_curve", []),
@@ -587,9 +612,12 @@ def evaluate_current_strategy(allow_early_reject: bool = False) -> EvaluationRep
 
 
 def evaluate_hidden_test_metrics() -> dict[str, float]:
+    return summarize_hidden_test_result(evaluate_hidden_test_result())
+
+
+def evaluate_hidden_test_result() -> dict[str, Any]:
     prepared_context = _prepare_backtest_context()
-    hidden_test_result = _run_hidden_test_backtest(prepared_context, include_diagnostics=True)
-    return summarize_hidden_test_result(hidden_test_result)
+    return _run_hidden_test_backtest(prepared_context, include_diagnostics=True)
 
 
 def smoke_test_current_strategy() -> None:
@@ -718,6 +746,74 @@ def _behavior_diff_payload(
     }
 
 
+def _format_signal_entries_summary(signal_entries: dict[str, Any]) -> str:
+    if not signal_entries:
+        return "-"
+    parts = [
+        f"{signal}:{int(count)}"
+        for signal, count in sorted(signal_entries.items())
+    ]
+    return ", ".join(parts)
+
+
+def _format_behavior_summary(summary: dict[str, Any]) -> str:
+    returns = ", ".join(f"{float(value):.2f}%" for value in summary.get("returns", ()))
+    if not returns:
+        returns = "-"
+    return (
+        f"windows={int(summary.get('window_count', 0) or 0)}, "
+        f"trades={int(summary.get('total_trades', 0) or 0)}, "
+        f"returns=[{returns}], "
+        f"signals={_format_signal_entries_summary(summary.get('signal_entries', {}) or {})}"
+    )
+
+
+def _recent_behavioral_noop_streak(entries: list[dict[str, Any]]) -> int:
+    streak = 0
+    for entry in reversed(entries):
+        if str(entry.get("outcome", "")) == "behavioral_noop":
+            streak += 1
+            continue
+        break
+    return streak
+
+
+def _behavioral_noop_block_info(
+    candidate: StrategyCandidate,
+    behavior_diff: dict[str, Any],
+    *,
+    journal_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    smoke_windows = ", ".join(window.label for window in _selected_smoke_windows()) or "-"
+    noop_streak = _recent_behavioral_noop_streak(journal_entries)
+    cluster_key = cluster_key_for_components(
+        candidate.closest_failed_cluster,
+        candidate.change_tags,
+    ) or str(candidate.closest_failed_cluster).strip() or "-"
+    feedback_lines = [
+        f"- smoke窗口: {smoke_windows}",
+        (
+            "- changed_windows: "
+            + (", ".join(str(item) for item in behavior_diff.get("changed_windows", ())) or "无")
+        ),
+        f"- 当前参考摘要: {_format_behavior_summary(behavior_diff.get('base', {}) or {})}",
+        f"- 候选摘要: {_format_behavior_summary(behavior_diff.get('candidate', {}) or {})}",
+        f"- 最近连续 behavioral_noop: {noop_streak}",
+    ]
+    if noop_streak >= 2:
+        feedback_lines.append(
+            "- 最近已连续多次 behavior 无变化；这次必须明显加大步长：优先切不同方向簇，"
+            "若留在同簇，至少改 2-3 个普通 family，不要只改 strategy/PARAMS 或单个细阈值。"
+        )
+    return {
+        "block_kind": "behavioral_noop",
+        "blocked_cluster": cluster_key,
+        "blocked_reason": "smoke 行为指纹与当前主参考完全一致",
+        "current_locks": (),
+        "feedback_note": "\n".join(feedback_lines),
+    }
+
+
 # ==================== 候选策略生成 ====================
 
 
@@ -746,6 +842,13 @@ def _candidate_from_payload(
     if not workspace_strategy_file.exists():
         raise StrategySourceError(f"workspace strategy file missing: {workspace_strategy_file}")
     strategy_code = normalize_strategy_source(load_strategy_source(workspace_strategy_file))
+    strategy_code, restored_functions = repair_missing_required_functions(
+        base_source,
+        strategy_code,
+        EDITABLE_REGIONS,
+    )
+    if restored_functions:
+        write_strategy_source(workspace_strategy_file, strategy_code)
     validate_strategy_source(strategy_code)
     validate_editable_region_boundaries(base_source, strategy_code, EDITABLE_REGIONS)
     candidate = StrategyCandidate(
@@ -764,14 +867,29 @@ def _candidate_from_payload(
         raise StrategySourceError("candidate missing change_tags")
     if not candidate.edited_regions:
         raise StrategySourceError("candidate missing edited_regions")
-    if len(candidate.edited_regions) > 3:
-        raise StrategySourceError("candidate edited_regions exceeds 3")
+    if len(candidate.edited_regions) > len(EDITABLE_REGIONS):
+        raise StrategySourceError("candidate edited_regions exceeds editable region count")
     if len(set(candidate.edited_regions)) != len(candidate.edited_regions):
         raise StrategySourceError("candidate edited_regions contains duplicates")
     if not candidate.closest_failed_cluster:
         raise StrategySourceError("candidate missing closest_failed_cluster")
     if not candidate.novelty_proof:
         raise StrategySourceError("candidate missing novelty_proof")
+    candidate_signature = exploration_signature_for_candidate(
+        candidate,
+        base_source=base_source,
+        editable_regions=EDITABLE_REGIONS,
+    )
+    ordinary_region_families = sorted(candidate_signature["ordinary_region_families"])
+    if not ordinary_region_families:
+        raise StrategySourceError(
+            "candidate must change 1-3 ordinary region families from "
+            f"{', '.join(ORDINARY_REGION_FAMILIES)}; strategy/PARAMS alone are not enough"
+        )
+    if len(ordinary_region_families) > 3:
+        raise StrategySourceError(
+            f"candidate ordinary region families exceed 3: {', '.join(ordinary_region_families)}"
+        )
     return candidate
 
 
@@ -914,6 +1032,7 @@ def _regenerate_model_candidate(
         blocked_reason=str(block_info.get("blocked_reason", "")).strip() or "系统拒收",
         locked_clusters=tuple(block_info.get("current_locks", ()) or ()),
         regeneration_attempt=regeneration_attempt,
+        feedback_note=str(block_info.get("feedback_note", "")).strip(),
     )
     with _temporary_cwd(workspace_root):
         payload = generate_json_object(
@@ -988,42 +1107,48 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
     )
 
     if can_load_saved_reference:
-        best_source = load_strategy_source(RUNTIME.paths.best_strategy_file)
-        write_strategy_source(RUNTIME.paths.strategy_file, best_source)
-        reload_strategy_module()
-        best_report = evaluate_current_strategy()
-        champion_report = (
-            best_report
-            if best_report.gate_passed and str(saved_state.get("reference_role", "")).strip() == "champion"
-            else None
-        )
-        _persist_best_state(best_source, best_report)
-        log_info(
-            "已加载已保存主参考: "
-            f"role={_reference_role()}, "
-            f"quality={best_report.metrics['quality_score']:.2f}, "
-            f"promotion={best_report.metrics['promotion_score']:.2f}, "
-            f"gate={best_report.gate_reason}"
-        )
-        write_heartbeat(
-            "initialized",
-            message="loaded saved reference",
-            reference_role=_reference_role(),
-            promotion=best_report.metrics["promotion_score"],
-            quality=best_report.metrics["quality_score"],
-        )
-        maybe_send_discord(
-            build_discord_summary_message(
-                title=f"📌 研究器 v2 已加载{_reference_role()}参考",
-                report=best_report,
-                eval_window_count=EVAL_WINDOW_COUNT,
-                validation_window_count=VALIDATION_WINDOW_COUNT,
-                test_window_count=TEST_WINDOW_COUNT,
-                data_range_text=_discord_data_range_text(),
-            ),
-            context="initialize_saved_reference",
-        )
-        return
+        candidate_saved_source = load_strategy_source(RUNTIME.paths.best_strategy_file)
+        try:
+            validate_strategy_source(candidate_saved_source)
+        except StrategySourceError as exc:
+            log_info(f"已保存主参考无效，改为从当前策略文件重建: {exc}")
+        else:
+            best_source = candidate_saved_source
+            write_strategy_source(RUNTIME.paths.strategy_file, best_source)
+            reload_strategy_module()
+            best_report = evaluate_current_strategy()
+            champion_report = (
+                best_report
+                if best_report.gate_passed and str(saved_state.get("reference_role", "")).strip() == "champion"
+                else None
+            )
+            _persist_best_state(best_source, best_report)
+            log_info(
+                "已加载已保存主参考: "
+                f"role={_reference_role()}, "
+                f"quality={best_report.metrics['quality_score']:.2f}, "
+                f"promotion={best_report.metrics['promotion_score']:.2f}, "
+                f"gate={best_report.gate_reason}"
+            )
+            write_heartbeat(
+                "initialized",
+                message="loaded saved reference",
+                reference_role=_reference_role(),
+                promotion=best_report.metrics["promotion_score"],
+                quality=best_report.metrics["quality_score"],
+            )
+            maybe_send_discord(
+                build_discord_summary_message(
+                    title=f"📌 研究器 v2 已加载{_reference_role()}参考",
+                    report=best_report,
+                    eval_window_count=EVAL_WINDOW_COUNT,
+                    validation_window_count=VALIDATION_WINDOW_COUNT,
+                    test_window_count=TEST_WINDOW_COUNT,
+                    data_range_text=_discord_data_range_text(),
+                ),
+                context="initialize_saved_reference",
+            )
+            return
 
     best_source = load_strategy_source(RUNTIME.paths.strategy_file)
     validate_strategy_source(best_source)
@@ -1089,6 +1214,9 @@ def _build_journal_entry(
     )
     actual_changed_regions = sorted(candidate_signature["changed_regions"])
     actual_region_families = sorted(candidate_signature["region_families"])
+    actual_ordinary_region_families = sorted(candidate_signature["ordinary_region_families"])
+    actual_special_region_families = sorted(candidate_signature["special_region_families"])
+    actual_ordinary_changed_regions = sorted(candidate_signature["ordinary_changed_regions"])
     actual_param_families = sorted(candidate_signature["param_families"])
     actual_structural_tokens = sorted(candidate_signature["structural_tokens"])
     entry = {
@@ -1129,6 +1257,9 @@ def _build_journal_entry(
         "region_families": sorted(region_families_for_regions(candidate.edited_regions)),
         "system_changed_regions": actual_changed_regions,
         "system_region_families": actual_region_families,
+        "system_ordinary_region_families": actual_ordinary_region_families,
+        "system_special_region_families": actual_special_region_families,
+        "system_ordinary_changed_regions": actual_ordinary_changed_regions,
         "system_param_families": actual_param_families,
         "system_structural_tokens": actual_structural_tokens,
         "system_signature_hash": candidate_signature["signature_hash"],
@@ -1364,7 +1495,12 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         write_strategy_source(workspace_strategy_file, best_source)
 
         candidate = build_strategy_candidate(best_source, workspace_root=workspace_root)
-        for regeneration_attempt in range(0, max(0, RUNTIME.max_exploration_regen_attempts) + 1):
+        candidate_report: EvaluationReport | None = None
+        exploration_regeneration_attempt = 0
+        behavioral_noop_regeneration_attempt = 0
+
+        while True:
+            candidate_report = None
             journal_entries = load_journal_entries(RUNTIME.paths.journal_file)
             candidate_hash = source_hash(candidate.strategy_code)
 
@@ -1418,127 +1554,163 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 lock_schedule=_cluster_lock_schedule(),
                 include_current_round_locks=True,
             )
-            if block_info is None:
-                break
-
-            _record_exploration_block(
-                iteration_id=iteration_id,
-                candidate=candidate,
-                base_source=best_source,
-                block_info=block_info,
-            )
-            log_info(
-                f"第 {iteration_id} 轮候选在评估前被系统拦截: "
-                f"{block_info['blocked_reason']}"
-            )
-            if regeneration_attempt >= RUNTIME.max_exploration_regen_attempts:
-                write_strategy_source(RUNTIME.paths.strategy_file, best_source)
-                reload_strategy_module()
-                write_heartbeat(
-                    "iteration_exploration_blocked",
-                    message=f"iteration {iteration_id} exploration blocked",
-                    block_kind=block_info["block_kind"],
-                    blocked_cluster=block_info["blocked_cluster"],
-                )
-                return "exploration_blocked"
-
-            write_heartbeat(
-                "candidate_regenerating",
-                message=f"iteration {iteration_id} regenerating candidate",
-                regeneration_attempt=regeneration_attempt + 1,
-                max_regeneration_attempts=RUNTIME.max_exploration_regen_attempts,
-                block_kind=block_info["block_kind"],
-                blocked_cluster=block_info["blocked_cluster"],
-            )
-            candidate = _regenerate_model_candidate(
-                base_source=best_source,
-                failed_candidate=candidate,
-                block_info=block_info,
-                regeneration_attempt=regeneration_attempt + 1,
-                workspace_root=workspace_root,
-            )
-
-        try:
-            candidate, candidate_report = _candidate_with_repair(
-                best_source,
-                candidate,
-                workspace_root=workspace_root,
-            )
-        except CandidateBehavioralNoop as exc:
-            write_strategy_source(RUNTIME.paths.strategy_file, best_source)
-            reload_strategy_module()
-            _record_behavioral_noop(
-                iteration_id=iteration_id,
-                candidate=exc.candidate,
-                base_source=best_source,
-                behavior_diff=exc.behavior_diff,
-            )
-            log_info(
-                f"第 {iteration_id} 轮跳过: smoke 行为指纹未变化 "
-                f"(trades={exc.behavior_diff['candidate']['total_trades']})"
-            )
-            write_heartbeat(
-                "iteration_behavioral_noop",
-                message=f"iteration {iteration_id} behavioral noop",
-                gate="smoke 行为指纹与当前主参考完全一致",
-            )
-            return "behavioral_noop"
-        except EarlyRejection as exc:
-            write_strategy_source(RUNTIME.paths.strategy_file, best_source)
-            reload_strategy_module()
-            append_journal_entry(
-                RUNTIME.paths.journal_file,
-                _build_journal_entry(
+            if block_info is not None:
+                _record_exploration_block(
                     iteration_id=iteration_id,
                     candidate=candidate,
                     base_source=best_source,
-                    candidate_report=None,
-                    outcome="early_rejected",
-                    stop_stage="early_reject",
-                    gate_reason="前段趋势捕获过差",
-                    note=str(exc),
-                ),
-            )
-            if maybe_compact(RUNTIME.paths.journal_file):
-                log_info("研究日志已压缩")
-            log_info(f"第 {iteration_id} 轮提前淘汰: {exc}")
-            write_heartbeat(
-                "iteration_early_rejected",
-                message=f"iteration {iteration_id} early rejected: {exc}",
-                gate="前段趋势捕获过差",
-            )
-            return "early_rejected"
-        except CandidateRepairExhausted as exc:
-            write_strategy_source(RUNTIME.paths.strategy_file, best_source)
-            reload_strategy_module()
-            append_journal_entry(
-                RUNTIME.paths.journal_file,
-                _build_journal_entry(
-                    iteration_id=iteration_id,
-                    candidate=exc.candidate,
+                    block_info=block_info,
+                )
+                log_info(
+                    f"第 {iteration_id} 轮候选在评估前被系统拦截: "
+                    f"{block_info['blocked_reason']}"
+                )
+                if exploration_regeneration_attempt >= RUNTIME.max_exploration_regen_attempts:
+                    write_strategy_source(RUNTIME.paths.strategy_file, best_source)
+                    reload_strategy_module()
+                    write_heartbeat(
+                        "iteration_exploration_blocked",
+                        message=f"iteration {iteration_id} exploration blocked",
+                        block_kind=block_info["block_kind"],
+                        blocked_cluster=block_info["blocked_cluster"],
+                    )
+                    return "exploration_blocked"
+
+                write_heartbeat(
+                    "candidate_regenerating",
+                    message=f"iteration {iteration_id} regenerating candidate",
+                    regeneration_attempt=exploration_regeneration_attempt + 1,
+                    max_regeneration_attempts=RUNTIME.max_exploration_regen_attempts,
+                    block_kind=block_info["block_kind"],
+                    blocked_cluster=block_info["blocked_cluster"],
+                )
+                exploration_regeneration_attempt += 1
+                candidate = _regenerate_model_candidate(
                     base_source=best_source,
-                    candidate_report=None,
-                    outcome="runtime_failed",
-                    stop_stage="runtime_error",
-                    gate_reason="运行失败",
-                    note="；".join(exc.errors),
-                ),
-            )
-            if maybe_compact(RUNTIME.paths.journal_file):
-                log_info("研究日志已压缩")
-            log_info(f"第 {iteration_id} 轮运行失败并已记录: {exc}")
-            write_heartbeat(
-                "iteration_runtime_failed",
-                message=f"iteration {iteration_id} runtime failed",
-                error=str(exc),
-            )
-            return "runtime_failed"
-        except StrategyGenerationTransientError:
-            raise
-        except Exception:
-            write_strategy_source(RUNTIME.paths.strategy_file, best_source)
-            reload_strategy_module()
-            raise
+                    failed_candidate=candidate,
+                    block_info=block_info,
+                    regeneration_attempt=exploration_regeneration_attempt,
+                    workspace_root=workspace_root,
+                )
+                continue
+
+            try:
+                while True:
+                    try:
+                        candidate, candidate_report = _candidate_with_repair(
+                            best_source,
+                            candidate,
+                            workspace_root=workspace_root,
+                        )
+                        break
+                    except CandidateBehavioralNoop as exc:
+                        write_strategy_source(RUNTIME.paths.strategy_file, best_source)
+                        reload_strategy_module()
+                        journal_entries = load_journal_entries(RUNTIME.paths.journal_file)
+                        if behavioral_noop_regeneration_attempt >= RUNTIME.max_exploration_regen_attempts:
+                            _record_behavioral_noop(
+                                iteration_id=iteration_id,
+                                candidate=exc.candidate,
+                                base_source=best_source,
+                                behavior_diff=exc.behavior_diff,
+                            )
+                            log_info(
+                                f"第 {iteration_id} 轮跳过: smoke 行为指纹未变化 "
+                                f"(trades={exc.behavior_diff['candidate']['total_trades']})"
+                            )
+                            write_heartbeat(
+                                "iteration_behavioral_noop",
+                                message=f"iteration {iteration_id} behavioral noop",
+                                gate="smoke 行为指纹与当前主参考完全一致",
+                            )
+                            return "behavioral_noop"
+
+                        block_info = _behavioral_noop_block_info(
+                            exc.candidate,
+                            exc.behavior_diff,
+                            journal_entries=journal_entries,
+                        )
+                        behavioral_noop_regeneration_attempt += 1
+                        write_heartbeat(
+                            "candidate_regenerating",
+                            message=f"iteration {iteration_id} regenerating candidate after behavioral noop",
+                            regeneration_attempt=behavioral_noop_regeneration_attempt,
+                            max_regeneration_attempts=RUNTIME.max_exploration_regen_attempts,
+                            block_kind=block_info["block_kind"],
+                            blocked_cluster=block_info["blocked_cluster"],
+                        )
+                        log_info(
+                            f"第 {iteration_id} 轮候选 smoke 行为未变化，触发同轮重生 "
+                            f"{behavioral_noop_regeneration_attempt}/{RUNTIME.max_exploration_regen_attempts}"
+                        )
+                        candidate = _regenerate_model_candidate(
+                            base_source=best_source,
+                            failed_candidate=exc.candidate,
+                            block_info=block_info,
+                            regeneration_attempt=behavioral_noop_regeneration_attempt,
+                            workspace_root=workspace_root,
+                        )
+                        break
+            except EarlyRejection as exc:
+                write_strategy_source(RUNTIME.paths.strategy_file, best_source)
+                reload_strategy_module()
+                append_journal_entry(
+                    RUNTIME.paths.journal_file,
+                    _build_journal_entry(
+                        iteration_id=iteration_id,
+                        candidate=candidate,
+                        base_source=best_source,
+                        candidate_report=None,
+                        outcome="early_rejected",
+                        stop_stage="early_reject",
+                        gate_reason="前段趋势捕获过差",
+                        note=str(exc),
+                    ),
+                )
+                if maybe_compact(RUNTIME.paths.journal_file):
+                    log_info("研究日志已压缩")
+                log_info(f"第 {iteration_id} 轮提前淘汰: {exc}")
+                write_heartbeat(
+                    "iteration_early_rejected",
+                    message=f"iteration {iteration_id} early rejected: {exc}",
+                    gate="前段趋势捕获过差",
+                )
+                return "early_rejected"
+            except CandidateRepairExhausted as exc:
+                write_strategy_source(RUNTIME.paths.strategy_file, best_source)
+                reload_strategy_module()
+                append_journal_entry(
+                    RUNTIME.paths.journal_file,
+                    _build_journal_entry(
+                        iteration_id=iteration_id,
+                        candidate=exc.candidate,
+                        base_source=best_source,
+                        candidate_report=None,
+                        outcome="runtime_failed",
+                        stop_stage="runtime_error",
+                        gate_reason="运行失败",
+                        note="；".join(exc.errors),
+                    ),
+                )
+                if maybe_compact(RUNTIME.paths.journal_file):
+                    log_info("研究日志已压缩")
+                log_info(f"第 {iteration_id} 轮运行失败并已记录: {exc}")
+                write_heartbeat(
+                    "iteration_runtime_failed",
+                    message=f"iteration {iteration_id} runtime failed",
+                    error=str(exc),
+                )
+                return "runtime_failed"
+            except StrategyGenerationTransientError:
+                raise
+            except Exception:
+                write_strategy_source(RUNTIME.paths.strategy_file, best_source)
+                reload_strategy_module()
+                raise
+
+            if candidate_report is None:
+                continue
+            break
 
     accepted, decision_reason = _promotion_acceptance_decision(candidate_report)
     entry_note = ""
@@ -1560,9 +1732,11 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         best_source = candidate.strategy_code
         best_report = candidate_report
         champion_report = candidate_report
+        hidden_test_result: dict[str, Any] | None = None
         shadow_test_metrics: dict[str, float] | None = None
         try:
-            shadow_test_metrics = evaluate_hidden_test_metrics()
+            hidden_test_result = evaluate_hidden_test_result()
+            shadow_test_metrics = summarize_hidden_test_result(hidden_test_result)
             log_info(
                 "test验收: "
                 f"score={shadow_test_metrics['shadow_test_score']:.2f}, "
@@ -1594,7 +1768,10 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         )
         chart_paths = PerformanceChartPaths(validation_chart=None, selection_chart=None)
         try:
-            chart_paths = _generate_new_champion_charts(iteration_id)
+            chart_paths = _generate_new_champion_charts(
+                iteration_id,
+                hidden_test_result=hidden_test_result,
+            )
             if chart_paths.selection_chart is not None:
                 log_info(f"train+val图已保存: {chart_paths.selection_chart}")
             if chart_paths.validation_chart is not None:
