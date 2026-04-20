@@ -185,12 +185,12 @@ def _normalize_cluster_name(raw: Any) -> str:
 def cluster_key_for_components(closest_failed_cluster: Any, change_tags: list[str] | tuple[str, ...]) -> str:
     declared = _normalize_cluster_name(closest_failed_cluster)
     inferred = cluster_for_tags(change_tags)
-    if declared and declared == inferred:
-        return declared
-    if declared in CANONICAL_CLUSTER_NAMES:
-        return declared
     if inferred in CANONICAL_CLUSTER_NAMES:
         return inferred
+    if declared in CANONICAL_CLUSTER_NAMES:
+        return declared
+    if declared and declared == inferred:
+        return declared
     return declared or inferred
 
 
@@ -948,7 +948,12 @@ def _current_round_lock_state(
 
 
 def _same_cluster_low_change_context(entries: list[dict[str, Any]], score_regime: str) -> dict[str, Any] | None:
-    tail = _low_change_tail(_entries_for_score_regime(entries, score_regime))
+    scoped_entries = _entries_for_score_regime(entries, score_regime)
+    tail = _low_change_tail(scoped_entries)
+    source_kind = "low_change"
+    if not tail:
+        tail = _noop_tail(scoped_entries)
+        source_kind = "noop"
     if not tail:
         return None
 
@@ -991,6 +996,7 @@ def _same_cluster_low_change_context(entries: list[dict[str, Any]], score_regime
 
     return {
         "cluster": cluster,
+        "source_kind": source_kind,
         "entries": cluster_entries,
         "entry_signatures": entry_signatures,
         "tag_union": tag_union,
@@ -1133,19 +1139,20 @@ def evaluate_candidate_exploration_guard(
     current_round_count = same_cluster_rounds + 1
     lock_applied = current_round_count >= 2
     lock_level = lock_trigger_rounds + 1 if lock_applied else lock_trigger_rounds
+    source_label = "连续行为无变化" if low_change_context.get("source_kind") == "noop" else "低变化打转"
     if lock_applied:
         schedule_index = min(max(lock_level - 1, 0), max(len(lock_schedule) - 1, 0))
         lock_rounds = int(lock_schedule[schedule_index])
         lock_expires_before_iteration = current_iteration + lock_rounds + 1
         blocked_reason = (
-            f"同簇低变化近邻：`{candidate_cluster}` 最近持续低变化打转，"
+            f"同簇低变化近邻：`{candidate_cluster}` 最近持续{source_label}，"
             f"当前候选未切出新交易路径；该簇将冷却 {lock_rounds} 轮。"
         )
     else:
         lock_rounds = 0
         lock_expires_before_iteration = 0
         blocked_reason = (
-            f"同簇低变化近邻：`{candidate_cluster}` 最近持续低变化打转，"
+            f"同簇低变化近邻：`{candidate_cluster}` 最近持续{source_label}，"
             "当前候选未切换方向簇，也没有形成足够明确的结构性换方向。"
         )
 
@@ -1326,6 +1333,11 @@ def _metric_from_entry(entry: dict[str, Any], key: str) -> float:
     if isinstance(metrics, dict):
         return _score_value(metrics.get(key))
     return 0.0
+
+
+def _has_metric(entry: dict[str, Any], key: str) -> bool:
+    metrics = entry.get("metrics", {})
+    return isinstance(metrics, dict) and key in metrics
 
 
 def _span(values: list[float]) -> float:
@@ -1628,10 +1640,16 @@ def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int)
         stage = _display_stage(entry)
         promotion = _format_metric(entry.get("promotion_score"))
         quality = _format_metric(entry.get("quality_score"))
-        hit_rate = _format_metric(_metric_from_entry(entry, "validation_segment_hit_rate"))
-        bull = _format_metric(_metric_from_entry(entry, "validation_bull_capture_score"))
-        bear = _format_metric(_metric_from_entry(entry, "validation_bear_capture_score"))
-        gap = _format_metric(_metric_from_entry(entry, "dev_validation_gap") or entry.get("promotion_gap"))
+        if _has_metric(entry, "validation_segment_hit_rate"):
+            hit_rate = _format_metric(_metric_from_entry(entry, "validation_segment_hit_rate"))
+            bull = _format_metric(_metric_from_entry(entry, "validation_bull_capture_score"))
+            bear = _format_metric(_metric_from_entry(entry, "validation_bear_capture_score"))
+            gap = _format_metric(_metric_from_entry(entry, "dev_validation_gap") or entry.get("promotion_gap"))
+        else:
+            hit_rate = "-"
+            bull = "-"
+            bear = "-"
+            gap = _format_metric(entry.get("promotion_gap")) if entry.get("promotion_gap") is not None else "-"
         gate = _truncate(_entry_decision_reason(entry), 20) or "-"
         lines.append(
             f"| {round_label} | {outcome} | {stage} | {quality} | {promotion} | "
@@ -1826,8 +1844,8 @@ def build_journal_prompt_summary(
             score_regime=active_score_regime,
         )
         if recent_entries:
-            display_entries = recent_entries
-            board_entries = display_entries
+            board_entries = recent_entries
+            display_entries = recent_entries[-max(1, limit):]
             board_lines = _direction_risk_board(board_entries, limit=min(8, limit))
             if board_lines:
                 parts.extend(board_lines)
@@ -1859,27 +1877,31 @@ def build_journal_prompt_summary(
                 parts.extend(exploration_lines)
                 parts.append("")
 
-            accepted_count = sum(1 for entry in display_entries if entry.get("outcome") == "accepted")
-            rejected_count = sum(1 for entry in display_entries if entry.get("outcome") == "rejected")
-            duplicate_skipped_count = sum(1 for entry in display_entries if entry.get("outcome") == "duplicate_skipped")
-            behavioral_noop_count = sum(1 for entry in display_entries if entry.get("outcome") == "behavioral_noop")
-            exploration_blocked_count = sum(1 for entry in display_entries if entry.get("outcome") == "exploration_blocked")
-            early_rejected_count = sum(1 for entry in display_entries if entry.get("outcome") == "early_rejected")
-            runtime_failed_count = sum(1 for entry in display_entries if entry.get("outcome") == "runtime_failed")
+            accepted_count = sum(1 for entry in board_entries if entry.get("outcome") == "accepted")
+            rejected_count = sum(1 for entry in board_entries if entry.get("outcome") == "rejected")
+            duplicate_skipped_count = sum(1 for entry in board_entries if entry.get("outcome") == "duplicate_skipped")
+            behavioral_noop_count = sum(1 for entry in board_entries if entry.get("outcome") == "behavioral_noop")
+            exploration_blocked_count = sum(1 for entry in board_entries if entry.get("outcome") == "exploration_blocked")
+            early_rejected_count = sum(1 for entry in board_entries if entry.get("outcome") == "early_rejected")
+            runtime_failed_count = sum(1 for entry in board_entries if entry.get("outcome") == "runtime_failed")
             parts.append(
-                f"最近未压缩轮次共 {len(display_entries)} 条："
+                f"最近未压缩轮次共 {len(board_entries)} 条："
                 f"保留 {accepted_count}，未保留 {rejected_count}，"
                 f"重复跳过 {duplicate_skipped_count}，"
                 f"行为无变化 {behavioral_noop_count}，"
                 f"探索拦截 {exploration_blocked_count}，"
                 f"提前淘汰 {early_rejected_count}，运行失败 {runtime_failed_count}。"
             )
-            failure_tag_lines = _recent_failure_tag_lines(display_entries, limit=min(8, limit))
+            if len(display_entries) < len(board_entries):
+                parts.append(
+                    f"以下表格与元信息仅展示最近 {len(display_entries)} 条，避免长串重复轮次淹没当前硬约束。"
+                )
+            failure_tag_lines = _recent_failure_tag_lines(board_entries, limit=min(8, limit))
             if failure_tag_lines:
                 parts.append("最近高频失败标签:")
                 parts.extend(failure_tag_lines)
-            core_factor_columns = _recent_core_factor_columns(display_entries, limit=min(4, limit))
-            core_factor_lines = _recent_core_factor_lines(display_entries, core_factor_columns)
+            core_factor_columns = _recent_core_factor_columns(board_entries, limit=min(4, limit))
+            core_factor_lines = _recent_core_factor_lines(board_entries, core_factor_columns)
             if core_factor_lines:
                 parts.extend(core_factor_lines)
             parts.append("最近核心指标表:")

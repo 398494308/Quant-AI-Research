@@ -1514,6 +1514,12 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
             "ownership_cluster",
         )
 
+    def test_cluster_key_prefers_inferred_canonical_cluster_over_declared_nearest_cluster(self):
+        self.assertEqual(
+            cluster_key_for_components("ownership_cluster", ["sideways_filter", "hourly_discount"]),
+            "sideways_cluster",
+        )
+
     def test_cluster_key_for_entry_uses_stored_cluster_when_present(self):
         entry = {
             "cluster_key": "ownership_cluster",
@@ -1790,6 +1796,105 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         self.assertIn("探索触发（必须执行）", summary)
         self.assertIn("没有产生有效代码改动", summary)
         self.assertIn("ownership_cluster", summary)
+
+    def test_evaluate_candidate_exploration_guard_blocks_same_cluster_after_noop_streak(self):
+        entries = []
+        for idx in range(3):
+            entries.append(
+                {
+                    "iteration": idx + 1,
+                    "candidate_id": f"noop_{idx}",
+                    "outcome": "behavioral_noop",
+                    "stop_stage": "behavioral_noop",
+                    "promotion_score": None,
+                    "quality_score": None,
+                    "promotion_delta": None,
+                    "gate_reason": "smoke 行为指纹与当前主参考完全一致",
+                    "closest_failed_cluster": "ownership_cluster",
+                    "change_tags": ["ownership_takeover", "acceptance_continuity"],
+                    "edited_regions": ["strategy"],
+                    "hypothesis": "连续行为无变化",
+                    "expected_effects": ["提高多头上车"],
+                    "score_regime": "trend_capture_v5",
+                }
+            )
+
+        candidate = StrategyCandidate(
+            candidate_id="candidate_guard",
+            hypothesis="连续行为无变化后的同簇近邻",
+            change_plan="继续微调 ownership 方向",
+            closest_failed_cluster="ownership_cluster",
+            novelty_proof="这次仍是同簇近邻。",
+            change_tags=("ownership_takeover", "acceptance_continuity"),
+            edited_regions=("strategy",),
+            expected_effects=("提高多头上车",),
+            core_factors=(),
+            strategy_code="def strategy():\n    return None\n",
+        )
+        block = evaluate_candidate_exploration_guard(
+            candidate,
+            entries,
+            journal_path=None,
+            score_regime="trend_capture_v5",
+            current_iteration=4,
+        )
+
+        self.assertIsNotNone(block)
+        self.assertEqual(block["block_kind"], "same_cluster")
+        self.assertIn("连续行为无变化", block["blocked_reason"])
+
+    def test_journal_summary_limits_recent_rows_and_meta_lines_to_requested_limit(self):
+        entries = []
+        for idx in range(5):
+            entries.append(
+                {
+                    "iteration": idx + 1,
+                    "candidate_id": f"candidate_{idx + 1}",
+                    "outcome": "behavioral_noop",
+                    "stop_stage": "behavioral_noop",
+                    "promotion_score": None,
+                    "quality_score": None,
+                    "promotion_delta": None,
+                    "gate_reason": "smoke 行为指纹与当前主参考完全一致",
+                    "closest_failed_cluster": "ownership_cluster",
+                    "change_tags": ["ownership_takeover"],
+                    "edited_regions": ["strategy"],
+                    "hypothesis": "连续行为无变化",
+                    "score_regime": "trend_capture_v4",
+                }
+            )
+
+        summary = build_journal_prompt_summary(entries, limit=2, current_score_regime="trend_capture_v4")
+
+        self.assertIn("最近未压缩轮次共 5 条", summary)
+        self.assertIn("以下表格与元信息仅展示最近 2 条", summary)
+        self.assertIn("candidate_5", summary)
+        self.assertIn("candidate_4", summary)
+        self.assertNotIn("candidate_1", summary)
+
+    def test_journal_summary_displays_dash_for_noop_metrics_without_full_eval(self):
+        entries = [
+            {
+                "iteration": 1,
+                "candidate_id": "noop_only",
+                "outcome": "behavioral_noop",
+                "stop_stage": "behavioral_noop",
+                "promotion_score": None,
+                "quality_score": None,
+                "promotion_delta": None,
+                "gate_reason": "smoke 行为指纹与当前主参考完全一致",
+                "closest_failed_cluster": "ownership_cluster",
+                "change_tags": ["ownership_takeover"],
+                "edited_regions": ["strategy"],
+                "hypothesis": "连续行为无变化",
+                "score_regime": "trend_capture_v4",
+            }
+        ]
+
+        summary = build_journal_prompt_summary(entries, limit=8, current_score_regime="trend_capture_v4")
+
+        self.assertIn("| 1 | 行为无变化 | 行为无变化 | - | - | - | - | - | - |", summary)
+        self.assertNotIn("| 1 | 行为无变化 | 行为无变化 | - | - | 0.00 |", summary)
 
     def test_journal_summary_prefers_current_score_regime_when_provided(self):
         entries = [

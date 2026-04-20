@@ -336,7 +336,7 @@ def build_strategy_exploration_repair_prompt(
     feedback_block = f"\n附加反馈（本次必须处理）:\n{feedback_note}\n" if feedback_note else "\n"
     return f"""你正在同一轮里重生候选方向，不是开始新一轮研究。
 
-这是第 {regeneration_attempt} 次同轮重生。目标是：保持本轮总目标不变，但必须绕开系统刚刚拒收的近邻方向，改成一个可进入评估的新方向。
+这是第 {regeneration_attempt} 次同轮重生。目标是：保持本轮要解决的策略短板大方向不变，但必须绕开系统刚刚拒收的近邻方向，改成一个可进入评估的新方向；如果上一版被 `behavioral_noop` 拒收，默认说明上一版局部因果链已失效，可以直接重写局部 hypothesis / change_plan。
 
 原候选元信息：
 - candidate_id: {candidate_id}
@@ -367,6 +367,7 @@ def build_strategy_exploration_repair_prompt(
 - 优先切到不同方向簇。
 - 若确实留在同簇，至少同时切换普通 family，并切换 long-short target 或核心因子家族；否则系统仍会拒收。
 - 不要只换 tag、只换措辞、或只补一两条很像的条件。
+- 若上一版是 `behavioral_noop`，不要沿用原 hypothesis / change_plan 只换表述；应默认把那条局部路径假设视为已被证伪，并改成新的可触达交易路径。
 - 重生后的候选必须预计改变 smoke 窗口实际交易路径；如果上一版只是 helper / followthrough 变化但没有触发新交易，优先改 `strategy()` 的最终入场路径。
 - 如果附加反馈显示 smoke 窗口的交易数、收益和信号统计完全没变，默认说明你上一版改动没有触达真实交易路径；这次必须优先改能改变最终信号集合或退出集合的规则块，而不是继续只拨不会触发的细阈值。
 - 仍然只允许修改 `src/strategy_macd_aggressive.py` 可编辑区域。

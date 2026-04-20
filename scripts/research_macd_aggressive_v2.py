@@ -790,26 +790,33 @@ def _behavioral_noop_block_info(
         candidate.closest_failed_cluster,
         candidate.change_tags,
     ) or str(candidate.closest_failed_cluster).strip() or "-"
+    current_locks: tuple[str, ...] = ()
     feedback_lines = [
         f"- smoke窗口: {smoke_windows}",
         (
             "- changed_windows: "
             + (", ".join(str(item) for item in behavior_diff.get("changed_windows", ())) or "无")
         ),
+        f"- 当前候选归属簇: {cluster_key}",
         f"- 当前参考摘要: {_format_behavior_summary(behavior_diff.get('base', {}) or {})}",
         f"- 候选摘要: {_format_behavior_summary(behavior_diff.get('candidate', {}) or {})}",
         f"- 最近连续 behavioral_noop: {noop_streak}",
     ]
     if noop_streak >= 2:
+        if cluster_key != "-":
+            current_locks = (f"{cluster_key}(本轮 behavioral_noop 后禁止沿用原叙事)",)
         feedback_lines.append(
             "- 最近已连续多次 behavior 无变化；这次必须明显加大步长：优先切不同方向簇，"
             "若留在同簇，至少改 2-3 个普通 family，不要只改 strategy/PARAMS 或单个细阈值。"
+        )
+        feedback_lines.append(
+            "- 默认把上一版局部 hypothesis / change_plan 视为已被证伪，不要只换候选名、tag 或措辞。"
         )
     return {
         "block_kind": "behavioral_noop",
         "blocked_cluster": cluster_key,
         "blocked_reason": "smoke 行为指纹与当前主参考完全一致",
-        "current_locks": (),
+        "current_locks": current_locks,
         "feedback_note": "\n".join(feedback_lines),
     }
 

@@ -150,12 +150,14 @@ Discord 现在只保留：
 - 只有连续重生后仍然无法改变 smoke 行为，才会正式记一次 `behavioral_noop`
 - 候选报错时会在同一轮 repair
 - 同簇低变化近邻会在评估前被系统拦截，不再白跑 `smoke/full eval`
+- 连续 `behavioral_noop` 现在也会进入同簇低变化上下文，后续若继续沿同簇近邻试错，会被评估前拦截
 - 被探索硬约束拦截后，会在同一轮里强制重生候选方向
 - 同一方向簇再次触发该机制后，会进入短期冷却锁
 - 冷却锁采用 `3 -> 6 -> 10` 轮递增
-- 低变化近邻判定会同时看真实 diff、参数族变化和 AST 派生结构签名
+- 低变化近邻判定会同时看真实 diff、参数族变化和 AST 派生结构签名，不再优先相信模型自报的最近失败簇
 - `duplicate source / duplicate hash / empty diff / behavioral_noop` 会写入 journal
 - `exploration_blocked` 表示候选在评估前就被系统探索硬约束拒收
+- prompt 最近轮次表只展示最近有限条，避免长串重复 noop 淹没当前硬约束；`behavioral_noop` 未跑完整评估的指标也不再显示成伪 `0.00`
 - heartbeat 会写出当前阶段和窗口名
 - provider timeout 默认 `600s`
 
