@@ -13,6 +13,17 @@ class PerformanceChartPaths:
     selection_chart: Path | None
 
 
+@dataclass(frozen=True)
+class ChartSeries:
+    dates: list[str]
+    strategy_nav: list[float]
+    market_nav: list[float]
+    equity_base: float
+    market_base: float
+    latest_equity: float
+    latest_market_close: float
+
+
 def _load_matplotlib():
     try:
         import matplotlib
@@ -30,7 +41,7 @@ def charts_available() -> bool:
     return matplotlib is not None
 
 
-def _normalized_series(daily_equity_curve: list[dict[str, Any]]) -> tuple[list[str], list[float], list[float], list[float]]:
+def _normalized_series(daily_equity_curve: list[dict[str, Any]]) -> ChartSeries:
     if len(daily_equity_curve) < 2:
         raise ValueError("daily_equity_curve too short")
 
@@ -44,12 +55,97 @@ def _normalized_series(daily_equity_curve: list[dict[str, Any]]) -> tuple[list[s
 
     strategy_nav = [value / equities[0] for value in equities]
     market_nav = [value / market_closes[0] for value in market_closes]
-    peak = strategy_nav[0]
-    drawdown = []
-    for value in strategy_nav:
-        peak = max(peak, value)
-        drawdown.append(value / peak - 1.0 if peak > 1e-9 else 0.0)
-    return dates, strategy_nav, market_nav, drawdown
+    return ChartSeries(
+        dates=dates,
+        strategy_nav=strategy_nav,
+        market_nav=market_nav,
+        equity_base=equities[0],
+        market_base=market_closes[0],
+        latest_equity=equities[-1],
+        latest_market_close=market_closes[-1],
+    )
+
+
+def _format_axis_value(value: float) -> str:
+    magnitude = abs(value)
+    if magnitude >= 1000:
+        return f"{value:,.0f}"
+    if magnitude >= 10:
+        return f"{value:,.2f}"
+    if magnitude >= 1:
+        return f"{value:,.3f}"
+    return f"{value:,.4f}"
+
+
+def _format_legend_value(value: float) -> str:
+    return _format_axis_value(value)
+
+
+def _configure_value_panel(
+    *,
+    axis: Any,
+    matplotlib: Any,
+    mdates: Any,
+    title: str,
+    subtitle: str,
+    series: ChartSeries,
+    strategy_color: str,
+    market_color: str,
+    show_xlabel: bool = True,
+) -> None:
+    x_values = [mdates.datestr2num(item) for item in series.dates]
+    axis.plot(
+        x_values,
+        series.strategy_nav,
+        color=strategy_color,
+        linewidth=2.2,
+        label=f"Account ({_format_legend_value(series.latest_equity)})",
+    )
+    axis.plot(
+        x_values,
+        series.market_nav,
+        color=market_color,
+        linewidth=2.0,
+        alpha=0.92,
+        label=f"BTC ({_format_legend_value(series.latest_market_close)})",
+    )
+    axis.legend(loc="upper left", frameon=False)
+    axis.set_ylabel("Account Value", color=strategy_color)
+    axis.tick_params(axis="y", colors=strategy_color)
+
+    def _account_formatter(value: float, _position: float) -> str:
+        return _format_axis_value(value * series.equity_base)
+
+    axis.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(_account_formatter))
+
+    price_axis = axis.twinx()
+    price_axis.set_ylim(axis.get_ylim())
+    price_axis.set_ylabel("BTC Price", color=market_color)
+    price_axis.tick_params(axis="y", colors=market_color)
+    price_axis.grid(False)
+
+    def _price_formatter(value: float, _position: float) -> str:
+        return _format_axis_value(value * series.market_base)
+
+    price_axis.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(_price_formatter))
+
+    locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
+    formatter = mdates.ConciseDateFormatter(locator)
+    axis.xaxis.set_major_locator(locator)
+    axis.xaxis.set_major_formatter(formatter)
+    if show_xlabel:
+        axis.set_xlabel("Date")
+
+    axis.set_title(title, loc="left", fontsize=14 if show_xlabel else 13, fontweight="bold")
+    axis.text(
+        0.0,
+        1.02,
+        subtitle,
+        transform=axis.transAxes,
+        fontsize=10,
+        color="#5f5648",
+        va="bottom",
+    )
 
 
 def render_performance_chart(
@@ -66,111 +162,53 @@ def render_performance_chart(
     if matplotlib is None or mdates is None or plt is None:
         return None
 
-    dates, strategy_nav, market_nav, drawdown = _normalized_series(daily_equity_curve)
+    primary_series = _normalized_series(daily_equity_curve)
     has_secondary_panel = bool(secondary_daily_equity_curve and len(secondary_daily_equity_curve) >= 2)
-    secondary_dates: list[str] = []
-    secondary_strategy_nav: list[float] = []
-    secondary_market_nav: list[float] = []
+    secondary_series: ChartSeries | None = None
     if has_secondary_panel:
-        secondary_dates, secondary_strategy_nav, secondary_market_nav, _secondary_drawdown = _normalized_series(
-            secondary_daily_equity_curve or []
-        )
+        secondary_series = _normalized_series(secondary_daily_equity_curve or [])
 
     if has_secondary_panel:
-        fig = plt.figure(figsize=(12.8, 10.2), dpi=120)
-        grid = fig.add_gridspec(3, 1, height_ratios=[3.2, 1.2, 2.5])
+        fig = plt.figure(figsize=(12.8, 8.8), dpi=120)
+        grid = fig.add_gridspec(2, 1, height_ratios=[3.1, 2.6])
         ax_top = fig.add_subplot(grid[0])
-        ax_bottom = fig.add_subplot(grid[1], sharex=ax_top)
-        ax_secondary = fig.add_subplot(grid[2])
+        ax_secondary = fig.add_subplot(grid[1])
     else:
-        fig, (ax_top, ax_bottom) = plt.subplots(
-            2,
-            1,
-            figsize=(12.8, 7.2),
-            dpi=120,
-            gridspec_kw={"height_ratios": [3.2, 1.2]},
-            sharex=True,
-        )
+        fig, ax_top = plt.subplots(1, 1, figsize=(12.8, 5.6), dpi=120)
         ax_secondary = None
     fig.patch.set_facecolor("#f7f4ed")
-    styled_axes = [ax_top, ax_bottom]
+    styled_axes = [ax_top]
     if ax_secondary is not None:
         styled_axes.append(ax_secondary)
     for axis in styled_axes:
         axis.set_facecolor("#fffdf8")
         axis.grid(True, alpha=0.22, color="#7c6a46", linewidth=0.8)
 
-    x_values = [mdates.datestr2num(item) for item in dates]
     strategy_color = "#0f4c81"
     market_color = "#cb6d51"
-    drawdown_color = "#cc5a43"
 
-    ax_top.plot(x_values, strategy_nav, color=strategy_color, linewidth=2.2, label="Strategy")
-    ax_top.plot(x_values, market_nav, color=market_color, linewidth=2.0, alpha=0.92, label="BTC")
-    ax_top.legend(loc="upper left", frameon=False)
-    ax_top.set_ylabel("Normalized")
-
-    ax_bottom.axhline(0.0, color="#6f6556", linewidth=1.0, alpha=0.8)
-    ax_bottom.fill_between(x_values, drawdown, 0.0, color=drawdown_color, alpha=0.24)
-    ax_bottom.plot(x_values, drawdown, color=drawdown_color, linewidth=1.4)
-    ax_bottom.set_ylabel("Drawdown")
-    ax_bottom.set_xlabel("Date")
-
-    locator = mdates.AutoDateLocator(minticks=6, maxticks=10)
-    formatter = mdates.ConciseDateFormatter(locator)
-    ax_bottom.xaxis.set_major_locator(locator)
-    ax_bottom.xaxis.set_major_formatter(formatter)
-
-    ax_top.set_title(title, loc="left", fontsize=14, fontweight="bold")
-    ax_top.text(
-        0.0,
-        1.02,
-        subtitle,
-        transform=ax_top.transAxes,
-        fontsize=10,
-        color="#5f5648",
-        va="bottom",
+    _configure_value_panel(
+        axis=ax_top,
+        matplotlib=matplotlib,
+        mdates=mdates,
+        title=title,
+        subtitle=subtitle,
+        series=primary_series,
+        strategy_color=strategy_color,
+        market_color=market_color,
+        show_xlabel=ax_secondary is None,
     )
     if ax_secondary is not None:
-        secondary_x_values = [mdates.datestr2num(item) for item in secondary_dates]
-        ax_secondary.plot(
-            secondary_x_values,
-            secondary_strategy_nav,
-            color=strategy_color,
-            linewidth=2.2,
-            label="Test Strategy",
+        _configure_value_panel(
+            axis=ax_secondary,
+            matplotlib=matplotlib,
+            mdates=mdates,
+            title=secondary_title or "Test Comparison",
+            subtitle=secondary_subtitle or "",
+            series=secondary_series,
+            strategy_color=strategy_color,
+            market_color=market_color,
         )
-        ax_secondary.plot(
-            secondary_x_values,
-            secondary_market_nav,
-            color=market_color,
-            linewidth=2.0,
-            alpha=0.92,
-            label="Test BTC",
-        )
-        ax_secondary.legend(loc="upper left", frameon=False)
-        ax_secondary.set_ylabel("Normalized")
-        ax_secondary.set_xlabel("Date")
-        ax_secondary.set_title(
-            secondary_title or "Test Comparison",
-            loc="left",
-            fontsize=12,
-            fontweight="bold",
-        )
-        if secondary_subtitle:
-            ax_secondary.text(
-                0.0,
-                1.02,
-                secondary_subtitle,
-                transform=ax_secondary.transAxes,
-                fontsize=10,
-                color="#5f5648",
-                va="bottom",
-            )
-        secondary_locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
-        secondary_formatter = mdates.ConciseDateFormatter(secondary_locator)
-        ax_secondary.xaxis.set_major_locator(secondary_locator)
-        ax_secondary.xaxis.set_major_formatter(secondary_formatter)
 
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -585,7 +585,7 @@ def _write_chart_copy(source: Path, target: Path) -> None:
 def _build_chart_note(message: str) -> str:
     return (
         f"{message}\n"
-        "图表：上图蓝线=val期间策略累计增长，橙线=val期间BTC累计增长；中图红区=val期间策略相对自身峰值的回撤；若底部还有第三图，则为test期间策略与BTC累计增长对比。"
+        "图表：每张图蓝线=策略累计增长，橙线=BTC累计增长；左轴直接显示账户价值，右轴直接显示BTC价格；若底部还有第二张图，则为test期间同口径对比。"
     )
 
 
