@@ -399,6 +399,29 @@ def _append_funnel_metrics(metrics: dict[str, float], prefix: str, counts: dict[
             metrics[f"{prefix}_{side}_{stage}"] = float(value)
 
 
+def _funnel_choke_point_text(side: str, counts: dict[str, int]) -> str:
+    side_label = "多头" if side == "long" else "空头"
+    sideways = int(counts.get("sideways_pass", 0) or 0)
+    outer = int(counts.get("outer_context_pass", 0) or 0)
+    path = int(counts.get("path_pass", 0) or 0)
+    final = int(counts.get("final_veto_pass", 0) or 0)
+    filled = int(counts.get("filled_entries", 0) or 0)
+
+    if sideways <= 0:
+        return f"{side_label} 当前没有可用样本"
+    if outer <= max(1, int(sideways * 0.03)):
+        return f"{side_label} 主要卡在 outer_context（{sideways} -> {outer}）"
+    if path <= 0:
+        return f"{side_label} outer_context 已放行，但 path 仍未触达（{outer} -> 0）"
+    if final <= 0:
+        return f"{side_label} path 可达，但 final_veto 全死（{path} -> 0）"
+    if filled <= 0:
+        return f"{side_label} final_veto 可达，但真实出单仍为 0（{final} -> 0）"
+    if filled < final:
+        return f"{side_label} 最终成交仍有明显流失（{final} -> {filled}）"
+    return f"{side_label} 已能稳定出单（{filled}）"
+
+
 def _low_activity_signal_payload(
     *,
     validation_counts: dict[str, dict[str, int]],
@@ -1295,88 +1318,49 @@ def summarize_evaluation(
         summary_lines.extend(["", "拖累较大的信号:", *weakest_signals])
 
     prompt_lines = [
-        f"当前策略是 BTC 激进趋势策略：15m 是唯一事实源，1h/4h 只是由 15m 聚合的确认层；突破除了总成交量，也会看基于 OKX K 线推导的方向流量代理和成交活跃度。目标是抓大行情的到来、陪跑主趋势、在掉头时退出或反手。",
-        f"当前基底质量分={quality_score:.2f}，晋级分={promotion_score:.2f}，gate={gate_reason}",
+        "当前诊断（必须先读）:",
         (
-            f"train滚动分均值/中位/std/盈利窗比="
+            f"- 当前基底: 质量分={quality_score:.2f}，晋级分={promotion_score:.2f}，"
+            f"gate={gate_reason}"
+        ),
+        f"- 当前主短板: {validation_weakest_axis}",
+        f"- 当前 gate 主失败项: {gate_reason}",
+        (
+            f"- val 现状: 趋势段/命中率={validation_trend_report.segment_count}/"
+            f"{validation_trend_report.hit_rate:.0%}，"
+            f"多头/空头捕获={validation_trend_report.bull_score:.2f}/"
+            f"{validation_trend_report.bear_score:.2f}，"
+            f"多/空平仓数={validation_long_trades}/{validation_short_trades}"
+        ),
+        (
+            "- val 漏斗堵点: "
+            + _funnel_choke_point_text("long", validation_funnel_counts["long"])
+            + "；"
+            + _funnel_choke_point_text("short", validation_funnel_counts["short"])
+        ),
+        (
+            f"- train 滚动状态: 均值/中位/std/盈利窗比="
             f"{development_mean_score:.2f}/{development_median_score:.2f}/"
             f"{development_score_std:.2f}/{profitable_window_ratio:.0%}"
         ),
         (
-            f"val晋级分={promotion_score:.2f}，"
-            f"val趋势分/收益分={validation_trend_report.trend_score:.2f}/{validation_trend_report.return_score:.2f}，"
-            f"趋势段/命中率={validation_trend_report.segment_count}/{validation_trend_report.hit_rate:.0%}"
-        ),
-        (
-            f"val到来/陪跑/掉头={validation_trend_report.arrival_score:.2f}/"
-            f"{validation_trend_report.escort_score:.2f}/"
-            f"{validation_trend_report.turn_score:.2f}，"
-            f"多头/空头捕获={validation_trend_report.bull_score:.2f}/"
-            f"{validation_trend_report.bear_score:.2f}"
-        ),
-        (
-            f"val多/空平仓数={validation_long_trades}/{validation_short_trades}，"
-            f"{validation_weakest_axis}"
-        ),
-        (
-            "train滚动漏斗="
-            + _format_funnel_line("long", eval_funnel_counts["long"])
-            + " | "
-            + _format_funnel_line("short", eval_funnel_counts["short"])
-        ),
-        (
-            "val连续漏斗="
-            + _format_funnel_line("long", validation_funnel_counts["long"])
-            + " | "
-            + _format_funnel_line("short", validation_funnel_counts["short"])
-        ),
-        (
-            "val分块均值/std/最差/负分块="
-            f"{validation_block_report.mean_score:.2f}/"
-            f"{validation_block_report.std_score:.2f}/"
-            f"{validation_block_report.min_score:.2f}/"
-            f"{validation_block_report.fail_count}"
-            + (
-                f"，分块数={validation_block_report.used_block_count}"
-                if validation_block_report.used_block_count > 0 else "，分块稳健性未启用"
-            )
-        ),
-        (
-            f"train+val连续趋势分/收益分={selection_trend_report.trend_score:.2f}/"
+            f"- train+val 状态: 趋势分/收益分={selection_trend_report.trend_score:.2f}/"
             f"{selection_trend_report.return_score:.2f}，"
-            f"到来/陪跑/掉头={selection_trend_report.arrival_score:.2f}/"
-            f"{selection_trend_report.escort_score:.2f}/"
-            f"{selection_trend_report.turn_score:.2f}"
-        ),
-        (
-            f"train+val连续多头/空头捕获={selection_trend_report.bull_score:.2f}/"
+            f"多头/空头捕获={selection_trend_report.bull_score:.2f}/"
             f"{selection_trend_report.bear_score:.2f}，"
-            f"train均值趋势分={development_mean_trend_score:.2f}，train/val分差={promotion_gap:.2f}"
+            f"期间收益={selection_total_return:.2f}%"
         ),
         (
-            f"train窗口收益均值/中位/P25/最差={eval_avg_return:.2f}%/"
-            f"{eval_median_return:.2f}%/{eval_p25_return:.2f}%/{eval_worst_return:.2f}%"
+            f"- 风险与成本: 最大回撤={worst_drawdown:.2f}%，"
+            f"手续费拖累={avg_fee_drag:.2f}%，"
+            f"train/val 分差={promotion_gap:.2f}"
         ),
         (
-            f"train+val期间收益={selection_total_return:.2f}%，"
-            f"val期间收益={float(validation_source.get('return', validation_avg_return)):.2f}%，"
-            f"最大回撤={worst_drawdown:.2f}%"
-        ),
-        f"Sharpe(train/val/train+val)={eval_sharpe_ratio:.2f}/{validation_sharpe_ratio:.2f}/{selection_sharpe_ratio:.2f}",
-        (
-            f"funding覆盖(train均值/val/train+val)="
-            f"{eval_funding_coverage:.0%}/{validation_funding_coverage:.0%}/{selection_funding_coverage:.0%}"
-        ),
-        (
-            f"train+val集中度诊断={overfit_report.risk_level}({overfit_report.risk_score:.0f})，"
-            f"单段正向贡献={overfit_report.top1_positive_share:.0%}，"
-            f"同向链贡献={overfit_report.max_chain_positive_share:.0%}，"
+            f"- 集中度诊断: {overfit_report.risk_level}({overfit_report.risk_score:.0f})，"
             f"覆盖率={overfit_report.coverage_ratio:.0%}，"
             f"多空落差={overfit_report.bull_bear_gap:.2f}，"
             f"处置={overfit_reference_action(overfit_report.risk_score, overfit_report.hard_fail)}"
         ),
-        f"train 4h唯一路径点={eval_path.unique_points}，重叠点={eval_path.overlap_points}，被覆盖点={eval_path.dropped_points}",
-        f"手续费拖累={avg_fee_drag:.2f}%，train交易={eval_trades}，val交易={validation_trades}，爆仓={liquidations}",
     ]
     if low_activity_payload["prompt_line"]:
         prompt_lines.append(low_activity_payload["prompt_line"])

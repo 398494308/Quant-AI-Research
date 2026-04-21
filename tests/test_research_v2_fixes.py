@@ -1270,6 +1270,8 @@ class JournalPromptFixesTest(unittest.TestCase):
 
         self.assertIn("promotion_delta > 0.02", prompt)
         self.assertIn("当前回合任务", prompt)
+        self.assertIn("本轮阅读顺序（必须执行）", prompt)
+        self.assertIn("相同失败核只算一个坏盆地", prompt)
         self.assertIn("当前因子模式：默认模式", prompt)
         self.assertIn("不是新增因子的申请通道", prompt)
 
@@ -1956,7 +1958,7 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         self.assertNotIn("sideways_cluster", summary)
         self.assertIn("已跳过 1 段非当前评分口径", summary)
 
-    def test_journal_summary_puts_direction_risk_board_first(self):
+    def test_journal_summary_puts_stage_executive_summary_before_direction_risk_board(self):
         entries = []
         for idx in range(5):
             entries.append(
@@ -1979,9 +1981,40 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         summary = build_journal_prompt_summary(entries, limit=8)
         first_line = summary.splitlines()[0]
 
-        self.assertIn("方向风险表", first_line)
+        self.assertIn("当前 stage 执行摘要", first_line)
+        self.assertIn("方向风险表", summary)
         self.assertIn("ownership_cluster", summary)
         self.assertIn("EXHAUSTED", summary)
+
+    def test_journal_summary_aggregates_repeated_failure_nucleus(self):
+        entries = []
+        for idx in range(3):
+            entries.append(
+                {
+                    "iteration": idx + 1,
+                    "candidate_id": f"candidate_repeat_{idx}",
+                    "outcome": "rejected",
+                    "stop_stage": "full_eval",
+                    "promotion_score": 0.03,
+                    "quality_score": 0.02,
+                    "promotion_delta": 0.0,
+                    "gate_reason": "train均值分偏低(0.02)；val命中率偏低(7%)；val多头捕获偏低(-0.02)",
+                    "decision_reason": "train均值分偏低(0.02)；val命中率偏低(7%)；val多头捕获偏低(-0.02)",
+                    "change_tags": ["remove_dead_gate", "entry_path", "long"],
+                    "edited_regions": ["long_breakout_ok", "strategy"],
+                    "hypothesis": "重复落在同一失败核",
+                    "score_regime": "trend_capture_v1",
+                    "target_family": "long",
+                    "system_ordinary_region_families": ["entry_path"],
+                }
+            )
+
+        summary = build_journal_prompt_summary(entries, limit=8)
+
+        self.assertIn("当前 stage 失败核聚合（去重后再看）", summary)
+        self.assertIn("核 1 | 3 轮", summary)
+        self.assertIn("ordinary family=entry_path", summary)
+        self.assertIn("同一个已知坏盆地", summary)
 
     def test_journal_summary_emits_overfit_risk_board_after_direction_risk(self):
         entries = [
@@ -2409,6 +2442,69 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         self.assertIn("历史 stage 摘要", summary)
         self.assertIn("bootstrap", summary)
 
+    def test_journal_summary_prefers_stage_timestamp_when_iterations_restart(self):
+        entries = [
+            {
+                "iteration": 84,
+                "timestamp": "2026-04-21T01:20:00+00:00",
+                "candidate_id": "legacy_84",
+                "outcome": "accepted",
+                "stop_stage": "full_eval",
+                "promotion_score": 0.28,
+                "quality_score": 0.31,
+                "promotion_delta": 0.04,
+                "gate_reason": "通过",
+                "change_tags": ["legacy_breakout"],
+                "edited_regions": ["strategy"],
+                "hypothesis": "旧 stage",
+                "score_regime": "trend_capture_v4",
+            },
+            {
+                "iteration": 1,
+                "timestamp": "2026-04-21T01:24:00+00:00",
+                "candidate_id": "current_1",
+                "outcome": "behavioral_noop",
+                "stop_stage": "behavioral_noop",
+                "promotion_score": None,
+                "quality_score": None,
+                "promotion_delta": None,
+                "gate_reason": "smoke 行为指纹与当前主参考完全一致",
+                "change_tags": ["ownership_takeover"],
+                "edited_regions": ["strategy"],
+                "hypothesis": "新 stage",
+                "score_regime": "trend_capture_v4",
+            },
+            {
+                "iteration": 2,
+                "timestamp": "2026-04-21T01:25:00+00:00",
+                "candidate_id": "current_2",
+                "outcome": "runtime_failed",
+                "stop_stage": "runtime_error",
+                "promotion_score": None,
+                "quality_score": None,
+                "promotion_delta": None,
+                "gate_reason": "complexity family budget exceeded",
+                "change_tags": ["widen_outer_context"],
+                "edited_regions": ["_trend_quality_long"],
+                "hypothesis": "新 stage",
+                "score_regime": "trend_capture_v4",
+            },
+        ]
+
+        summary = build_journal_prompt_summary(
+            entries,
+            limit=8,
+            current_score_regime="trend_capture_v4",
+            active_stage_started_at="2026-04-21T01:23:17+00:00",
+            active_stage_iteration=85,
+            reference_role="champion",
+        )
+
+        self.assertIn("当前 champion stage（自 round 1 / 2026-04-21T01:23:17+00:00 激活以来） 共 2 条", summary)
+        self.assertIn("current_1", summary)
+        self.assertIn("current_2", summary)
+        self.assertNotIn("legacy_84", summary)
+
     def test_journal_summary_writes_memory_snapshots(self):
         entries = [
             {
@@ -2721,6 +2817,40 @@ class ResearcherAdaptiveModeTest(unittest.TestCase):
 
         self.assertEqual(mode, "default")
         self.assertIn("维持 default", reason)
+
+    def test_current_stage_journal_entries_prefers_stage_timestamp_after_iteration_reset(self):
+        entries = [
+            {
+                "iteration": 84,
+                "timestamp": "2026-04-21T01:20:00+00:00",
+                "outcome": "accepted",
+                "score_regime": research_script.SCORE_REGIME,
+            },
+            {
+                "iteration": 1,
+                "timestamp": "2026-04-21T01:24:00+00:00",
+                "outcome": "behavioral_noop",
+                "score_regime": research_script.SCORE_REGIME,
+            },
+            {
+                "iteration": 2,
+                "timestamp": "2026-04-21T01:25:00+00:00",
+                "outcome": "runtime_failed",
+                "score_regime": research_script.SCORE_REGIME,
+            },
+        ]
+
+        original_started_at = research_script.reference_stage_started_at
+        original_iteration = research_script.reference_stage_iteration
+        try:
+            research_script.reference_stage_started_at = "2026-04-21T01:23:17+00:00"
+            research_script.reference_stage_iteration = 85
+            current_entries = research_script._current_stage_journal_entries(entries)
+        finally:
+            research_script.reference_stage_started_at = original_started_at
+            research_script.reference_stage_iteration = original_iteration
+
+        self.assertEqual([entry["iteration"] for entry in current_entries], [1, 2])
 
 
 class CodexExecClientTest(unittest.TestCase):

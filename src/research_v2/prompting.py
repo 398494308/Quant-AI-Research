@@ -236,7 +236,7 @@ def build_strategy_research_prompt(
     current_complexity_headroom_text: str = "",
 ) -> str:
     side_bias_guidance = _side_bias_guidance(reference_metrics)
-    side_bias_block = f"\n{side_bias_guidance}\n" if side_bias_guidance else "\n"
+    side_bias_block = f"\n{side_bias_guidance}\n" if side_bias_guidance else ""
     complexity_budget_text = _complexity_budget_text()
     complexity_headroom_block = (
         f"\n{current_complexity_headroom_text}\n"
@@ -252,16 +252,18 @@ def build_strategy_research_prompt(
 当前 champion 参考晋级分：{previous_best_score:.2f}
 {side_bias_block}
 
+本轮阅读顺序（必须执行）：
+1. 先看“刷新条件与本轮目标”，确认本轮不是为了造 diff，而是为了改变真实交易路径。
+2. 再看“当前诊断”，先定位当前 gate 主失败项、弱侧和 val 漏斗堵点。
+3. 再看“历史研究包”最前面的 stage 执行摘要与失败核聚合；相同失败核只算一个坏盆地，不要逐条重读。
+4. 基于上面三步只提出一个单一因果假设，并明确它预计会新增、删除或迁移哪类真实交易。
+5. 若仍落在同方向簇或同 ordinary family，必须证明这次改的是不同 choke point、不同最终放行链，或不同的真实交易路径层级。
+
 当前因子模式：{factor_change_mode_label(factor_change_mode)}
 
-当前诊断：
 {evaluation_summary}
 
-历史研究包：
-{journal_summary}
-
 本轮执行框架：
-- 先读当前 stage 的方向风险、冷却、过拟合和探索触发，再决定主方向。
 - 先判断最大短板是在多头、空头、到来、陪跑还是掉头；再提出单一因果假设。
 - 如果目标是补早段 long / short，先看外层总闸门：长侧先看 `long_outer_context_ok`，空侧先看 `short_outer_context_ok`。
 - 新增 path 不等于新增交易；必须继续检查最终合流与否决链。长侧重点看 `long_signal_path_ok -> long_final_veto_clear -> _trend_followthrough_long()`，空侧重点看 `breakdown_ready -> short_final_veto_clear -> _trend_followthrough_short()`。
@@ -269,6 +271,10 @@ def build_strategy_research_prompt(
 - 若最近连续出现 `behavioral_noop`，本轮默认必须放大步长：优先切不同方向簇，或改多个普通 family；不要只换措辞、tag 或近邻阈值。
 - 若漏斗诊断显示一侧长期 0 交易、outer_context 几乎全死，或 path 能过但 final_veto 基本全死，优先做结构性删减轮：`remove_dead_gate` / `merge_veto` / `widen_outer_context`。
 - 默认模式下有复杂度预算：如果你想加一条新条件，必须同步删掉或合并旧条件，避免 `strategy()` 和关键 helper 再次膨胀。
+- 若 headroom 显示某 family 的 `bool_ops` 已经剩余 `0`，或 `lines` 剩余不超过 `8`，默认把它视为饱和区；除非本轮 `change_plan` 明确先删旧条件，否则不要再把主改动落到该 family。
+
+历史研究包（附录，先读摘要再看表格）：
+{journal_summary}
 {complexity_budget_text}
 {complexity_headroom_block}
 

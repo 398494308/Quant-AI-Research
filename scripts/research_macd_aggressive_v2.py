@@ -216,6 +216,41 @@ def _current_stage_journal_entries(entries: list[dict[str, Any]]) -> list[dict[s
         entry for entry in entries
         if str(entry.get("score_regime", "")).strip() == SCORE_REGIME
     ]
+    if not scoped:
+        return []
+    stage_started_at_dt = _parse_state_timestamp(reference_stage_started_at)
+    if stage_started_at_dt is not None:
+        timed_current_entries = [
+            entry
+            for entry in scoped
+            if (
+                _parse_state_timestamp(entry.get("timestamp")) is not None
+                and _parse_state_timestamp(entry.get("timestamp")) >= stage_started_at_dt
+            )
+        ]
+        if timed_current_entries:
+            boundary_iteration = next(
+                (
+                    int(entry.get("iteration", 0) or 0)
+                    for entry in timed_current_entries
+                    if int(entry.get("iteration", 0) or 0) > 0
+                ),
+                0,
+            )
+            current_stage_entries: list[dict[str, Any]] = []
+            for entry in scoped:
+                entry_ts = _parse_state_timestamp(entry.get("timestamp"))
+                try:
+                    entry_iteration = int(entry.get("iteration", 0) or 0)
+                except (TypeError, ValueError):
+                    entry_iteration = 0
+                if entry_ts is not None:
+                    if entry_ts >= stage_started_at_dt:
+                        current_stage_entries.append(entry)
+                    continue
+                if boundary_iteration > 0 and entry_iteration >= boundary_iteration:
+                    current_stage_entries.append(entry)
+            return current_stage_entries
     if reference_stage_iteration <= 0:
         return scoped
     return [

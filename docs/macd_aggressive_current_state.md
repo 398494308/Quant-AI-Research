@@ -108,9 +108,11 @@ test 验收：
 1. `system prompt`
    - 只放稳定项目上下文：项目目标、文件职责、允许修改边界、输出规则
 2. `runtime prompt`
-   - 只放本轮动态信息：当前诊断、当前口径 gate、行为无变化约束、本轮执行框架
+   - 只放本轮动态信息，但顺序改成：刷新条件与目标 -> 本轮阅读顺序 -> 当前诊断摘要 -> 本轮执行框架
 3. `history package`
-   - 当前 `stage`
+   - 当前 `stage` 执行摘要
+   - 当前 `stage` 失败核聚合
+   - 当前 `stage` 风险/冷却/过热/过拟合附录
    - 历史 `stage` 压缩摘要
    - 当前评分口径全局统计表
    - 旧评分口径弱参考
@@ -119,14 +121,17 @@ test 验收：
 
 - 不再内嵌完整策略源码
 - `system prompt` 里明确写了项目目的和各核心文件是干什么的
-- `runtime prompt` 不再重复塞大量稳定约束，注意力更集中在本轮诊断和真实 choke point
+- 借鉴公开高可信 prompt 组织思路后，改成“稳定规则前置、动态摘要前置、长历史后置”
+- `runtime prompt` 不再重复塞大量稳定约束，注意力更集中在本轮目标、当前诊断和真实 choke point
+- `runtime prompt` 明确要求先看刷新条件和当前诊断，再看历史包最前面的 `stage` 执行摘要与失败核聚合
 - 默认因子模式下，prompt 明确禁止新增 `PARAMS` 键、顶层常量名和顶层 helper 名；只有切到 `factor_admission` 才允许做小规模因子准入
 - `history package` 不再按“最近 N 轮”裁切，而是按“自当前 `baseline/champion` 激活以来”的 `current stage`
+- 相同 gate reason 不再逐轮重复广播，而是会先折叠成“失败核”；重复失败被视为同一个坏盆地
 - prompt/history 不再展示“最近动态核心因子 / 全局高频核心因子”，只保留方向簇、失败标签、改动区域和真实结果；原始 `core_factors` 仍保留在 raw archive
 - 当多空捕获明显失衡时，prompt 会追加“软偏置”提示，优先把探索预算投向更弱的一侧，而不是硬性锁死只看单边
 - `test` 完全不可见
 - `runtime prompt` 现在会附带当前基底最紧张的 complexity headroom，明确显示哪个 family / function 还剩多少 `lines / bool_ops / ifs`
-- 当前 `stage` 只在 prompt 中展示最近有限条表格和元信息，但完整 `stage` 已另存到 memory 目录
+- 当前 `stage` 只在 prompt 中展示最近有限条表格和元信息，但它们现在后置到摘要之后；完整 `stage` 已另存到 memory 目录
 - journal 里新增 `方向冷却表（系统硬约束）`
 - 防重复规则只保留一份，不再多处复写
 - 如果候选在 smoke 窗口上的行为完全不变，系统会在同一轮回灌 smoke 摘要并强制重生

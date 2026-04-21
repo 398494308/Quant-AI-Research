@@ -121,10 +121,12 @@
 
 - prompt 现在拆成 `system prompt + runtime prompt + history package` 三层。
 - `system prompt` 只放稳定信息：项目目标、文件职责、编辑边界、输出规则。
-- `runtime prompt` 只放本轮动态信息：当前诊断、当前口径 gate、本轮执行框架和行为无变化约束。
+- `runtime prompt` 只放本轮动态信息，但顺序改成“刷新条件与目标 -> 本轮阅读顺序 -> 当前诊断摘要 -> 本轮执行框架”，先让模型看到目标、现状和主瓶颈。
 - `history package` 改成按当前主参考的 `stage` 来组织，而不是固定“最近 N 轮”。
 - 当前 `stage` 的边界来自 `best_state` 里的 `reference_stage_started_at / reference_stage_iteration`；研究器重启后不会把当前 `baseline/champion` 阶段切乱。
-- prompt 第一屏仍先显示方向风险表，按当前 `stage` 的方向簇聚合失败、零增益和运行报错。
+- `history package` 的第一屏不再是方向风险表，而是 `stage` 执行摘要和失败核聚合；先告诉模型“当前目标是什么、最近在同一个失败核上重复了几次、近邻热点在哪”。
+- 相同 gate reason 不再按逐轮重复灌给模型，而是先聚合成失败核；重复失败会被视为同一个坏盆地，不再被当成多条独立新证据。
+- 方向风险表、主簇过热、过拟合风险表和最近轮次表仍保留，但后置成附录层。
 - 若最近一段历史里同一方向簇占比过高且没有实质正 `delta`，prompt 会在方向风险表后追加“主簇过热”提示，默认要求下一轮优先跨簇。
 - 当前 `stage` 只在 prompt 里展示最近有限条表格和元信息，避免长串 noop 淹没当前硬约束；完整 `stage` 与全量原始历史会单独落到 memory 目录。
 - 旧评分口径不会混进当前主表；它们只会在后面以“旧评分口径弱参考”出现，作为低优先级方向启发。

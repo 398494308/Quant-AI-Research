@@ -171,7 +171,7 @@ COMPLEXITY_ABSOLUTE_BUDGETS: dict[str, dict[str, int]] = {
 COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS: dict[str, dict[str, int]] = {
     "sideways_family": {"lines": 200, "bool_ops": 88, "ifs": 16},
     "flow_family": {"lines": 140, "bool_ops": 30, "ifs": 10},
-    "trend_quality_family": {"lines": 130, "bool_ops": 42, "ifs": 16},
+    "trend_quality_family": {"lines": 150, "bool_ops": 50, "ifs": 18},
     "long_path_chain": {"lines": 200, "bool_ops": 88, "ifs": 12},
     "short_path_chain": {"lines": 176, "bool_ops": 80, "ifs": 12},
 }

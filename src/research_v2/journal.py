@@ -1585,8 +1585,41 @@ def _partition_entries_by_stage(
 
     boundary_iteration = max(0, int(active_stage_iteration or 0))
     stage_started_at = str(active_stage_started_at or "").strip()
+    stage_started_at_dt = _parse_timestamp(stage_started_at) if stage_started_at else None
+    if stage_started_at_dt is not None:
+        timestamp_partition = [
+            (entry, _parse_timestamp(entry.get("timestamp")))
+            for entry in current_entries
+        ]
+        timed_current_entries = [
+            entry
+            for entry, entry_ts in timestamp_partition
+            if entry_ts is not None and entry_ts >= stage_started_at_dt
+        ]
+        if timed_current_entries:
+            boundary_iteration = next(
+                (_entry_iteration(entry) for entry in timed_current_entries if _entry_iteration(entry) > 0),
+                0,
+            )
+            past_stage_entries: list[dict[str, Any]] = []
+            current_stage_entries: list[dict[str, Any]] = []
+            for entry, entry_ts in timestamp_partition:
+                entry_iteration = _entry_iteration(entry)
+                is_current = False
+                if entry_ts is not None:
+                    is_current = entry_ts >= stage_started_at_dt
+                elif boundary_iteration > 0 and entry_iteration > 0:
+                    is_current = entry_iteration >= boundary_iteration
+                if is_current:
+                    current_stage_entries.append(entry)
+                else:
+                    past_stage_entries.append(entry)
+            return current_stage_entries, past_stage_entries, {
+                "stage_iteration": boundary_iteration,
+                "stage_started_at": stage_started_at,
+            }
+
     if boundary_iteration <= 0 and stage_started_at:
-        stage_started_at_dt = _parse_timestamp(stage_started_at)
         if stage_started_at_dt is not None:
             for entry in current_entries:
                 entry_ts = _parse_timestamp(entry.get("timestamp"))
@@ -1736,6 +1769,133 @@ def _format_stage_operating_metrics(
             f"{weak_side_label} {weak_side_share} |"
         ),
     ]
+
+
+def _entry_ordinary_region_families(entry: dict[str, Any]) -> tuple[str, ...]:
+    stored = entry.get("system_ordinary_region_families")
+    if isinstance(stored, (list, tuple, set)):
+        return ordinary_region_families(stored)
+    return ordinary_region_families(region_families_for_regions(entry.get("edited_regions", [])))
+
+
+def _top_counter_labels(counter: Counter[str], limit: int) -> str:
+    labels = [name for name, _ in counter.most_common(max(1, limit)) if str(name).strip()]
+    return ", ".join(labels) or "-"
+
+
+def _failure_nucleus_payloads(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if str(entry.get("outcome", "")).strip() not in {"rejected", "early_rejected"}:
+            continue
+        reason = _entry_decision_reason(entry)
+        if not reason or reason == "-":
+            continue
+        payload = grouped.setdefault(
+            reason,
+            {
+                "reason": reason,
+                "count": 0,
+                "last_iteration": 0,
+                "clusters": Counter(),
+                "families": Counter(),
+                "targets": Counter(),
+                "tags": Counter(),
+            },
+        )
+        payload["count"] += 1
+        payload["last_iteration"] = max(payload["last_iteration"], _entry_iteration(entry))
+        payload["clusters"][cluster_key_for_entry(entry) or "unclassified"] += 1
+        for family in _entry_ordinary_region_families(entry):
+            payload["families"][family] += 1
+        target_family = str(entry.get("target_family", "")).strip()
+        if target_family:
+            payload["targets"][target_family] += 1
+        for tag in entry.get("change_tags", []):
+            tag_text = str(tag).strip()
+            if tag_text:
+                payload["tags"][tag_text] += 1
+    return sorted(
+        grouped.values(),
+        key=lambda item: (-int(item["count"]), -int(item["last_iteration"]), str(item["reason"])),
+    )
+
+
+def _stage_failure_nucleus_lines(entries: list[dict[str, Any]], limit: int) -> list[str]:
+    nuclei = [payload for payload in _failure_nucleus_payloads(entries) if int(payload["count"]) >= 2]
+    if not nuclei:
+        return []
+
+    lines = ["当前 stage 失败核聚合（去重后再看）:"]
+    for index, payload in enumerate(nuclei[: max(1, limit)], start=1):
+        lines.append(
+            f"- 核 {index} | {payload['count']} 轮 | "
+            f"gate={_truncate(payload['reason'], 56)} | "
+            f"簇={_top_counter_labels(payload['clusters'], 2)} | "
+            f"ordinary family={_top_counter_labels(payload['families'], 2)} | "
+            f"目标={_top_counter_labels(payload['targets'], 2)} | "
+            f"标签={_top_counter_labels(payload['tags'], 4)}"
+        )
+    lines.append("- 同一失败核重复出现时，应把它视为同一个已知坏盆地，而不是多条独立新证据。")
+    return lines
+
+
+def _stage_executive_summary_lines(
+    entries: list[dict[str, Any]],
+    *,
+    stage_name: str,
+    reference_metrics: dict[str, Any] | None = None,
+    limit: int = 6,
+) -> list[str]:
+    if not entries:
+        return []
+
+    weak_side = _weak_side_from_reference_metrics(reference_metrics)
+    target_text = {
+        "long": "当前弱侧是 long；默认优先补多头捕获/命中率，但不是硬锁只看多头。",
+        "short": "当前弱侧是 short；默认优先补空头捕获/命中率，但不是硬锁只看空头。",
+    }.get(weak_side, "当前多空没有明显弱侧，默认先看最影响 gate 的主短板。")
+
+    accepted_count = sum(1 for entry in entries if str(entry.get("outcome", "")).strip() == "accepted")
+    rejected_count = sum(1 for entry in entries if str(entry.get("outcome", "")).strip() == "rejected")
+    full_eval_count = sum(1 for entry in entries if _entry_full_eval_reached(entry))
+    recent_entries = entries[-max(1, limit):]
+
+    cluster_counter: Counter[str] = Counter()
+    family_counter: Counter[str] = Counter()
+    tag_counter: Counter[str] = Counter()
+    for entry in recent_entries:
+        cluster_counter[cluster_key_for_entry(entry) or "unclassified"] += 1
+        for family in _entry_ordinary_region_families(entry):
+            family_counter[family] += 1
+        for tag in entry.get("change_tags", []):
+            tag_text = str(tag).strip()
+            if tag_text:
+                tag_counter[tag_text] += 1
+
+    nuclei = _failure_nucleus_payloads(entries)
+    repeated_nucleus = next((payload for payload in nuclei if int(payload["count"]) >= 2), None)
+
+    lines = [f"{stage_name} 执行摘要（先看）:"]
+    lines.append(f"- 当前目标: {target_text}")
+    lines.append(
+        f"- 当前状态: 本 stage 共 {len(entries)} 条，完整评估 {full_eval_count} 条，"
+        f"保留 {accepted_count} 条，未保留 {rejected_count} 条。"
+    )
+    if repeated_nucleus is not None:
+        lines.append(
+            f"- 重复失败核: 最近 {repeated_nucleus['count']} 轮都落在 "
+            f"`{_truncate(repeated_nucleus['reason'], 64)}` 这一核，不要把它当成多条独立新证据。"
+        )
+    else:
+        lines.append("- 重复失败核: 当前还没有形成 2 轮以上的同核失败。")
+    lines.append(
+        f"- 当前近邻热点: 簇={_top_counter_labels(cluster_counter, 2)}；"
+        f"ordinary family={_top_counter_labels(family_counter, 2)}；"
+        f"标签={_top_counter_labels(tag_counter, 4)}"
+    )
+    lines.append("- 阅读建议: 先看这里和失败核聚合，再把下面的风险表、逐轮表格当附录。")
+    return lines
 
 
 def _summarize_stage_entries(stage_entries: list[dict[str, Any]], *, stage_id: int) -> dict[str, Any]:
@@ -2061,14 +2221,12 @@ def _recent_core_factor_lines(entries: list[dict[str, Any]], columns: list[str])
 
 
 def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int) -> list[str]:
+    display_labels = _stage_round_labels(entries, start_index)
     lines = [
         "| 轮次 | 结果 | 阶段 | quality | promotion | val_hit | val_bull | val_bear | gap | gate |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for offset, entry in enumerate(entries, start=1):
-        round_label = entry.get("iteration")
-        if round_label in (None, "", 0):
-            round_label = f"j{start_index + offset}"
+    for round_label, entry in zip(display_labels, entries):
         outcome = _display_outcome(str(entry.get("outcome", "")))
         stage = _display_stage(entry)
         promotion = _format_metric(entry.get("promotion_score"))
@@ -2092,11 +2250,9 @@ def _format_recent_rounds_table(entries: list[dict[str, Any]], start_index: int)
 
 
 def _recent_round_meta_lines(entries: list[dict[str, Any]], start_index: int) -> list[str]:
+    display_labels = _stage_round_labels(entries, start_index)
     lines = ["最近轮次元信息:"]
-    for offset, entry in enumerate(entries, start=1):
-        round_label = entry.get("iteration")
-        if round_label in (None, "", 0):
-            round_label = f"j{start_index + offset}"
+    for round_label, entry in zip(display_labels, entries):
         candidate_id = _truncate(entry.get("candidate_id", "unknown"), 28)
         cluster = _truncate(cluster_key_for_entry(entry) or "-", 24)
         tags = _truncate(",".join(entry.get("change_tags", [])) or "-", 40)
@@ -2108,6 +2264,32 @@ def _recent_round_meta_lines(entries: list[dict[str, Any]], start_index: int) ->
             f"- {round_label} {candidate_id}: cluster={cluster}; tags={tags}; regions={regions}; complexity={complexity}{bloat_suffix}; 摘要={summary}"
         )
     return lines
+
+
+def _stage_round_labels(entries: list[dict[str, Any]], start_index: int) -> list[str]:
+    numeric_labels = [_entry_iteration(entry) for entry in entries]
+    seen: set[int] = set()
+    previous = -1
+    duplicate_or_reset = False
+    for value in numeric_labels:
+        if value <= 0:
+            duplicate_or_reset = True
+            continue
+        if value in seen or value <= previous:
+            duplicate_or_reset = True
+        seen.add(value)
+        previous = max(previous, value)
+
+    labels: list[str] = []
+    for offset, value in enumerate(numeric_labels, start=1):
+        if value <= 0:
+            labels.append(f"j{start_index + offset}")
+            continue
+        if duplicate_or_reset:
+            labels.append(f"s{offset}/r{value}")
+            continue
+        labels.append(str(value))
+    return labels
 
 
 def _empty_prompt_tables(stage_title: str = "当前 stage") -> list[str]:
@@ -2308,6 +2490,21 @@ def build_journal_prompt_summary(
             board_entries = current_stage_entries
             display_entries = board_entries[-max(1, limit):]
             stage_start_index = max(0, int(stage_meta.get("stage_iteration", 0) or 0) - 1)
+            executive_lines = _stage_executive_summary_lines(
+                board_entries,
+                stage_name=stage_name,
+                reference_metrics=reference_metrics,
+                limit=min(8, limit),
+            )
+            if executive_lines:
+                parts.extend(executive_lines)
+                parts.append("")
+
+            failure_nucleus_lines = _stage_failure_nucleus_lines(board_entries, limit=min(4, limit))
+            if failure_nucleus_lines:
+                parts.extend(failure_nucleus_lines)
+                parts.append("")
+
             board_lines = _direction_risk_board(board_entries, limit=min(8, limit))
             if board_lines:
                 parts.extend(board_lines)
