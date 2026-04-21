@@ -75,7 +75,9 @@ from research_v2.strategy_code import (
     StrategySourceError,
     build_diff_summary,
     build_strategy_complexity_delta,
+    format_strategy_complexity_headroom,
     load_strategy_source,
+    normalize_factor_change_mode,
     normalize_strategy_source,
     repair_missing_required_functions,
     source_hash,
@@ -97,6 +99,8 @@ VALIDATION_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "valida
 TEST_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "test")
 SCORE_REGIME = "trend_capture_v6"
 MODEL_WORKSPACE_STRATEGY_PATH = Path("src/strategy_macd_aggressive.py")
+FACTOR_ADMISSION_TRIGGER_STALLS = 3
+FACTOR_ADMISSION_MAX_BURST = 2
 
 best_source = ""
 best_report: EvaluationReport | None = None
@@ -201,6 +205,75 @@ def _cluster_lock_schedule() -> tuple[int, int, int]:
         RUNTIME.cluster_lock_rounds_stage2,
         RUNTIME.cluster_lock_rounds_stage3,
     )
+
+
+def _effective_positive_delta_threshold() -> float:
+    return max(0.01, float(RUNTIME.promotion_min_delta) * 0.5)
+
+
+def _current_stage_journal_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scoped = [
+        entry for entry in entries
+        if str(entry.get("score_regime", "")).strip() == SCORE_REGIME
+    ]
+    if reference_stage_iteration <= 0:
+        return scoped
+    return [
+        entry for entry in scoped
+        if int(entry.get("iteration", 0) or 0) >= reference_stage_iteration
+    ]
+
+
+def _entry_has_effective_positive_delta(entry: dict[str, Any]) -> bool:
+    outcome = str(entry.get("outcome", "")).strip()
+    if outcome not in {"accepted", "rejected"}:
+        return False
+    try:
+        promotion_delta = float(entry.get("promotion_delta", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        promotion_delta = 0.0
+    return promotion_delta > _effective_positive_delta_threshold()
+
+
+def _entry_is_factor_stall(entry: dict[str, Any]) -> bool:
+    outcome = str(entry.get("outcome", "")).strip()
+    if outcome in {"behavioral_noop", "exploration_blocked"}:
+        return True
+    if outcome not in {"accepted", "rejected"}:
+        return False
+    try:
+        promotion_delta = float(entry.get("promotion_delta", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        promotion_delta = 0.0
+    return abs(promotion_delta) <= 1e-9
+
+
+def _resolve_iteration_factor_change_mode(journal_entries: list[dict[str, Any]]) -> tuple[str, str]:
+    base_mode = normalize_factor_change_mode(str(RUNTIME.base_factor_change_mode or "default").strip() or "default")
+    stage_entries = _current_stage_journal_entries(journal_entries)
+    trailing_stalls = 0
+    factor_admission_rounds = 0
+    for entry in reversed(stage_entries):
+        if _entry_has_effective_positive_delta(entry):
+            break
+        if str(entry.get("factor_change_mode", "")).strip() == "factor_admission":
+            factor_admission_rounds += 1
+        if _entry_is_factor_stall(entry):
+            trailing_stalls += 1
+            continue
+        break
+    if (
+        trailing_stalls >= FACTOR_ADMISSION_TRIGGER_STALLS
+        and factor_admission_rounds < FACTOR_ADMISSION_MAX_BURST
+    ):
+        return (
+            "factor_admission",
+            (
+                f"当前stage已连续 {trailing_stalls} 轮 behavioral_noop/exploration_blocked/zero delta，"
+                f"临时开启 factor_admission 第 {factor_admission_rounds + 1}/{FACTOR_ADMISSION_MAX_BURST} 轮"
+            ),
+        )
+    return (base_mode, f"当前stage未触发自动放宽，维持 {base_mode}")
 
 
 def _load_saved_reference_state() -> dict[str, Any]:
@@ -352,9 +425,10 @@ class CandidateRuntimeFailure(Exception):
 class CandidateRepairExhausted(Exception):
     """候选修复次数耗尽。"""
 
-    def __init__(self, candidate: StrategyCandidate, errors: list[str]):
+    def __init__(self, candidate: StrategyCandidate, errors: list[str], failure_stage: str = ""):
         self.candidate = candidate
         self.errors = errors
+        self.failure_stage = failure_stage
         super().__init__(errors[-1] if errors else "candidate repair exhausted")
 
 
@@ -768,6 +842,8 @@ def _smoke_behavior_profile(*, heartbeat_phase: str) -> list[dict[str, Any]]:
         {
             "window": item["window"].label,
             "fingerprint": _window_behavior_fingerprint(item["result"]),
+            "funnel": item["result"].get("strategy_funnel", {}) or {},
+            "filled_side_entries": item["result"].get("filled_side_entries", {}) or {},
         }
         for item in results
     ]
@@ -777,10 +853,22 @@ def _behavior_profile_changed(
     base_profile: list[dict[str, Any]],
     candidate_profile: list[dict[str, Any]],
 ) -> bool:
-    return base_profile != candidate_profile
+    base_fingerprints = [(item.get("window"), item.get("fingerprint")) for item in base_profile]
+    candidate_fingerprints = [(item.get("window"), item.get("fingerprint")) for item in candidate_profile]
+    return base_fingerprints != candidate_fingerprints
 
 
 def _behavior_profile_summary(profile: list[dict[str, Any]]) -> dict[str, Any]:
+    funnel_summary = {
+        side: {
+            "sideways_pass": 0,
+            "outer_context_pass": 0,
+            "path_pass": 0,
+            "final_veto_pass": 0,
+            "filled_entries": 0,
+        }
+        for side in ("long", "short")
+    }
     trades = sum(int(item["fingerprint"].get("trades", 0) or 0) for item in profile)
     returns = [
         float(item["fingerprint"].get("return", 0.0) or 0.0)
@@ -790,11 +878,18 @@ def _behavior_profile_summary(profile: list[dict[str, Any]]) -> dict[str, Any]:
     for item in profile:
         for signal, entries, *_rest in item["fingerprint"].get("signal_stats", ()):
             signal_counts[str(signal)] = signal_counts.get(str(signal), 0) + int(entries)
+        for side in ("long", "short"):
+            side_funnel = item.get("funnel", {}).get(side, {}) or {}
+            for stage in ("sideways_pass", "outer_context_pass", "path_pass", "final_veto_pass"):
+                funnel_summary[side][stage] += int(side_funnel.get(stage, 0) or 0)
+            side_entries = item.get("filled_side_entries", {}) or {}
+            funnel_summary[side]["filled_entries"] += int(side_entries.get(side, 0) or 0)
     return {
         "window_count": len(profile),
         "total_trades": trades,
         "returns": returns,
         "signal_entries": signal_counts,
+        "funnel": funnel_summary,
     }
 
 
@@ -837,6 +932,21 @@ def _format_behavior_summary(summary: dict[str, Any]) -> str:
         f"returns=[{returns}], "
         f"signals={_format_signal_entries_summary(summary.get('signal_entries', {}) or {})}"
     )
+
+
+def _format_funnel_summary(summary: dict[str, Any]) -> str:
+    funnel = summary.get("funnel", {}) or {}
+    parts: list[str] = []
+    for side in ("long", "short"):
+        side_payload = funnel.get(side, {}) or {}
+        parts.append(
+            f"{side}: 横盘后{int(side_payload.get('sideways_pass', 0) or 0)} -> "
+            f"outer {int(side_payload.get('outer_context_pass', 0) or 0)} -> "
+            f"path {int(side_payload.get('path_pass', 0) or 0)} -> "
+            f"veto {int(side_payload.get('final_veto_pass', 0) or 0)} -> "
+            f"出单 {int(side_payload.get('filled_entries', 0) or 0)}"
+        )
+    return " | ".join(parts)
 
 
 def _recent_behavioral_noop_streak(entries: list[dict[str, Any]]) -> int:
@@ -883,6 +993,8 @@ def _behavioral_noop_block_info(
         f"- 当前候选目标侧: {target_family}",
         f"- 当前参考摘要: {_format_behavior_summary(behavior_diff.get('base', {}) or {})}",
         f"- 候选摘要: {_format_behavior_summary(behavior_diff.get('candidate', {}) or {})}",
+        f"- 当前参考漏斗: {_format_funnel_summary(behavior_diff.get('base', {}) or {})}",
+        f"- 候选漏斗: {_format_funnel_summary(behavior_diff.get('candidate', {}) or {})}",
         f"- 最近连续 behavioral_noop: {noop_streak}",
     ]
     if "strategy" not in candidate_signature["region_families"]:
@@ -929,12 +1041,12 @@ def _behavioral_noop_block_info(
 # ==================== 候选策略生成 ====================
 
 
-def _candidate_from_payload(
-    payload: dict[str, Any],
-    *,
-    workspace_strategy_file: Path,
-    base_source: str,
-) -> StrategyCandidate:
+def _is_complexity_error_message(message: str) -> bool:
+    normalized = str(message).strip().lower()
+    return "complexity budget exceeded" in normalized or "complexity growth too large" in normalized
+
+
+def _core_factors_from_payload(payload: dict[str, Any]) -> tuple[StrategyCoreFactor, ...]:
     core_factors: list[StrategyCoreFactor] = []
     for item in payload.get("core_factors", []):
         if not isinstance(item, dict):
@@ -951,6 +1063,41 @@ def _candidate_from_payload(
                 current_signal=current_signal,
             )
         )
+    return tuple(core_factors)
+
+
+def _candidate_stub_from_payload(
+    payload: dict[str, Any],
+    *,
+    workspace_strategy_file: Path,
+    fallback_source: str,
+) -> StrategyCandidate:
+    strategy_code = (
+        normalize_strategy_source(load_strategy_source(workspace_strategy_file))
+        if workspace_strategy_file.exists()
+        else normalize_strategy_source(fallback_source)
+    )
+    return StrategyCandidate(
+        candidate_id=str(payload.get("candidate_id", "")).strip() or f"candidate-{int(time.time())}",
+        hypothesis=str(payload.get("hypothesis", "")).strip(),
+        change_plan=str(payload.get("change_plan", "")).strip(),
+        closest_failed_cluster=str(payload.get("closest_failed_cluster", "")).strip() or "unknown_cluster",
+        novelty_proof=str(payload.get("novelty_proof", "")).strip() or "源码校验失败，等待同轮修复。",
+        change_tags=tuple(str(item).strip() for item in payload.get("change_tags", []) if str(item).strip()),
+        edited_regions=tuple(str(item).strip() for item in payload.get("edited_regions", []) if str(item).strip()),
+        expected_effects=tuple(str(item).strip() for item in payload.get("expected_effects", []) if str(item).strip()),
+        core_factors=_core_factors_from_payload(payload),
+        strategy_code=strategy_code,
+    )
+
+
+def _candidate_from_payload(
+    payload: dict[str, Any],
+    *,
+    workspace_strategy_file: Path,
+    base_source: str,
+    factor_change_mode: str = "default",
+) -> StrategyCandidate:
     if not workspace_strategy_file.exists():
         raise StrategySourceError(f"workspace strategy file missing: {workspace_strategy_file}")
     strategy_code = normalize_strategy_source(load_strategy_source(workspace_strategy_file))
@@ -964,7 +1111,7 @@ def _candidate_from_payload(
     validate_strategy_source(
         strategy_code,
         base_source=base_source,
-        factor_change_mode=RUNTIME.factor_change_mode,
+        factor_change_mode=factor_change_mode,
     )
     validate_editable_region_boundaries(base_source, strategy_code, EDITABLE_REGIONS)
     candidate = StrategyCandidate(
@@ -976,7 +1123,7 @@ def _candidate_from_payload(
         change_tags=tuple(str(item).strip() for item in payload["change_tags"] if str(item).strip()),
         edited_regions=tuple(str(item).strip() for item in payload["edited_regions"] if str(item).strip()),
         expected_effects=tuple(str(item).strip() for item in payload["expected_effects"] if str(item).strip()),
-        core_factors=tuple(core_factors),
+        core_factors=_core_factors_from_payload(payload),
         strategy_code=strategy_code,
     )
     if not candidate.change_tags:
@@ -1005,12 +1152,13 @@ def _candidate_from_payload(
     return candidate
 
 
-def _build_model_candidate(
+def _build_model_candidate_payload(
     base_source: str,
     journal_entries: list[dict[str, Any]],
     *,
     workspace_root: Path,
-) -> StrategyCandidate:
+    factor_change_mode: str,
+) -> dict[str, Any]:
     report = best_report
     if report is None:
         raise StrategySourceError("reference report is not initialized")
@@ -1029,19 +1177,21 @@ def _build_model_candidate(
             active_stage_started_at=reference_stage_started_at,
             active_stage_iteration=reference_stage_iteration,
             reference_role=_reference_role(),
+            reference_metrics=benchmark_report.metrics,
             memory_root=RUNTIME.paths.memory_dir,
         ),
         previous_best_score=benchmark_report.metrics["promotion_score"],
         reference_metrics=benchmark_report.metrics,
         score_regime=SCORE_REGIME,
         promotion_min_delta=RUNTIME.promotion_min_delta,
-        factor_change_mode=RUNTIME.factor_change_mode,
+        factor_change_mode=factor_change_mode,
+        current_complexity_headroom_text=format_strategy_complexity_headroom(base_source),
     )
     with _temporary_cwd(workspace_root):
-        payload = generate_json_object(
+        return generate_json_object(
             prompt=prompt,
             system_prompt=build_strategy_system_prompt(
-                factor_change_mode=RUNTIME.factor_change_mode,
+                factor_change_mode=factor_change_mode,
             ),
             max_output_tokens=RUNTIME.prompt_max_output_tokens,
             config=_model_client_config(),
@@ -1052,21 +1202,17 @@ def _build_model_candidate(
             ),
             progress_callback=_build_model_progress_callback("model_generate"),
         )
-    return _candidate_from_payload(
-        payload,
-        workspace_strategy_file=workspace_root / MODEL_WORKSPACE_STRATEGY_PATH,
-        base_source=base_source,
-    )
 
 
-def _repair_model_candidate(
+def _repair_model_candidate_payload(
     *,
     base_source: str,
     failed_candidate: StrategyCandidate,
     error_message: str,
     repair_attempt: int,
     workspace_root: Path,
-) -> StrategyCandidate:
+    factor_change_mode: str,
+) -> dict[str, Any]:
     prompt = build_strategy_runtime_repair_prompt(
         candidate_id=failed_candidate.candidate_id,
         hypothesis=failed_candidate.hypothesis,
@@ -1080,10 +1226,10 @@ def _repair_model_candidate(
         repair_attempt=repair_attempt,
     )
     with _temporary_cwd(workspace_root):
-        payload = generate_json_object(
+        return generate_json_object(
             prompt=prompt,
             system_prompt=build_strategy_system_prompt(
-                factor_change_mode=RUNTIME.factor_change_mode,
+                factor_change_mode=factor_change_mode,
             ),
             max_output_tokens=RUNTIME.prompt_max_output_tokens,
             config=_model_client_config(),
@@ -1097,35 +1243,17 @@ def _repair_model_candidate(
                 repair_attempt=repair_attempt,
             ),
         )
-    repaired = _candidate_from_payload(
-        payload,
-        workspace_strategy_file=workspace_root / MODEL_WORKSPACE_STRATEGY_PATH,
-        base_source=base_source,
-    )
-    if not repaired.candidate_id:
-        repaired = StrategyCandidate(
-            candidate_id=failed_candidate.candidate_id,
-            hypothesis=repaired.hypothesis,
-            change_plan=repaired.change_plan,
-            closest_failed_cluster=repaired.closest_failed_cluster,
-            novelty_proof=repaired.novelty_proof,
-            change_tags=repaired.change_tags,
-            edited_regions=repaired.edited_regions,
-            expected_effects=repaired.expected_effects,
-            core_factors=repaired.core_factors,
-            strategy_code=repaired.strategy_code,
-    )
-    return repaired
 
 
-def _regenerate_model_candidate(
+def _regenerate_model_candidate_payload(
     *,
     base_source: str,
     failed_candidate: StrategyCandidate,
     block_info: dict[str, Any],
     regeneration_attempt: int,
     workspace_root: Path,
-) -> StrategyCandidate:
+    factor_change_mode: str,
+) -> dict[str, Any]:
     prompt = build_strategy_exploration_repair_prompt(
         candidate_id=failed_candidate.candidate_id,
         hypothesis=failed_candidate.hypothesis,
@@ -1143,10 +1271,10 @@ def _regenerate_model_candidate(
         feedback_note=str(block_info.get("feedback_note", "")).strip(),
     )
     with _temporary_cwd(workspace_root):
-        payload = generate_json_object(
+        return generate_json_object(
             prompt=prompt,
             system_prompt=build_strategy_system_prompt(
-                factor_change_mode=RUNTIME.factor_change_mode,
+                factor_change_mode=factor_change_mode,
             ),
             max_output_tokens=RUNTIME.prompt_max_output_tokens,
             config=_model_client_config(),
@@ -1160,17 +1288,175 @@ def _regenerate_model_candidate(
                 repair_attempt=regeneration_attempt,
             ),
         )
-    return _candidate_from_payload(
-        payload,
-        workspace_strategy_file=workspace_root / MODEL_WORKSPACE_STRATEGY_PATH,
+
+
+def _candidate_from_payload_with_validation_repair(
+    *,
+    payload: dict[str, Any],
+    base_source: str,
+    workspace_root: Path,
+    factor_change_mode: str,
+    context_label: str,
+) -> StrategyCandidate:
+    workspace_strategy_file = workspace_root / MODEL_WORKSPACE_STRATEGY_PATH
+    try:
+        return _candidate_from_payload(
+            payload,
+            workspace_strategy_file=workspace_strategy_file,
+            base_source=base_source,
+            factor_change_mode=factor_change_mode,
+        )
+    except StrategySourceError as exc:
+        failed_candidate = _candidate_stub_from_payload(
+            payload,
+            workspace_strategy_file=workspace_strategy_file,
+            fallback_source=base_source,
+        )
+        errors = [str(exc)]
+        for attempt in range(1, max(0, RUNTIME.max_repair_attempts) + 1):
+            write_heartbeat(
+                "candidate_repairing",
+                message=f"iteration {iteration_counter} repairing candidate validation",
+                repair_attempt=attempt,
+                max_repair_attempts=RUNTIME.max_repair_attempts,
+                error=errors[-1],
+                repair_context=context_label,
+            )
+            log_info(
+                f"第 {iteration_counter} 轮{context_label}源码校验失败，尝试同轮修复 "
+                f"{attempt}/{RUNTIME.max_repair_attempts}: {errors[-1]}"
+            )
+            repair_payload = _repair_model_candidate_payload(
+                base_source=base_source,
+                failed_candidate=failed_candidate,
+                error_message="\n".join(errors[-3:]),
+                repair_attempt=attempt,
+                workspace_root=workspace_root,
+                factor_change_mode=factor_change_mode,
+            )
+            failed_candidate = _candidate_stub_from_payload(
+                repair_payload,
+                workspace_strategy_file=workspace_strategy_file,
+                fallback_source=failed_candidate.strategy_code,
+            )
+            try:
+                repaired = _candidate_from_payload(
+                    repair_payload,
+                    workspace_strategy_file=workspace_strategy_file,
+                    base_source=base_source,
+                    factor_change_mode=factor_change_mode,
+                )
+                if not repaired.candidate_id:
+                    repaired = StrategyCandidate(
+                        candidate_id=failed_candidate.candidate_id,
+                        hypothesis=repaired.hypothesis,
+                        change_plan=repaired.change_plan,
+                        closest_failed_cluster=repaired.closest_failed_cluster,
+                        novelty_proof=repaired.novelty_proof,
+                        change_tags=repaired.change_tags,
+                        edited_regions=repaired.edited_regions,
+                        expected_effects=repaired.expected_effects,
+                        core_factors=repaired.core_factors,
+                        strategy_code=repaired.strategy_code,
+                    )
+                return repaired
+            except StrategySourceError as repair_exc:
+                errors.append(str(repair_exc))
+        raise CandidateRepairExhausted(
+            failed_candidate,
+            errors,
+            failure_stage="candidate_validation",
+        ) from exc
+
+
+def _build_model_candidate(
+    base_source: str,
+    journal_entries: list[dict[str, Any]],
+    *,
+    workspace_root: Path,
+    factor_change_mode: str,
+) -> StrategyCandidate:
+    payload = _build_model_candidate_payload(
+        base_source,
+        journal_entries,
+        workspace_root=workspace_root,
+        factor_change_mode=factor_change_mode,
+    )
+    return _candidate_from_payload_with_validation_repair(
+        payload=payload,
         base_source=base_source,
+        workspace_root=workspace_root,
+        factor_change_mode=factor_change_mode,
+        context_label="初始候选",
     )
 
 
-def build_strategy_candidate(base_source: str, *, workspace_root: Path) -> StrategyCandidate:
-    journal_entries = load_journal_entries(RUNTIME.paths.journal_file)
+def _regenerate_model_candidate(
+    *,
+    base_source: str,
+    failed_candidate: StrategyCandidate,
+    block_info: dict[str, Any],
+    regeneration_attempt: int,
+    workspace_root: Path,
+    factor_change_mode: str,
+) -> StrategyCandidate:
+    payload = _regenerate_model_candidate_payload(
+        base_source=base_source,
+        failed_candidate=failed_candidate,
+        block_info=block_info,
+        regeneration_attempt=regeneration_attempt,
+        workspace_root=workspace_root,
+        factor_change_mode=factor_change_mode,
+    )
+    return _candidate_from_payload_with_validation_repair(
+        payload=payload,
+        base_source=base_source,
+        workspace_root=workspace_root,
+        factor_change_mode=factor_change_mode,
+        context_label="候选重生",
+    )
+
+
+def _repair_model_candidate(
+    *,
+    base_source: str,
+    failed_candidate: StrategyCandidate,
+    error_message: str,
+    repair_attempt: int,
+    workspace_root: Path,
+    factor_change_mode: str,
+) -> StrategyCandidate:
+    payload = _repair_model_candidate_payload(
+        base_source=base_source,
+        failed_candidate=failed_candidate,
+        error_message=error_message,
+        repair_attempt=repair_attempt,
+        workspace_root=workspace_root,
+        factor_change_mode=factor_change_mode,
+    )
+    return _candidate_from_payload_with_validation_repair(
+        payload=payload,
+        base_source=base_source,
+        workspace_root=workspace_root,
+        factor_change_mode=factor_change_mode,
+        context_label="运行修复",
+    )
+
+
+def build_strategy_candidate(
+    base_source: str,
+    journal_entries: list[dict[str, Any]],
+    *,
+    workspace_root: Path,
+    factor_change_mode: str,
+) -> StrategyCandidate:
     try:
-        return _build_model_candidate(base_source, journal_entries, workspace_root=workspace_root)
+        return _build_model_candidate(
+            base_source,
+            journal_entries,
+            workspace_root=workspace_root,
+            factor_change_mode=factor_change_mode,
+        )
     except StrategyGenerationTransientError:
         raise
     except Exception:
@@ -1263,7 +1549,7 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
                     validation_window_count=VALIDATION_WINDOW_COUNT,
                     test_window_count=TEST_WINDOW_COUNT,
                     data_range_text=_discord_data_range_text(),
-                    factor_change_mode=RUNTIME.factor_change_mode,
+                    factor_change_mode=RUNTIME.base_factor_change_mode,
                 ),
                 context="initialize_saved_reference",
             )
@@ -1306,7 +1592,7 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
             validation_window_count=VALIDATION_WINDOW_COUNT,
             test_window_count=TEST_WINDOW_COUNT,
             data_range_text=_discord_data_range_text(),
-            factor_change_mode=RUNTIME.factor_change_mode,
+            factor_change_mode=RUNTIME.base_factor_change_mode,
         ),
         context="initialize_baseline",
     )
@@ -1321,6 +1607,7 @@ def _build_journal_entry(
     candidate: StrategyCandidate,
     base_source: str,
     candidate_report: EvaluationReport | None,
+    factor_change_mode: str,
     outcome: str,
     stop_stage: str,
     gate_reason: str | None = None,
@@ -1349,6 +1636,17 @@ def _build_journal_entry(
     actual_param_families = sorted(candidate_signature["param_families"])
     actual_structural_tokens = sorted(candidate_signature["structural_tokens"])
     complexity_delta = build_strategy_complexity_delta(base_source, candidate.strategy_code)
+    runtime_failure_stage = str((extra_fields or {}).get("runtime_failure_stage", "")).strip()
+    smoke_passed = (
+        candidate_report is not None
+        or outcome in {"behavioral_noop", "early_rejected"}
+        or runtime_failure_stage == "full_eval"
+    )
+    full_eval_reached = (
+        candidate_report is not None
+        or outcome == "early_rejected"
+        or runtime_failure_stage == "full_eval"
+    )
     entry = {
         "iteration": iteration_id,
         "timestamp": datetime.now(UTC).isoformat(),
@@ -1377,6 +1675,7 @@ def _build_journal_entry(
         "quality_score": quality_score,
         "promotion_score": promotion_score,
         "promotion_delta": promotion_score - base_promotion if promotion_score is not None else None,
+        "factor_change_mode": factor_change_mode,
         "gate_reason": resolved_gate_reason,
         "decision_reason": resolved_gate_reason,
         "eval_gate_reason": eval_gate_reason,
@@ -1394,10 +1693,13 @@ def _build_journal_entry(
         "system_structural_tokens": actual_structural_tokens,
         "system_signature_hash": candidate_signature["signature_hash"],
         "system_complexity_functions": complexity_delta["functions"],
+        "system_complexity_families": complexity_delta["families"],
         "system_complexity_summary": complexity_delta["summary"],
         "system_complexity_flags": list(complexity_delta["flags"]),
         "system_bloat_flag": bool(complexity_delta["bloat_flag"]),
         "declared_regions_match_system": sorted(candidate.edited_regions) == actual_changed_regions,
+        "smoke_passed": smoke_passed,
+        "full_eval_reached": full_eval_reached,
         "target_family": target_family_from_text(
             candidate.change_tags,
             candidate.hypothesis,
@@ -1440,6 +1742,7 @@ def _record_duplicate_skip(
     iteration_id: int,
     candidate: StrategyCandidate,
     base_source: str,
+    factor_change_mode: str,
     stop_stage: str,
     gate_reason: str,
     note: str,
@@ -1450,6 +1753,7 @@ def _record_duplicate_skip(
             candidate=candidate,
             base_source=base_source,
             candidate_report=None,
+            factor_change_mode=factor_change_mode,
             outcome="duplicate_skipped",
             stop_stage=stop_stage,
             gate_reason=gate_reason,
@@ -1465,6 +1769,7 @@ def _record_exploration_block(
     iteration_id: int,
     candidate: StrategyCandidate,
     base_source: str,
+    factor_change_mode: str,
     block_info: dict[str, Any],
 ) -> None:
     _append_research_journal_entry(
@@ -1473,6 +1778,7 @@ def _record_exploration_block(
             candidate=candidate,
             base_source=base_source,
             candidate_report=None,
+            factor_change_mode=factor_change_mode,
             outcome="exploration_blocked",
             stop_stage=str(block_info.get("stop_stage", "blocked_same_cluster")),
             gate_reason=str(block_info.get("blocked_reason", "")).strip() or "探索方向被系统拒收",
@@ -1504,6 +1810,7 @@ def _record_behavioral_noop(
     iteration_id: int,
     candidate: StrategyCandidate,
     base_source: str,
+    factor_change_mode: str,
     behavior_diff: dict[str, Any],
 ) -> None:
     _append_research_journal_entry(
@@ -1512,6 +1819,7 @@ def _record_behavioral_noop(
             candidate=candidate,
             base_source=base_source,
             candidate_report=None,
+            factor_change_mode=factor_change_mode,
             outcome="behavioral_noop",
             stop_stage="behavioral_noop",
             gate_reason="smoke 行为指纹与当前主参考完全一致",
@@ -1519,6 +1827,41 @@ def _record_behavioral_noop(
             extra_fields={
                 "behavior_diff": behavior_diff,
             },
+        )
+    )
+    if maybe_compact(RUNTIME.paths.journal_file):
+        log_info("研究日志已压缩")
+
+
+def _record_runtime_failure(
+    *,
+    iteration_id: int,
+    candidate: StrategyCandidate,
+    base_source: str,
+    factor_change_mode: str,
+    errors: list[str],
+    failure_stage: str,
+    stop_stage: str,
+) -> None:
+    last_error = errors[-1] if errors else "运行失败"
+    extra_fields: dict[str, Any] = {
+        "runtime_failure_stage": failure_stage,
+        "decision_reason": last_error,
+    }
+    if _is_complexity_error_message(last_error):
+        extra_fields["system_bloat_flag"] = True
+    _append_research_journal_entry(
+        _build_journal_entry(
+            iteration_id=iteration_id,
+            candidate=candidate,
+            base_source=base_source,
+            candidate_report=None,
+            factor_change_mode=factor_change_mode,
+            outcome="runtime_failed",
+            stop_stage=stop_stage,
+            gate_reason="运行失败",
+            note="；".join(errors),
+            extra_fields=extra_fields,
         )
     )
     if maybe_compact(RUNTIME.paths.journal_file):
@@ -1554,6 +1897,7 @@ def _candidate_with_repair(
     candidate: StrategyCandidate,
     *,
     workspace_root: Path,
+    factor_change_mode: str,
 ) -> tuple[StrategyCandidate, EvaluationReport]:
     current = candidate
     errors: list[str] = []
@@ -1577,7 +1921,7 @@ def _candidate_with_repair(
             write_strategy_source(RUNTIME.paths.strategy_file, base_source)
             reload_strategy_module()
             if attempt >= RUNTIME.max_repair_attempts:
-                raise CandidateRepairExhausted(current, errors) from exc
+                raise CandidateRepairExhausted(current, errors, failure_stage=exc.stage) from exc
             write_heartbeat(
                 "candidate_repairing",
                 message=f"iteration {iteration_counter} repairing candidate",
@@ -1595,6 +1939,7 @@ def _candidate_with_repair(
                 error_message="\n".join(errors[-3:]),
                 repair_attempt=attempt + 1,
                 workspace_root=workspace_root,
+                factor_change_mode=factor_change_mode,
             )
     raise CandidateRepairExhausted(current, errors)
 
@@ -1619,13 +1964,48 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         )
         return "evaluation_only"
 
+    journal_entries = load_journal_entries(RUNTIME.paths.journal_file)
+    current_factor_change_mode, factor_change_reason = _resolve_iteration_factor_change_mode(journal_entries)
+    log_info(f"第 {iteration_id} 轮因子模式: {current_factor_change_mode} | {factor_change_reason}")
+    write_heartbeat(
+        "iteration_preparing",
+        message=f"iteration {iteration_id} preparing candidate",
+        factor_change_mode=current_factor_change_mode,
+        factor_change_reason=factor_change_reason,
+    )
+
     with tempfile.TemporaryDirectory(prefix="macd-v2-workspace-") as temp_dir:
         workspace_root = Path(temp_dir)
         workspace_strategy_file = workspace_root / MODEL_WORKSPACE_STRATEGY_PATH
         workspace_strategy_file.parent.mkdir(parents=True, exist_ok=True)
         write_strategy_source(workspace_strategy_file, best_source)
 
-        candidate = build_strategy_candidate(best_source, workspace_root=workspace_root)
+        try:
+            candidate = build_strategy_candidate(
+                best_source,
+                journal_entries,
+                workspace_root=workspace_root,
+                factor_change_mode=current_factor_change_mode,
+            )
+        except CandidateRepairExhausted as exc:
+            write_strategy_source(RUNTIME.paths.strategy_file, best_source)
+            reload_strategy_module()
+            _record_runtime_failure(
+                iteration_id=iteration_id,
+                candidate=exc.candidate,
+                base_source=best_source,
+                factor_change_mode=current_factor_change_mode,
+                errors=exc.errors,
+                failure_stage=exc.failure_stage or "candidate_validation",
+                stop_stage="candidate_validation",
+            )
+            log_info(f"第 {iteration_id} 轮候选源码校验失败并已记录: {exc}")
+            write_heartbeat(
+                "iteration_runtime_failed",
+                message=f"iteration {iteration_id} candidate validation failed",
+                error=str(exc),
+            )
+            return "runtime_failed"
         candidate_report: EvaluationReport | None = None
         exploration_regeneration_attempt = 0
         behavioral_noop_regeneration_attempt = 0
@@ -1640,6 +2020,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                     iteration_id=iteration_id,
                     candidate=candidate,
                     base_source=best_source,
+                    factor_change_mode=current_factor_change_mode,
                     stop_stage="duplicate_source",
                     gate_reason="候选源码与当前主参考完全相同",
                     note="模型未产生有效代码改动；本轮按重复探索记入研究历史。",
@@ -1652,6 +2033,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                     iteration_id=iteration_id,
                     candidate=candidate,
                     base_source=best_source,
+                    factor_change_mode=current_factor_change_mode,
                     stop_stage="duplicate_history",
                     gate_reason="候选源码命中最近研究历史",
                     note="模型重复产出了最近已出现过的候选源码；本轮按重复探索记入研究历史。",
@@ -1666,6 +2048,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                     iteration_id=iteration_id,
                     candidate=candidate,
                     base_source=best_source,
+                    factor_change_mode=current_factor_change_mode,
                     stop_stage="empty_diff",
                     gate_reason="候选没有产生有效 diff",
                     note="候选虽然通过了解析，但没有形成可验证的有效改动；本轮按重复探索记入研究历史。",
@@ -1690,6 +2073,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                     iteration_id=iteration_id,
                     candidate=candidate,
                     base_source=best_source,
+                    factor_change_mode=current_factor_change_mode,
                     block_info=block_info,
                 )
                 log_info(
@@ -1722,6 +2106,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                     block_info=block_info,
                     regeneration_attempt=exploration_regeneration_attempt,
                     workspace_root=workspace_root,
+                    factor_change_mode=current_factor_change_mode,
                 )
                 continue
 
@@ -1732,6 +2117,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                             best_source,
                             candidate,
                             workspace_root=workspace_root,
+                            factor_change_mode=current_factor_change_mode,
                         )
                         break
                     except CandidateBehavioralNoop as exc:
@@ -1743,6 +2129,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                                 iteration_id=iteration_id,
                                 candidate=exc.candidate,
                                 base_source=best_source,
+                                factor_change_mode=current_factor_change_mode,
                                 behavior_diff=exc.behavior_diff,
                             )
                             log_info(
@@ -1781,6 +2168,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                             block_info=block_info,
                             regeneration_attempt=behavioral_noop_regeneration_attempt,
                             workspace_root=workspace_root,
+                            factor_change_mode=current_factor_change_mode,
                         )
                         break
             except EarlyRejection as exc:
@@ -1792,6 +2180,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                         candidate=candidate,
                         base_source=best_source,
                         candidate_report=None,
+                        factor_change_mode=current_factor_change_mode,
                         outcome="early_rejected",
                         stop_stage="early_reject",
                         gate_reason="前段趋势捕获过差",
@@ -1810,20 +2199,15 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             except CandidateRepairExhausted as exc:
                 write_strategy_source(RUNTIME.paths.strategy_file, best_source)
                 reload_strategy_module()
-                _append_research_journal_entry(
-                    _build_journal_entry(
-                        iteration_id=iteration_id,
-                        candidate=exc.candidate,
-                        base_source=best_source,
-                        candidate_report=None,
-                        outcome="runtime_failed",
-                        stop_stage="runtime_error",
-                        gate_reason="运行失败",
-                        note="；".join(exc.errors),
-                    )
+                _record_runtime_failure(
+                    iteration_id=iteration_id,
+                    candidate=exc.candidate,
+                    base_source=best_source,
+                    factor_change_mode=current_factor_change_mode,
+                    errors=exc.errors,
+                    failure_stage=exc.failure_stage or "runtime_error",
+                    stop_stage="runtime_error",
                 )
-                if maybe_compact(RUNTIME.paths.journal_file):
-                    log_info("研究日志已压缩")
                 log_info(f"第 {iteration_id} 轮运行失败并已记录: {exc}")
                 write_heartbeat(
                     "iteration_runtime_failed",
@@ -1852,6 +2236,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         candidate=candidate,
         base_source=best_source,
         candidate_report=candidate_report,
+        factor_change_mode=current_factor_change_mode,
         outcome="accepted" if accepted else "rejected",
         stop_stage="full_eval",
         gate_reason=decision_reason if not accepted else None,
@@ -1926,7 +2311,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             data_range_text=_discord_data_range_text(),
             shadow_test_metrics=shadow_test_metrics,
             candidate=candidate,
-            factor_change_mode=RUNTIME.factor_change_mode,
+            factor_change_mode=current_factor_change_mode,
         )
         attachments = [chart_paths.validation_chart] if chart_paths.validation_chart is not None else None
         if attachments:

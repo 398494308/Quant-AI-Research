@@ -52,6 +52,7 @@ CLUSTER_OVERHEAT_SHARE = 0.60
 DEFAULT_CLUSTER_LOCK_STEPS = (3, 6, 10)
 TAG_NOVELTY_MAX_OVERLAP = 0.34
 STRUCTURAL_TOKEN_NOVELTY_MAX_OVERLAP = 0.60
+STRUCTURAL_REDUCTION_TAGS = frozenset({"remove_dead_gate", "merge_veto", "widen_outer_context"})
 LONG_TARGET_KEYWORDS = (
     "long",
     "bull",
@@ -1090,6 +1091,8 @@ def _candidate_has_structural_novelty(
         return True
     if candidate_signature_hash and candidate_signature_hash in low_change_context["signature_hashes"]:
         return False
+    if candidate_tags & STRUCTURAL_REDUCTION_TAGS and candidate_changed_regions:
+        return True
     if candidate_regions and candidate_structural_tokens:
         overlap_ratio = len(candidate_structural_tokens & low_change_context["structural_tokens"]) / max(len(candidate_structural_tokens), 1)
         if len(candidate_structural_tokens) >= 4 and overlap_ratio <= STRUCTURAL_TOKEN_NOVELTY_MAX_OVERLAP:
@@ -1632,6 +1635,109 @@ def _format_optional_metric(value: float | None) -> str:
     return f"{value:.2f}"
 
 
+def _weak_side_from_reference_metrics(reference_metrics: dict[str, Any] | None) -> str:
+    if not isinstance(reference_metrics, dict):
+        return ""
+    bull_score = _score_value(reference_metrics.get("validation_bull_capture_score"))
+    bear_score = _score_value(reference_metrics.get("validation_bear_capture_score"))
+    if bull_score < bear_score:
+        return "long"
+    if bear_score < bull_score:
+        return "short"
+    return ""
+
+
+def _entry_smoke_passed(entry: dict[str, Any]) -> bool:
+    if "smoke_passed" in entry:
+        return bool(entry.get("smoke_passed"))
+    outcome = str(entry.get("outcome", "")).strip()
+    if outcome in {"accepted", "rejected", "behavioral_noop", "early_rejected"}:
+        return True
+    if outcome == "runtime_failed":
+        return str(entry.get("runtime_failure_stage", "")).strip() == "full_eval"
+    return False
+
+
+def _entry_full_eval_reached(entry: dict[str, Any]) -> bool:
+    if "full_eval_reached" in entry:
+        return bool(entry.get("full_eval_reached"))
+    outcome = str(entry.get("outcome", "")).strip()
+    if outcome in {"accepted", "rejected", "early_rejected"}:
+        return True
+    return outcome == "runtime_failed" and str(entry.get("runtime_failure_stage", "")).strip() == "full_eval"
+
+
+def _stage_operating_metrics(
+    stage_entries: list[dict[str, Any]],
+    *,
+    reference_metrics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    def _ratio(numerator: int, denominator: int) -> float:
+        return numerator / denominator if denominator > 0 else 0.0
+
+    entry_count = len(stage_entries)
+    accepted_count = sum(1 for entry in stage_entries if str(entry.get("outcome", "")) == "accepted")
+    behavioral_noop_count = sum(1 for entry in stage_entries if str(entry.get("outcome", "")) == "behavioral_noop")
+    exploration_blocked_count = sum(1 for entry in stage_entries if str(entry.get("outcome", "")) == "exploration_blocked")
+    smoke_passed_count = sum(1 for entry in stage_entries if _entry_smoke_passed(entry))
+    full_eval_reached_count = sum(1 for entry in stage_entries if _entry_full_eval_reached(entry))
+    ordinary_family_counts = [
+        len(
+            [
+                item
+                for item in (entry.get("system_ordinary_region_families", []) or entry.get("ordinary_region_families", []))
+                if str(item).strip()
+            ]
+        )
+        for entry in stage_entries
+    ]
+    weak_side = _weak_side_from_reference_metrics(reference_metrics)
+    weak_side_attempts = 0
+    if weak_side:
+        for entry in stage_entries:
+            target_family = str(entry.get("target_family", "")).strip()
+            if weak_side == "long" and target_family in {"long", "mixed"}:
+                weak_side_attempts += 1
+            elif weak_side == "short" and target_family in {"short", "mixed"}:
+                weak_side_attempts += 1
+    return {
+        "entry_count": entry_count,
+        "accept_rate": _ratio(accepted_count, entry_count),
+        "behavioral_noop_rate": _ratio(behavioral_noop_count, entry_count),
+        "exploration_blocked_rate": _ratio(exploration_blocked_count, entry_count),
+        "smoke_to_full_eval_rate": _ratio(full_eval_reached_count, smoke_passed_count),
+        "avg_ordinary_family_count": _mean([float(value) for value in ordinary_family_counts]) if ordinary_family_counts else 0.0,
+        "weak_side": weak_side,
+        "weak_side_share": _ratio(weak_side_attempts, entry_count),
+    }
+
+
+def _format_stage_operating_metrics(
+    metrics: dict[str, Any],
+    *,
+    stage_name: str,
+) -> list[str]:
+    weak_side = str(metrics.get("weak_side", "")).strip()
+    weak_side_label = {"long": "弱侧(long)", "short": "弱侧(short)"}.get(weak_side, "弱侧")
+    weak_side_share = (
+        f"{_score_value(metrics.get('weak_side_share')):.0%}"
+        if weak_side else "-"
+    )
+    return [
+        f"{stage_name} 运营指标表:",
+        "| accept rate | behavioral_noop rate | exploration_blocked rate | smoke->full_eval | 平均改动 ordinary families | 弱侧探索占比 |",
+        "| --- | --- | --- | --- | --- | --- |",
+        (
+            f"| {_score_value(metrics.get('accept_rate')):.0%} | "
+            f"{_score_value(metrics.get('behavioral_noop_rate')):.0%} | "
+            f"{_score_value(metrics.get('exploration_blocked_rate')):.0%} | "
+            f"{_score_value(metrics.get('smoke_to_full_eval_rate')):.0%} | "
+            f"{_score_value(metrics.get('avg_ordinary_family_count')):.2f} | "
+            f"{weak_side_label} {weak_side_share} |"
+        ),
+    ]
+
+
 def _summarize_stage_entries(stage_entries: list[dict[str, Any]], *, stage_id: int) -> dict[str, Any]:
     if not stage_entries:
         return {}
@@ -1892,6 +1998,8 @@ def _display_stage(entry: dict[str, Any]) -> str:
         return "无有效diff"
     if stage == "behavioral_noop":
         return "行为无变化"
+    if stage == "candidate_validation":
+        return "源码校验"
     if stage == "blocked_same_cluster":
         return "同簇近邻"
     if stage == "blocked_locked_cluster":
@@ -2020,6 +2128,10 @@ def _empty_prompt_tables(stage_title: str = "当前 stage") -> list[str]:
         "| - | - | - | 低 | 0 | - | - | - | - | - | 暂无需要降权的高风险轮次 |",
         "",
         f"{stage_title} 共 0 条：保留 0，未保留 0，重复跳过 0，探索拦截 0，提前淘汰 0，运行失败 0。",
+        f"{stage_title} 运营指标表:",
+        "| accept rate | behavioral_noop rate | exploration_blocked rate | smoke->full_eval | 平均改动 ordinary families | 弱侧探索占比 |",
+        "| --- | --- | --- | --- | --- | --- |",
+        "| 0% | 0% | 0% | 0% | 0.00 | - |",
         f"{stage_title} 核心指标表:",
         "| 轮次 | 结果 | 阶段 | quality | promotion | val_hit | val_bull | val_bear | gap | gate |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -2155,6 +2267,7 @@ def build_journal_prompt_summary(
     active_stage_started_at: str = "",
     active_stage_iteration: int = 0,
     reference_role: str = "",
+    reference_metrics: dict[str, Any] | None = None,
     memory_root: Path | None = None,
 ) -> str:
     all_entries = list(entries)
@@ -2234,6 +2347,10 @@ def build_journal_prompt_summary(
             early_rejected_count = sum(1 for entry in board_entries if entry.get("outcome") == "early_rejected")
             runtime_failed_count = sum(1 for entry in board_entries if entry.get("outcome") == "runtime_failed")
             bloat_flag_count = sum(1 for entry in board_entries if bool(entry.get("system_bloat_flag")))
+            operating_metrics = _stage_operating_metrics(
+                board_entries,
+                reference_metrics=reference_metrics,
+            )
             parts.append(
                 f"{stage_scope} 共 {len(board_entries)} 条："
                 f"保留 {accepted_count}，未保留 {rejected_count}，"
@@ -2242,6 +2359,12 @@ def build_journal_prompt_summary(
                 f"探索拦截 {exploration_blocked_count}，"
                 f"提前淘汰 {early_rejected_count}，运行失败 {runtime_failed_count}，"
                 f"复杂度超标 {bloat_flag_count}。"
+            )
+            parts.extend(
+                _format_stage_operating_metrics(
+                    operating_metrics,
+                    stage_name=stage_name,
+                )
             )
             if len(display_entries) < len(board_entries):
                 parts.append(

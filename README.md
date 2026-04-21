@@ -140,7 +140,9 @@
 - 模型可以看到 `val` 的聚合诊断，但完全看不到 `test`。
 - prompt 会明确写出：只有 `gate` 通过且 `promotion_delta > 0.02` 才可能刷新当前 `champion`。
 - 如果候选在 smoke 窗口上的行为完全不变，系统会在同一轮回灌 smoke 摘要并强制重生，而不是直接白白结束整轮。
-- `edited_regions` 现在只允许填 `1-3` 个，而且系统会用真实代码 diff / AST 派生的 `system signature` 复核，不再只信模型自报元信息。
+- 如果候选在源码校验阶段就因为复杂度预算或复杂度增量超限被拒，系统也会先做同轮 repair；修不动才把这类失败写进当前 `stage` 记忆。
+- runtime prompt 会额外显示当前基底最紧张的 complexity headroom，让模型先看到哪个 family / function 已经贴边。
+- `edited_regions` 不再硬卡 `1-3`；系统只保留“至少改到 1 个 ordinary family”的下限，并继续用真实代码 diff / AST 派生的 `system signature` 复核，不再只信模型自报元信息。
 - prompt 里的可编辑区域已经扩成真实存在的命名规则块，允许模型直接动 `sideways / flow / trend_quality / followthrough / long_entry / short_entry / strategy` 这些结构块。
 - 最近轮次摘要拆成了“核心指标表 + 元信息摘要”，不再用超宽大表。
 
@@ -301,6 +303,12 @@ python3 scripts/research_macd_aggressive_v2.py --once
 
 ```bash
 bash scripts/manage_research_macd_aggressive_v2.sh start
+```
+
+如果你刚手工换了当前基底，想让研究器忽略旧的已保存参考并从 `src/strategy_macd_aggressive.py` 重新初始化一次：
+
+```bash
+python3 scripts/research_macd_aggressive_v2.py --reset-champion --no-optimize
 ```
 
 查看状态：

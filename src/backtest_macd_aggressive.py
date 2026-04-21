@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """激进版趋势策略回测器：15m 执行，1h/4h/情绪过滤。"""
 import csv
+import importlib
 import math
 from bisect import bisect_right
 from datetime import UTC, datetime, timedelta
@@ -1054,6 +1055,61 @@ def _trade_reason_stats(trades):
     return counts
 
 
+def _empty_strategy_funnel():
+    return {
+        side: {
+            "sideways_pass": 0,
+            "outer_context_pass": 0,
+            "path_pass": 0,
+            "final_veto_pass": 0,
+        }
+        for side in ("long", "short")
+    }
+
+
+def _strategy_funnel_hooks(strategy_func):
+    module_name = str(getattr(strategy_func, "__module__", "")).strip()
+    if not module_name:
+        return None, None
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        return None, None
+    reset_hook = getattr(module, "reset_funnel_diagnostics", None)
+    snapshot_hook = getattr(module, "get_funnel_diagnostics", None)
+    return (
+        reset_hook if callable(reset_hook) else None,
+        snapshot_hook if callable(snapshot_hook) else None,
+    )
+
+
+def _strategy_funnel_snapshot(snapshot_hook):
+    funnel = _empty_strategy_funnel()
+    if snapshot_hook is None:
+        return funnel
+    try:
+        payload = snapshot_hook()
+    except Exception:
+        return funnel
+    if not isinstance(payload, dict):
+        return funnel
+    for side in funnel:
+        side_payload = payload.get(side, {})
+        if not isinstance(side_payload, dict):
+            continue
+        for stage in funnel[side]:
+            funnel[side][stage] = int(side_payload.get(stage, 0) or 0)
+    return funnel
+
+
+def _filled_side_entries(signal_entries):
+    side_entries = {"long": 0, "short": 0}
+    for signal, count in signal_entries.items():
+        side = _signal_side(str(signal))
+        side_entries[side] = int(side_entries.get(side, 0)) + int(count or 0)
+    return side_entries
+
+
 def prepare_backtest_context(
     strategy_params,
     *,
@@ -1193,6 +1249,9 @@ def backtest_macd_aggressive(
     exit_p = dict(EXIT_PARAMS)
     if exit_params:
         exit_p.update(exit_params)
+    funnel_reset_hook, funnel_snapshot_hook = _strategy_funnel_hooks(strategy_func)
+    if funnel_reset_hook is not None:
+        funnel_reset_hook()
 
     if prepared_context is None:
         prepared_context = prepare_backtest_context(
@@ -1719,6 +1778,8 @@ def backtest_macd_aggressive(
         "liquidations": sum(1 for trade in settlement_legs if trade["reason"] == "爆仓"),
         "pyramid_add_count": pyramid_add_count,
         "signal_stats": signal_stats,
+        "strategy_funnel": _strategy_funnel_snapshot(funnel_snapshot_hook),
+        "filled_side_entries": _filled_side_entries(signal_entries),
     }
     if include_diagnostics:
         result["daily_equity_curve"] = daily_equity_curve

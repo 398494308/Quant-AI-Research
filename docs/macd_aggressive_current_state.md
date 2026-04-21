@@ -125,13 +125,21 @@ test 验收：
 - prompt/history 不再展示“最近动态核心因子 / 全局高频核心因子”，只保留方向簇、失败标签、改动区域和真实结果；原始 `core_factors` 仍保留在 raw archive
 - 当多空捕获明显失衡时，prompt 会追加“软偏置”提示，优先把探索预算投向更弱的一侧，而不是硬性锁死只看单边
 - `test` 完全不可见
+- `runtime prompt` 现在会附带当前基底最紧张的 complexity headroom，明确显示哪个 family / function 还剩多少 `lines / bool_ops / ifs`
 - 当前 `stage` 只在 prompt 中展示最近有限条表格和元信息，但完整 `stage` 已另存到 memory 目录
 - journal 里新增 `方向冷却表（系统硬约束）`
 - 防重复规则只保留一份，不再多处复写
 - 如果候选在 smoke 窗口上的行为完全不变，系统会在同一轮回灌 smoke 摘要并强制重生
+- 如果候选在源码校验阶段就因为复杂度预算或复杂度增量超限被拒，系统也会先做同轮 repair；仍修不动才把这轮记进 journal 和记忆包
 - ordinary family 不再有 `>3` 的硬报错；系统改成保留“至少 `1` 个 ordinary family”的下限，`1-3` 只是默认软引导，连续 `behavioral_noop` 时允许更大步长
 - `behavioral_noop` 回灌现在会明确指出候选真实改动区域、普通 family、目标侧，以及当前该优先看的外层 choke point：`long_outer_context_ok / long_final_veto_clear / short_outer_context_ok / short_final_veto_clear`
 - prompt 里的可编辑区域已切到真实存在的命名规则块，能直接改 `sideways / flow / trend_quality / followthrough / long_entry / short_entry / strategy`
+
+当前基底的复杂度余量也已重新留白：
+
+- `trend_quality_family` 现在约为 `116 / 130 lines`、`36 / 42 bool_ops`
+- 也就是大约还剩 `14 lines`、`6 bool_ops`
+- 这次瘦身只删减了已有门槛，没有改动整体函数结构和命名规则块
 
 ## 当前 Discord 口径
 

@@ -6,6 +6,9 @@ from typing import Any
 
 from research_v2.journal import ORDINARY_REGION_FAMILIES
 from research_v2.strategy_code import (
+    COMPLEXITY_ABSOLUTE_BUDGETS,
+    COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS,
+    COMPLEXITY_DEFAULT_GROWTH_LIMITS,
     REQUIRED_FUNCTIONS,
     factor_change_mode_label,
     factor_change_mode_prompt_hint,
@@ -52,6 +55,32 @@ def _required_symbol_text() -> str:
 
 def _ordinary_family_text() -> str:
     return " / ".join(f"`{family_name}`" for family_name in ORDINARY_REGION_FAMILIES)
+
+
+def _complexity_budget_text() -> str:
+    absolute_lines = ["复杂度硬上限（超了直接拒收）:"]
+    for function_name in ("_is_sideways_regime", "_trend_quality_ok", "_trend_followthrough_ok", "strategy"):
+        limits = COMPLEXITY_ABSOLUTE_BUDGETS[function_name]
+        absolute_lines.append(
+            f"- `{function_name}`: lines <= {limits['lines']} / bool_ops <= {limits['bool_ops']} / ifs <= {limits['ifs']}"
+        )
+    absolute_lines.append("决策链 family 硬上限（禁止把复杂度搬家到 long_* / short_* / final_veto 等 helper）:")
+    for family_name in ("sideways_family", "trend_quality_family", "long_path_chain", "short_path_chain"):
+        limits = COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS[family_name]
+        absolute_lines.append(
+            f"- `{family_name}`: lines <= {limits['lines']} / bool_ops <= {limits['bool_ops']} / ifs <= {limits['ifs']}"
+        )
+
+    growth = COMPLEXITY_DEFAULT_GROWTH_LIMITS
+    absolute_lines.append("默认模式单轮增量上限（相对当前基底，超了直接拒收）:")
+    absolute_lines.append(
+        f"- 任一监控函数: lines <= +{growth['lines']} / bool_ops <= +{growth['bool_ops']} / ifs <= +{growth['ifs']}"
+    )
+    absolute_lines.append(
+        f"- 任一决策链 family: lines <= +{growth['lines']} / bool_ops <= +{growth['bool_ops']} / ifs <= +{growth['ifs']}"
+    )
+    absolute_lines.append("- 若想新增条件，必须同步删旧条件、合并旧分支，优先保持净复杂度不增长。")
+    return "\n".join(absolute_lines)
 
 
 # ==================== 结构化输出 ====================
@@ -119,6 +148,7 @@ def build_candidate_response_schema() -> dict[str, Any]:
 
 
 def build_strategy_system_prompt(*, factor_change_mode: str = "default") -> str:
+    complexity_budget_text = _complexity_budget_text()
     return f"""你是 BTC 永续合约激进趋势策略研究员。
 
 项目目标：
@@ -138,7 +168,11 @@ def build_strategy_system_prompt(*, factor_change_mode: str = "default") -> str:
 - 优先保持代码结构化、规则块命名清晰、阈值集中、因果链可解释。
 - 默认先做删减、合并、替换，再考虑新增条件；如果一个新条件只覆盖很窄的历史片段，优先删旧条件或改旧阈值，不要继续叠分叉。
 - 不要把同一侧 path 拆成多个近似微变体；一个 path 没有明显新增交易路径时，应视为失败假设，而不是继续微调同一区间。
+- 明确要求：不要“堆屎”。很多你想到的过滤、例外、path 或 veto，当前策略里往往已经以别的名字存在；新增前先检查现有规则块、阈值和最终放行链是否已经表达了同一因果。
+- 若现有脚本里已经有近似逻辑，不要换个名字再写一份重复条件；优先删旧、并旧、改旧，禁止把同一因果链在不同 helper / path / veto 里重复实现。
+- 明确允许结构性删减轮：`remove_dead_gate`、`merge_veto`、`widen_outer_context` 都是合法 change_tags；这类轮次的目标是减少死分支、提高 reachability。
 - {factor_change_mode_prompt_hint(factor_change_mode)}
+{complexity_budget_text}
 
 输出与协作规则：
 - 只输出 JSON，不要解释，不要 markdown，不要贴源码。
@@ -199,9 +233,16 @@ def build_strategy_research_prompt(
     score_regime: str = "trend_capture_v6",
     promotion_min_delta: float = 0.02,
     factor_change_mode: str = "default",
+    current_complexity_headroom_text: str = "",
 ) -> str:
     side_bias_guidance = _side_bias_guidance(reference_metrics)
     side_bias_block = f"\n{side_bias_guidance}\n" if side_bias_guidance else "\n"
+    complexity_budget_text = _complexity_budget_text()
+    complexity_headroom_block = (
+        f"\n{current_complexity_headroom_text}\n"
+        if current_complexity_headroom_text.strip()
+        else "\n"
+    )
     return f"""当前回合任务：
 - 围绕一个可证伪假设，直接修改 `src/strategy_macd_aggressive.py`。
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
@@ -226,7 +267,10 @@ def build_strategy_research_prompt(
 - 新增 path 不等于新增交易；必须继续检查最终合流与否决链。长侧重点看 `long_signal_path_ok -> long_final_veto_clear -> _trend_followthrough_long()`，空侧重点看 `breakdown_ready -> short_final_veto_clear -> _trend_followthrough_short()`。
 - 如果主要改 `_trend_followthrough_ok()`、`_trend_quality_ok()` 或 `_flow_confirmation_ok()`，必须确认现有 `strategy()` 路径会触达；否则优先改 `strategy()`。
 - 若最近连续出现 `behavioral_noop`，本轮默认必须放大步长：优先切不同方向簇，或改多个普通 family；不要只换措辞、tag 或近邻阈值。
+- 若漏斗诊断显示一侧长期 0 交易、outer_context 几乎全死，或 path 能过但 final_veto 基本全死，优先做结构性删减轮：`remove_dead_gate` / `merge_veto` / `widen_outer_context`。
 - 默认模式下有复杂度预算：如果你想加一条新条件，必须同步删掉或合并旧条件，避免 `strategy()` 和关键 helper 再次膨胀。
+{complexity_budget_text}
+{complexity_headroom_block}
 
 当前口径的 gate / 评分提醒：
 - val 趋势段命中率 >= 35%
@@ -285,6 +329,8 @@ def build_strategy_runtime_repair_prompt(
 修复规则：
 - 这是同一轮 repair，不要换研究主题，不要大幅改 hypothesis。
 - 优先做最小必要修复，先保证代码可运行。
+- 若报错是复杂度预算或复杂度增量超限，必须先删旧条件或合并旧分支，让触发报错的 function/family 回到预算内。
+- 不要把复杂度从一个函数搬到同 family 的别的 helper；这类“搬家”仍会因为 family 预算被系统拒收。
 - 若报错涉及缺失 helper / 缺失命名规则块，优先恢复缺失的原函数定义，保留拆分后的结构，不要把多个 helper 合并回旧函数。
 - 若报错涉及 `UnboundLocalError` / `NameError` / 条件变量缺失，优先恢复缺失变量定义，或把该变量的所有引用同步替换到新的等价变量；禁止只修一处而留下半残引用。
 - 除非原标签明显不准确，否则尽量保持 `change_tags`、`edited_regions`、`closest_failed_cluster` 不变。
@@ -356,6 +402,7 @@ def build_strategy_exploration_repair_prompt(
 - 如果附加反馈显示 smoke 窗口的交易数、收益和信号统计完全没变，默认说明你上一版改动没有触达真实交易路径；这次必须优先改能改变最终信号集合或退出集合的规则块，而不是继续只拨不会触发的细阈值。
 - 对长侧优先检查 `long_outer_context_ok` 与 `long_final_veto_clear`；对空侧优先检查 `short_outer_context_ok` 与 `short_final_veto_clear`。若这些总闸门不动，新增 path 很可能仍是死分支。
 - 不要把“新增一个 `xxx_path_ok`”误当成一定会新增交易；只有它真正穿过最终 veto / followthrough，smoke 行为才会改变。
+- 若附加反馈显示 `outer_context` 或 `final_veto` 是主要堵点，允许直接做结构性删减轮：`remove_dead_gate`、`merge_veto`、`widen_outer_context`。
 - 仍然只允许修改 `src/strategy_macd_aggressive.py` 可编辑区域。
 - 不要引入网络、文件、随机数、外部依赖。
 - 代码仍必须保持简洁、结构化、可读。

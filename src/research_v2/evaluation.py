@@ -344,6 +344,127 @@ def _build_window_lines(results: list[dict[str, Any]], include_validation: bool)
     return lines
 
 
+def _empty_funnel_counts() -> dict[str, dict[str, int]]:
+    return {
+        side: {
+            "sideways_pass": 0,
+            "outer_context_pass": 0,
+            "path_pass": 0,
+            "final_veto_pass": 0,
+            "filled_entries": 0,
+        }
+        for side in ("long", "short")
+    }
+
+
+def _result_funnel_counts(result: dict[str, Any] | None) -> dict[str, dict[str, int]]:
+    counts = _empty_funnel_counts()
+    if not isinstance(result, dict):
+        return counts
+    funnel_payload = result.get("strategy_funnel", {})
+    if isinstance(funnel_payload, dict):
+        for side in counts:
+            side_payload = funnel_payload.get(side, {})
+            if not isinstance(side_payload, dict):
+                continue
+            for stage in ("sideways_pass", "outer_context_pass", "path_pass", "final_veto_pass"):
+                counts[side][stage] = int(side_payload.get(stage, 0) or 0)
+    filled_payload = result.get("filled_side_entries", {})
+    if isinstance(filled_payload, dict):
+        for side in counts:
+            counts[side]["filled_entries"] = int(filled_payload.get(side, 0) or 0)
+    return counts
+
+
+def _aggregate_funnel_counts(results: list[dict[str, Any]], group: str) -> dict[str, dict[str, int]]:
+    aggregated = _empty_funnel_counts()
+    for item in _window_payloads(results, group):
+        result_counts = _result_funnel_counts(item.get("result"))
+        for side in aggregated:
+            for stage in aggregated[side]:
+                aggregated[side][stage] += int(result_counts[side].get(stage, 0))
+    return aggregated
+
+
+def _format_funnel_line(label: str, counts: dict[str, int]) -> str:
+    return (
+        f"{label}: 横盘后{counts['sideways_pass']} -> outer_context {counts['outer_context_pass']} -> "
+        f"path {counts['path_pass']} -> final_veto {counts['final_veto_pass']} -> 真正出单 {counts['filled_entries']}"
+    )
+
+
+def _append_funnel_metrics(metrics: dict[str, float], prefix: str, counts: dict[str, dict[str, int]]) -> None:
+    for side in ("long", "short"):
+        for stage, value in counts[side].items():
+            metrics[f"{prefix}_{side}_{stage}"] = float(value)
+
+
+def _low_activity_signal_payload(
+    *,
+    validation_counts: dict[str, dict[str, int]],
+    selection_counts: dict[str, dict[str, int]],
+    validation_closed_trades: int,
+    selection_closed_trades: int,
+) -> dict[str, Any]:
+    issues: list[str] = []
+    tags: set[str] = set()
+    for side, label in (("long", "多头"), ("short", "空头")):
+        validation_side = validation_counts[side]
+        selection_side = selection_counts[side]
+        if validation_side["filled_entries"] == 0 and selection_side["filled_entries"] == 0:
+            issues.append(
+                f"{label}连续 0 单: train+val/val 出单 {selection_side['filled_entries']} / {validation_side['filled_entries']}"
+            )
+            tags.update({"remove_dead_gate", "widen_outer_context"})
+        if (
+            selection_side["sideways_pass"] >= 24
+            and selection_side["outer_context_pass"] <= max(1, int(selection_side["sideways_pass"] * 0.03))
+        ):
+            issues.append(
+                f"{label} outer_context 基本放不行: 横盘后 {selection_side['sideways_pass']}，outer_context 仅 {selection_side['outer_context_pass']}"
+            )
+            tags.add("widen_outer_context")
+        if (
+            selection_side["path_pass"] >= 8
+            and selection_side["final_veto_pass"] <= max(1, int(selection_side["path_pass"] * 0.10))
+        ):
+            issues.append(
+                f"{label} path 能过但 final_veto 基本全死: path {selection_side['path_pass']}，final_veto 仅 {selection_side['final_veto_pass']}"
+            )
+            tags.update({"merge_veto", "remove_dead_gate"})
+    if selection_closed_trades < 12 or validation_closed_trades < 4:
+        issues.append(
+            f"总交易偏少: train+val/val 平仓 {selection_closed_trades} / {validation_closed_trades}"
+        )
+        tags.update({"remove_dead_gate", "widen_outer_context"})
+    if not issues:
+        return {
+            "count": 0,
+            "lines": [],
+            "prompt_line": "",
+            "tags": (),
+        }
+    ordered_tags = tuple(sorted(tags))
+    return {
+        "count": len(issues),
+        "lines": [
+            "低活动度信号（软触发，不是硬 gate）:",
+            *[f"- {issue}" for issue in issues],
+            (
+                "- 下一轮优先做放宽/删减/合并类假设，允许 `change_tags` 使用 "
+                + " / ".join(f"`{tag}`" for tag in ordered_tags)
+                + "；先减少死分支、提高 reachability，不要继续加条件。"
+            ),
+        ],
+        "prompt_line": (
+            "低活动度软触发="
+            + "；".join(issues[:3])
+            + "；下一轮优先放宽/删减/合并，先提高 reachability。"
+        ),
+        "tags": ordered_tags,
+    }
+
+
 # ==================== 趋势切段评分 ====================
 
 
@@ -1058,6 +1179,15 @@ def summarize_evaluation(
     selection_long_trades, selection_short_trades = _trade_side_counts(selection_source)
     validation_closed_trades = int(validation_source.get("trades", validation_long_trades + validation_short_trades))
     selection_closed_trades = int(selection_source.get("trades", selection_long_trades + selection_short_trades))
+    eval_funnel_counts = _aggregate_funnel_counts(results, "eval")
+    validation_funnel_counts = _result_funnel_counts(validation_source)
+    selection_funnel_counts = _result_funnel_counts(selection_source)
+    low_activity_payload = _low_activity_signal_payload(
+        validation_counts=validation_funnel_counts,
+        selection_counts=selection_funnel_counts,
+        validation_closed_trades=validation_closed_trades,
+        selection_closed_trades=selection_closed_trades,
+    )
     validation_weakest_axis = _validation_weakest_axis(validation_trend_report, validation_block_report)
     selection_total_return = float(selection_source.get("return", 0.0))
     selection_max_drawdown = float(selection_source.get("max_drawdown", 0.0))
@@ -1116,6 +1246,10 @@ def summarize_evaluation(
         f"val多头 / 空头捕获: {validation_trend_report.bull_score:.2f} / {validation_trend_report.bear_score:.2f}",
         f"val趋势段 / 命中率: {validation_trend_report.segment_count} / {validation_trend_report.hit_rate:.0%}",
         f"val多 / 空平仓数: {validation_long_trades} / {validation_short_trades}",
+        _format_funnel_line("train滚动漏斗(long)", eval_funnel_counts["long"]),
+        _format_funnel_line("train滚动漏斗(short)", eval_funnel_counts["short"]),
+        _format_funnel_line("val连续漏斗(long)", validation_funnel_counts["long"]),
+        _format_funnel_line("val连续漏斗(short)", validation_funnel_counts["short"]),
         f"val短板: {validation_weakest_axis}",
         (
             "val分块晋级分(均值/std/最差/负分块): "
@@ -1155,6 +1289,8 @@ def summarize_evaluation(
         "窗口明细:",
         *_build_window_lines(results, include_validation=True),
     ]
+    if low_activity_payload["lines"]:
+        summary_lines.extend(["", *low_activity_payload["lines"]])
     if weakest_signals:
         summary_lines.extend(["", "拖累较大的信号:", *weakest_signals])
 
@@ -1181,6 +1317,18 @@ def summarize_evaluation(
         (
             f"val多/空平仓数={validation_long_trades}/{validation_short_trades}，"
             f"{validation_weakest_axis}"
+        ),
+        (
+            "train滚动漏斗="
+            + _format_funnel_line("long", eval_funnel_counts["long"])
+            + " | "
+            + _format_funnel_line("short", eval_funnel_counts["short"])
+        ),
+        (
+            "val连续漏斗="
+            + _format_funnel_line("long", validation_funnel_counts["long"])
+            + " | "
+            + _format_funnel_line("short", validation_funnel_counts["short"])
         ),
         (
             "val分块均值/std/最差/负分块="
@@ -1230,6 +1378,8 @@ def summarize_evaluation(
         f"train 4h唯一路径点={eval_path.unique_points}，重叠点={eval_path.overlap_points}，被覆盖点={eval_path.dropped_points}",
         f"手续费拖累={avg_fee_drag:.2f}%，train交易={eval_trades}，val交易={validation_trades}，爆仓={liquidations}",
     ]
+    if low_activity_payload["prompt_line"]:
+        prompt_lines.append(low_activity_payload["prompt_line"])
     if weakest_signals:
         prompt_lines.append("train拖累信号: " + " | ".join(weakest_signals))
 
@@ -1334,9 +1484,13 @@ def summarize_evaluation(
         "overfit_weak_side_capture_score": overfit_report.weak_side_capture_score,
         "overfit_capture_drop_abs": overfit_report.capture_drop_abs,
         "overfit_hard_fail": 1.0 if overfit_report.hard_fail else 0.0,
+        "low_activity_signal_count": float(low_activity_payload["count"]),
         "quality_score": quality_score,
         "promotion_score": promotion_score,
     }
+    _append_funnel_metrics(metrics, "eval", eval_funnel_counts)
+    _append_funnel_metrics(metrics, "validation", validation_funnel_counts)
+    _append_funnel_metrics(metrics, "selection", selection_funnel_counts)
     return EvaluationReport(
         metrics=metrics,
         gate_passed=gate_passed,

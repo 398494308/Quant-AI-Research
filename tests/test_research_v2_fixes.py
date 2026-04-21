@@ -50,6 +50,7 @@ from research_v2.prompting import (
     build_candidate_response_schema,
     build_strategy_exploration_repair_prompt,
     build_strategy_research_prompt,
+    build_strategy_runtime_repair_prompt,
     build_strategy_system_prompt,
 )
 from research_v2.strategy_code import (
@@ -59,6 +60,7 @@ from research_v2.strategy_code import (
     StrategySourceError,
     build_strategy_complexity_delta,
     build_system_edit_signature,
+    format_strategy_complexity_headroom,
     repair_missing_required_functions,
     validate_editable_region_boundaries,
     validate_strategy_source,
@@ -560,6 +562,111 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertGreater(report.metrics["overfit_top1_positive_share"], 0.60)
         self.assertEqual(report.metrics["overfit_hard_fail"], 1.0)
 
+    def test_summarize_evaluation_emits_funnel_and_low_activity_soft_signal(self):
+        eval_window = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-10"})()
+        validation_window = type("Window", (), {"group": "validation", "label": "val1", "start_date": "2026-01-11", "end_date": "2026-01-18"})()
+
+        def build_points(prefix: str, start_ts: int, closes: list[float], equities: list[float]) -> list[dict[str, float | str]]:
+            return [
+                {
+                    "timestamp": start_ts + index,
+                    "label": f"{prefix}{index}",
+                    "market_close": close,
+                    "atr_ratio": 0.01,
+                    "strategy_equity": equity,
+                }
+                for index, (close, equity) in enumerate(zip(closes, equities), start=1)
+            ]
+
+        eval_points = build_points(
+            "e",
+            0,
+            [100.0, 104.0, 108.0, 111.0, 109.0, 113.0],
+            [100000.0, 101500.0, 104000.0, 105500.0, 105000.0, 107000.0],
+        )
+        validation_points = build_points(
+            "v",
+            100,
+            [113.0, 111.0, 108.0, 104.0, 101.0, 99.0],
+            [107000.0, 106500.0, 106000.0, 105000.0, 104000.0, 103500.0],
+        )
+        results = [
+            {
+                "window": eval_window,
+                "result": {
+                    "return": 3.2,
+                    "max_drawdown": 3.0,
+                    "trades": 2,
+                    "fee_drag_pct": 0.3,
+                    "liquidations": 0,
+                    "trend_capture_points": eval_points,
+                    "strategy_funnel": {
+                        "long": {"sideways_pass": 12, "outer_context_pass": 8, "path_pass": 6, "final_veto_pass": 2},
+                        "short": {"sideways_pass": 12, "outer_context_pass": 5, "path_pass": 2, "final_veto_pass": 0},
+                    },
+                    "filled_side_entries": {"long": 2, "short": 0},
+                },
+            },
+            {
+                "window": validation_window,
+                "result": {
+                    "return": -0.4,
+                    "max_drawdown": 2.1,
+                    "trades": 0,
+                    "fee_drag_pct": 0.1,
+                    "liquidations": 0,
+                    "trend_capture_points": validation_points,
+                    "strategy_funnel": {
+                        "long": {"sideways_pass": 10, "outer_context_pass": 6, "path_pass": 4, "final_veto_pass": 0},
+                        "short": {"sideways_pass": 10, "outer_context_pass": 3, "path_pass": 1, "final_veto_pass": 0},
+                    },
+                    "filled_side_entries": {"long": 0, "short": 0},
+                },
+            },
+        ]
+        validation_continuous_result = {
+            "return": -0.4,
+            "max_drawdown": 2.1,
+            "trades": 0,
+            "fee_drag_pct": 0.1,
+            "liquidations": 0,
+            "trend_capture_points": validation_points,
+            "strategy_funnel": {
+                "long": {"sideways_pass": 10, "outer_context_pass": 6, "path_pass": 4, "final_veto_pass": 0},
+                "short": {"sideways_pass": 10, "outer_context_pass": 3, "path_pass": 1, "final_veto_pass": 0},
+            },
+            "filled_side_entries": {"long": 0, "short": 0},
+        }
+        full_period_result = {
+            "return": 2.8,
+            "max_drawdown": 3.2,
+            "trades": 0,
+            "fee_drag_pct": 0.4,
+            "liquidations": 0,
+            "trend_capture_points": eval_points + validation_points,
+            "strategy_funnel": {
+                "long": {"sideways_pass": 28, "outer_context_pass": 16, "path_pass": 12, "final_veto_pass": 0},
+                "short": {"sideways_pass": 28, "outer_context_pass": 6, "path_pass": 2, "final_veto_pass": 0},
+            },
+            "filled_side_entries": {"long": 0, "short": 0},
+        }
+
+        report = summarize_evaluation(
+            results,
+            make_gate_config(),
+            validation_continuous_result=validation_continuous_result,
+            full_period_result=full_period_result,
+        )
+
+        self.assertIn("train滚动漏斗(long)", report.summary_text)
+        self.assertIn("val连续漏斗(short)", report.summary_text)
+        self.assertIn("低活动度信号（软触发，不是硬 gate）", report.summary_text)
+        self.assertIn("下一轮优先做放宽/删减/合并类假设", report.summary_text)
+        self.assertIn("低活动度软触发=", report.prompt_summary_text)
+        self.assertEqual(report.metrics["validation_long_path_pass"], 4.0)
+        self.assertEqual(report.metrics["selection_long_final_veto_pass"], 0.0)
+        self.assertGreater(report.metrics["low_activity_signal_count"], 0.0)
+
     def test_partial_eval_gate_snapshot_normalizes_missing_strategy_return(self):
         gate_snapshot = partial_eval_gate_snapshot(
             {
@@ -657,6 +764,50 @@ class StrategyValidationFixesTest(unittest.TestCase):
             result = strategy_module._is_sideways_regime(market_state)
 
         self.assertIsInstance(result, bool)
+
+    def test_strategy_funnel_diagnostics_track_long_and_short_gate_passes(self):
+        strategy_module.reset_funnel_diagnostics()
+
+        with mock.patch.object(strategy_module, "_build_signal_context", return_value={"ready": True}):
+            with mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False):
+                with mock.patch.object(strategy_module, "long_outer_context_ok", return_value=True):
+                    with mock.patch.object(strategy_module, "long_breakout_ok", return_value=True):
+                        with mock.patch.object(strategy_module, "long_pullback_ok", return_value=False):
+                            with mock.patch.object(strategy_module, "long_trend_reaccel_ok", return_value=False):
+                                with mock.patch.object(strategy_module, "long_signal_path_ok", return_value=True):
+                                    with mock.patch.object(strategy_module, "long_final_veto_clear", return_value=False):
+                                        with mock.patch.object(strategy_module, "short_outer_context_ok", return_value=True):
+                                            with mock.patch.object(strategy_module, "short_breakdown_ok", return_value=True):
+                                                with mock.patch.object(strategy_module, "short_bounce_fail_ok", return_value=False):
+                                                    with mock.patch.object(strategy_module, "short_trend_reaccel_ok", return_value=False):
+                                                        with mock.patch.object(strategy_module, "short_final_veto_clear", return_value=True):
+                                                            signal = strategy_module.strategy(
+                                                                [{}] * (strategy_module.PARAMS["min_history"] + 1),
+                                                                strategy_module.PARAMS["min_history"],
+                                                                [],
+                                                                {},
+                                                            )
+
+        funnel = strategy_module.get_funnel_diagnostics()
+        self.assertEqual(signal, "short_breakdown")
+        self.assertEqual(
+            funnel["long"],
+            {
+                "sideways_pass": 1,
+                "outer_context_pass": 1,
+                "path_pass": 1,
+                "final_veto_pass": 0,
+            },
+        )
+        self.assertEqual(
+            funnel["short"],
+            {
+                "sideways_pass": 1,
+                "outer_context_pass": 1,
+                "path_pass": 1,
+                "final_veto_pass": 1,
+            },
+        )
 
     def test_validate_strategy_source_accepts_new_flow_params(self):
         source = """
@@ -918,6 +1069,15 @@ def strategy(*args, **kwargs):
         self.assertIn("strategy", complexity_delta["functions"])
         self.assertIn("strategy:", complexity_delta["summary"])
 
+    def test_format_strategy_complexity_headroom_emits_family_and_function_rows(self):
+        source = Path(strategy_module.__file__).read_text(encoding="utf-8")
+
+        summary = format_strategy_complexity_headroom(source, limit=2)
+
+        self.assertIn("当前基底复杂度余量", summary)
+        self.assertIn("family", summary)
+        self.assertIn("function", summary)
+
     def test_validate_editable_boundaries_rejects_non_editable_changes(self):
         base_source = """
 # PARAMS_START
@@ -1132,6 +1292,54 @@ class JournalPromptFixesTest(unittest.TestCase):
 
         self.assertIn("默认先做删减、合并、替换", prompt)
         self.assertIn("不要继续叠分叉", prompt)
+        self.assertIn("不要“堆屎”", prompt)
+        self.assertIn("不要换个名字再写一份重复条件", prompt)
+
+    def test_build_strategy_prompts_include_precise_complexity_budgets(self):
+        system_prompt = build_strategy_system_prompt()
+        runtime_prompt = build_strategy_research_prompt(
+            evaluation_summary="诊断",
+            journal_summary="记忆",
+            previous_best_score=1.23,
+        )
+
+        for prompt in (system_prompt, runtime_prompt):
+            self.assertIn("复杂度硬上限（超了直接拒收）", prompt)
+            self.assertIn("`_is_sideways_regime`: lines <= 90 / bool_ops <= 32 / ifs <= 14", prompt)
+            self.assertIn("`_trend_followthrough_ok`: lines <= 90 / bool_ops <= 36 / ifs <= 12", prompt)
+            self.assertIn("`strategy`: lines <= 360 / bool_ops <= 180 / ifs <= 12", prompt)
+            self.assertIn("任一监控函数: lines <= +40 / bool_ops <= +20 / ifs <= +4", prompt)
+            self.assertIn("`long_path_chain`", prompt)
+            self.assertIn("任一决策链 family: lines <= +40 / bool_ops <= +20 / ifs <= +4", prompt)
+
+    def test_build_strategy_research_prompt_can_include_current_complexity_headroom(self):
+        headroom_text = "当前基底复杂度余量（剩余越小越容易再次撞复杂度）:\n- family `trend_quality_family`: lines 剩 8, bool_ops 剩 0, ifs 剩 3"
+        prompt = build_strategy_research_prompt(
+            evaluation_summary="诊断",
+            journal_summary="记忆",
+            previous_best_score=1.23,
+            current_complexity_headroom_text=headroom_text,
+        )
+
+        self.assertIn("当前基底复杂度余量", prompt)
+        self.assertIn("trend_quality_family", prompt)
+
+    def test_build_strategy_runtime_repair_prompt_mentions_complexity_shrink_rule(self):
+        prompt = build_strategy_runtime_repair_prompt(
+            candidate_id="candidate_1",
+            hypothesis="继续优化多头上车",
+            change_plan="调整 ownership 方向过滤",
+            change_tags=("ownership_takeover",),
+            edited_regions=("strategy",),
+            expected_effects=("提高多头到来阶段捕获",),
+            closest_failed_cluster="ownership_cluster",
+            novelty_proof="本次修复仅修正运行错误，不改变主假设。",
+            error_message="complexity family budget exceeded: trend_quality_family.lines=145 > 130",
+            repair_attempt=1,
+        )
+
+        self.assertIn("复杂度预算或复杂度增量超限", prompt)
+        self.assertIn("不要把复杂度从一个函数搬到同 family 的别的 helper", prompt)
 
     def test_build_strategy_exploration_repair_prompt_mentions_blocked_cluster(self):
         prompt = build_strategy_exploration_repair_prompt(
@@ -2322,6 +2530,119 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         self.assertNotIn("ACTIVE_WINNER", summary)
         self.assertIn("WARM", summary)
 
+    def test_journal_summary_emits_stage_operating_metrics_table(self):
+        entries = [
+            {
+                "iteration": 1,
+                "candidate_id": "accepted_long",
+                "outcome": "accepted",
+                "stop_stage": "full_eval",
+                "promotion_score": 0.62,
+                "quality_score": 0.58,
+                "promotion_delta": 0.05,
+                "gate_reason": "通过",
+                "change_tags": ["remove_dead_gate"],
+                "edited_regions": ["strategy"],
+                "hypothesis": "放宽长侧死门。",
+                "score_regime": "trend_capture_v4",
+                "target_family": "long",
+                "system_ordinary_region_families": ["sideways", "entry_path"],
+                "smoke_passed": True,
+                "full_eval_reached": True,
+            },
+            {
+                "iteration": 2,
+                "candidate_id": "noop_short",
+                "outcome": "behavioral_noop",
+                "stop_stage": "behavioral_noop",
+                "promotion_score": None,
+                "quality_score": None,
+                "promotion_delta": None,
+                "gate_reason": "smoke 行为指纹与当前主参考完全一致",
+                "change_tags": ["merge_veto"],
+                "edited_regions": ["strategy"],
+                "hypothesis": "删掉无效 veto。",
+                "score_regime": "trend_capture_v4",
+                "target_family": "short",
+                "system_ordinary_region_families": ["entry_path"],
+                "smoke_passed": True,
+                "full_eval_reached": False,
+            },
+            {
+                "iteration": 3,
+                "candidate_id": "blocked_long",
+                "outcome": "exploration_blocked",
+                "stop_stage": "blocked_same_cluster",
+                "promotion_score": None,
+                "quality_score": None,
+                "promotion_delta": None,
+                "gate_reason": "同簇低变化近邻",
+                "change_tags": ["widen_outer_context"],
+                "edited_regions": ["strategy"],
+                "hypothesis": "优先扩 reachability。",
+                "score_regime": "trend_capture_v4",
+                "target_family": "long",
+                "system_ordinary_region_families": [],
+            },
+            {
+                "iteration": 4,
+                "candidate_id": "runtime_mixed",
+                "outcome": "runtime_failed",
+                "stop_stage": "runtime_failed",
+                "promotion_score": None,
+                "quality_score": None,
+                "promotion_delta": None,
+                "gate_reason": "运行失败",
+                "change_tags": ["remove_dead_gate"],
+                "edited_regions": ["strategy"],
+                "hypothesis": "full_eval 途中失败。",
+                "score_regime": "trend_capture_v4",
+                "target_family": "mixed",
+                "system_ordinary_region_families": ["trend_quality"],
+                "runtime_failure_stage": "full_eval",
+            },
+        ]
+
+        summary = build_journal_prompt_summary(
+            entries,
+            limit=8,
+            current_score_regime="trend_capture_v4",
+            reference_metrics={
+                "validation_bull_capture_score": 0.10,
+                "validation_bear_capture_score": 0.42,
+            },
+        )
+
+        self.assertIn("当前 stage 运营指标表", summary)
+        self.assertIn("smoke->full_eval", summary)
+        self.assertIn("| 25% | 25% | 25% | 67% | 1.00 | 弱侧(long) 75% |", summary)
+
+    def test_journal_summary_displays_candidate_validation_stage(self):
+        entries = [
+            {
+                "iteration": 1,
+                "candidate_id": "invalid_complexity",
+                "outcome": "runtime_failed",
+                "stop_stage": "candidate_validation",
+                "promotion_score": None,
+                "quality_score": None,
+                "promotion_delta": None,
+                "gate_reason": "运行失败",
+                "decision_reason": "complexity family budget exceeded: trend_quality_family.lines=145 > 130",
+                "change_tags": ["merge_veto"],
+                "edited_regions": ["strategy"],
+                "hypothesis": "候选在源码校验阶段失败。",
+                "score_regime": "trend_capture_v4",
+                "system_complexity_summary": "trend_quality_family:L+23/B+6/I+0",
+                "system_bloat_flag": True,
+            }
+        ]
+
+        summary = build_journal_prompt_summary(entries, limit=8, current_score_regime="trend_capture_v4")
+
+        self.assertIn("源码校验", summary)
+        self.assertIn("复杂度超标 1", summary)
+
 
 class SmokeWindowSelectionTest(unittest.TestCase):
     def test_select_smoke_windows_includes_validation_when_count_is_three(self):
@@ -2357,6 +2678,49 @@ class SmokeWindowSelectionTest(unittest.TestCase):
         selected = select_smoke_windows(windows, 5)
 
         self.assertEqual([window.label for window in selected], ["train1", "val1", "train9", "train14", "train26"])
+
+
+class ResearcherAdaptiveModeTest(unittest.TestCase):
+    def test_resolve_iteration_factor_change_mode_triggers_factor_admission_after_stalls(self):
+        entries = [
+            {"iteration": 1, "outcome": "behavioral_noop", "score_regime": research_script.SCORE_REGIME},
+            {"iteration": 2, "outcome": "exploration_blocked", "score_regime": research_script.SCORE_REGIME},
+            {"iteration": 3, "outcome": "rejected", "promotion_delta": 0.0, "score_regime": research_script.SCORE_REGIME},
+        ]
+
+        with mock.patch.object(
+            research_script,
+            "RUNTIME",
+            replace(research_script.RUNTIME, base_factor_change_mode="default"),
+        ):
+            mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
+
+        self.assertEqual(mode, "factor_admission")
+        self.assertIn("连续 3 轮", reason)
+        self.assertIn("第 1/2 轮", reason)
+
+    def test_resolve_iteration_factor_change_mode_returns_base_mode_after_positive_delta(self):
+        entries = [
+            {"iteration": 1, "outcome": "behavioral_noop", "score_regime": research_script.SCORE_REGIME},
+            {
+                "iteration": 2,
+                "outcome": "accepted",
+                "promotion_delta": 0.03,
+                "factor_change_mode": "factor_admission",
+                "score_regime": research_script.SCORE_REGIME,
+            },
+            {"iteration": 3, "outcome": "behavioral_noop", "score_regime": research_script.SCORE_REGIME},
+        ]
+
+        with mock.patch.object(
+            research_script,
+            "RUNTIME",
+            replace(research_script.RUNTIME, base_factor_change_mode="default"),
+        ):
+            mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
+
+        self.assertEqual(mode, "default")
+        self.assertIn("维持 default", reason)
 
 
 class CodexExecClientTest(unittest.TestCase):

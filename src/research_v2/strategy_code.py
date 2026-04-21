@@ -128,17 +128,73 @@ COMPLEXITY_MONITORED_FUNCTIONS: tuple[str, ...] = (
     "_trend_followthrough_ok",
     "strategy",
 )
+COMPLEXITY_MONITORED_FAMILIES: dict[str, tuple[str, ...]] = {
+    "sideways_family": (
+        "_sideways_release_flags",
+        "_is_sideways_regime",
+    ),
+    "flow_family": (
+        "_flow_signal_metrics",
+        "_flow_confirmation_ok",
+        "_flow_entry_ok",
+    ),
+    "trend_quality_family": (
+        "_trend_quality_long",
+        "_trend_quality_short",
+        "_trend_quality_ok",
+        "long_outer_context_ok",
+        "short_outer_context_ok",
+    ),
+    "long_path_chain": (
+        "long_breakout_ok",
+        "long_pullback_ok",
+        "long_trend_reaccel_ok",
+        "long_signal_path_ok",
+        "long_final_veto_clear",
+        "_trend_followthrough_long",
+    ),
+    "short_path_chain": (
+        "breakdown_ready",
+        "short_breakdown_ok",
+        "short_bounce_fail_ok",
+        "short_trend_reaccel_ok",
+        "short_final_veto_clear",
+        "_trend_followthrough_short",
+    ),
+}
 COMPLEXITY_ABSOLUTE_BUDGETS: dict[str, dict[str, int]] = {
     "_is_sideways_regime": {"lines": 90, "bool_ops": 32, "ifs": 14},
     "_trend_quality_ok": {"lines": 90, "bool_ops": 32, "ifs": 14},
     "_trend_followthrough_ok": {"lines": 90, "bool_ops": 36, "ifs": 12},
     "strategy": {"lines": 360, "bool_ops": 180, "ifs": 12},
 }
+COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS: dict[str, dict[str, int]] = {
+    "sideways_family": {"lines": 200, "bool_ops": 88, "ifs": 16},
+    "flow_family": {"lines": 140, "bool_ops": 30, "ifs": 10},
+    "trend_quality_family": {"lines": 130, "bool_ops": 42, "ifs": 16},
+    "long_path_chain": {"lines": 200, "bool_ops": 88, "ifs": 12},
+    "short_path_chain": {"lines": 176, "bool_ops": 80, "ifs": 12},
+}
 COMPLEXITY_DEFAULT_GROWTH_LIMITS: dict[str, int] = {
     "lines": 40,
     "bool_ops": 20,
     "ifs": 4,
 }
+COMPLEXITY_FAMILY_DEFAULT_GROWTH_LIMITS: dict[str, int] = {
+    "lines": 40,
+    "bool_ops": 20,
+    "ifs": 4,
+}
+COMPLEXITY_SNAPSHOT_FUNCTIONS = frozenset(
+    {
+        *COMPLEXITY_MONITORED_FUNCTIONS,
+        *(
+            function_name
+            for family_functions in COMPLEXITY_MONITORED_FAMILIES.values()
+            for function_name in family_functions
+        ),
+    }
+)
 
 
 def normalize_factor_change_mode(mode: str | None) -> str:
@@ -490,16 +546,34 @@ def build_strategy_complexity_snapshot(source: str) -> dict[str, dict[str, int]]
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef):
             continue
-        if node.name not in COMPLEXITY_MONITORED_FUNCTIONS:
+        if node.name not in COMPLEXITY_SNAPSHOT_FUNCTIONS:
             continue
         snapshot[node.name] = _function_complexity_metrics(node)
     return snapshot
+
+
+def _family_complexity_metrics(
+    snapshot: dict[str, dict[str, int]],
+    family_name: str,
+) -> dict[str, int]:
+    aggregate = {
+        "lines": 0,
+        "bool_ops": 0,
+        "ifs": 0,
+        "compares": 0,
+    }
+    for function_name in COMPLEXITY_MONITORED_FAMILIES.get(family_name, ()):
+        function_metrics = snapshot.get(function_name, {})
+        for metric_name in aggregate:
+            aggregate[metric_name] += int(function_metrics.get(metric_name, 0))
+    return aggregate
 
 
 def build_strategy_complexity_delta(base_source: str, candidate_source: str) -> dict[str, object]:
     base_snapshot = build_strategy_complexity_snapshot(base_source)
     candidate_snapshot = build_strategy_complexity_snapshot(candidate_source)
     functions: dict[str, dict[str, int]] = {}
+    families: dict[str, dict[str, int]] = {}
     flags: list[str] = []
     summary_parts: list[str] = []
 
@@ -534,12 +608,107 @@ def build_strategy_complexity_delta(base_source: str, candidate_source: str) -> 
             if candidate_value > int(limit):
                 flags.append(f"{function_name}.{metric_name}>{limit}")
 
+    for family_name in COMPLEXITY_MONITORED_FAMILIES:
+        base_metrics = _family_complexity_metrics(base_snapshot, family_name)
+        candidate_metrics = _family_complexity_metrics(candidate_snapshot, family_name)
+        delta_metrics = {
+            "base_lines": int(base_metrics.get("lines", 0)),
+            "candidate_lines": int(candidate_metrics.get("lines", 0)),
+            "delta_lines": int(candidate_metrics.get("lines", 0) - base_metrics.get("lines", 0)),
+            "base_bool_ops": int(base_metrics.get("bool_ops", 0)),
+            "candidate_bool_ops": int(candidate_metrics.get("bool_ops", 0)),
+            "delta_bool_ops": int(candidate_metrics.get("bool_ops", 0) - base_metrics.get("bool_ops", 0)),
+            "base_ifs": int(base_metrics.get("ifs", 0)),
+            "candidate_ifs": int(candidate_metrics.get("ifs", 0)),
+            "delta_ifs": int(candidate_metrics.get("ifs", 0) - base_metrics.get("ifs", 0)),
+        }
+        families[family_name] = delta_metrics
+        if (
+            delta_metrics["delta_lines"] > 0
+            or delta_metrics["delta_bool_ops"] > 0
+            or delta_metrics["delta_ifs"] > 0
+        ):
+            summary_parts.append(
+                f"{family_name}:L{delta_metrics['delta_lines']:+d}/B{delta_metrics['delta_bool_ops']:+d}/I{delta_metrics['delta_ifs']:+d}"
+            )
+        absolute_budget = COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS.get(family_name, {})
+        for metric_name, limit in absolute_budget.items():
+            candidate_value = int(candidate_metrics.get(metric_name, 0))
+            if candidate_value > int(limit):
+                flags.append(f"{family_name}.{metric_name}>{limit}")
+
     return {
         "functions": functions,
+        "families": families,
         "summary": " | ".join(summary_parts) if summary_parts else "complexity_flat",
         "flags": tuple(flags),
         "bloat_flag": bool(flags),
     }
+
+
+def build_strategy_complexity_headroom(source: str) -> dict[str, dict[str, dict[str, int]]]:
+    snapshot = build_strategy_complexity_snapshot(source)
+    functions: dict[str, dict[str, int]] = {}
+    families: dict[str, dict[str, int]] = {}
+
+    for function_name, limits in COMPLEXITY_ABSOLUTE_BUDGETS.items():
+        used_metrics = snapshot.get(function_name, {})
+        functions[function_name] = {
+            "used_lines": int(used_metrics.get("lines", 0)),
+            "remaining_lines": int(limits["lines"]) - int(used_metrics.get("lines", 0)),
+            "used_bool_ops": int(used_metrics.get("bool_ops", 0)),
+            "remaining_bool_ops": int(limits["bool_ops"]) - int(used_metrics.get("bool_ops", 0)),
+            "used_ifs": int(used_metrics.get("ifs", 0)),
+            "remaining_ifs": int(limits["ifs"]) - int(used_metrics.get("ifs", 0)),
+        }
+
+    for family_name, limits in COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS.items():
+        used_metrics = _family_complexity_metrics(snapshot, family_name)
+        families[family_name] = {
+            "used_lines": int(used_metrics.get("lines", 0)),
+            "remaining_lines": int(limits["lines"]) - int(used_metrics.get("lines", 0)),
+            "used_bool_ops": int(used_metrics.get("bool_ops", 0)),
+            "remaining_bool_ops": int(limits["bool_ops"]) - int(used_metrics.get("bool_ops", 0)),
+            "used_ifs": int(used_metrics.get("ifs", 0)),
+            "remaining_ifs": int(limits["ifs"]) - int(used_metrics.get("ifs", 0)),
+        }
+
+    return {
+        "functions": functions,
+        "families": families,
+    }
+
+
+def format_strategy_complexity_headroom(source: str, *, limit: int = 4) -> str:
+    headroom = build_strategy_complexity_headroom(source)
+
+    def _risk_tuple(item: tuple[str, dict[str, int]]) -> tuple[int, int, int, str]:
+        name, metrics = item
+        return (
+            int(metrics["remaining_bool_ops"]),
+            int(metrics["remaining_lines"]),
+            int(metrics["remaining_ifs"]),
+            name,
+        )
+
+    family_items = sorted(headroom["families"].items(), key=_risk_tuple)[: max(1, limit)]
+    function_items = sorted(headroom["functions"].items(), key=_risk_tuple)[: max(1, limit)]
+    lines = ["当前基底复杂度余量（剩余越小越容易再次撞复杂度）:"]
+
+    for name, metrics in family_items:
+        lines.append(
+            f"- family `{name}`: lines 剩 {metrics['remaining_lines']}, "
+            f"bool_ops 剩 {metrics['remaining_bool_ops']}, ifs 剩 {metrics['remaining_ifs']}"
+        )
+
+    for name, metrics in function_items:
+        lines.append(
+            f"- function `{name}`: lines 剩 {metrics['remaining_lines']}, "
+            f"bool_ops 剩 {metrics['remaining_bool_ops']}, ifs 剩 {metrics['remaining_ifs']}"
+        )
+
+    lines.append("- 若要继续改最紧张的 family/function，先删旧条件或合并旧分支，再考虑新增判断。")
+    return "\n".join(lines)
 
 
 def _validate_complexity_budget(
@@ -567,6 +736,16 @@ def _validate_complexity_budget(
                     f"complexity budget exceeded: {function_name}.{metric_name}={value} > {limit}"
                 )
 
+    candidate_snapshot = build_strategy_complexity_snapshot(source)
+    for family_name, limits in COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS.items():
+        metrics = _family_complexity_metrics(candidate_snapshot, family_name)
+        for metric_name, limit in limits.items():
+            value = int(metrics.get(metric_name, 0))
+            if value > int(limit):
+                raise StrategySourceError(
+                    f"complexity family budget exceeded: {family_name}.{metric_name}={value} > {limit}"
+                )
+
     if base_source is None or normalize_factor_change_mode(factor_change_mode) != "default":
         return
 
@@ -583,6 +762,19 @@ def _validate_complexity_budget(
         if int(metrics["delta_ifs"]) > COMPLEXITY_DEFAULT_GROWTH_LIMITS["ifs"]:
             raise StrategySourceError(
                 f"default mode complexity growth too large: {function_name}.ifs +{metrics['delta_ifs']}"
+            )
+    for family_name, metrics in complexity_delta["families"].items():
+        if int(metrics["delta_lines"]) > COMPLEXITY_FAMILY_DEFAULT_GROWTH_LIMITS["lines"]:
+            raise StrategySourceError(
+                f"default mode complexity family growth too large: {family_name}.lines +{metrics['delta_lines']}"
+            )
+        if int(metrics["delta_bool_ops"]) > COMPLEXITY_FAMILY_DEFAULT_GROWTH_LIMITS["bool_ops"]:
+            raise StrategySourceError(
+                f"default mode complexity family growth too large: {family_name}.bool_ops +{metrics['delta_bool_ops']}"
+            )
+        if int(metrics["delta_ifs"]) > COMPLEXITY_FAMILY_DEFAULT_GROWTH_LIMITS["ifs"]:
+            raise StrategySourceError(
+                f"default mode complexity family growth too large: {family_name}.ifs +{metrics['delta_ifs']}"
             )
 
 

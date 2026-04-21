@@ -137,6 +137,9 @@
 - ordinary family 现在只保留“至少改 `1` 个”的下限；`1-3` 仍是 prompt 里的默认软引导，但连续 `behavioral_noop` 后允许直接覆盖更多 family。系统只把真实 diff 派生出来的 changed regions 当成主依据。
 - 研究器的 `behavioral_noop` 反馈会直接点名当前该优先检查的 choke point：长侧优先看 `long_outer_context_ok` 与 `long_final_veto_clear`，空侧优先看 `short_outer_context_ok` 与 `short_final_veto_clear`。
 - 每轮先跑少量 `smoke` 窗口；若代码运行报错，会在同一轮把错误回传给模型做 repair，而不是直接开始下一轮。
+- 若候选在“源码校验”阶段就因为复杂度预算或复杂度增量超限被拒，系统现在也会先做同轮 repair；仍修不动才记成 `runtime_failed(candidate_validation)`。
+- 这类复杂度失败不再只写日志；它们会进入当前 `stage` 的 journal、memory archive 和后续 prompt 记忆包。
+- `runtime prompt` 会额外显示当前基底最紧张的 complexity headroom，尤其是普通决策链 family 的剩余 `lines / bool_ops / ifs`，让模型先看到哪一层已经贴边。
 - 若 repair 次数耗尽，这轮会被记成 `runtime_failed`，同样进入 journal 和记忆压缩。
 - `heartbeat` 会持续写出当前阶段和窗口索引，便于定位是卡在 `smoke`、`full_eval` 还是 repair。
 - 提前淘汰已从旧的 Sortino 门槛改成“部分窗口趋势捕获快照”：只有当趋势段数量已足够且趋势捕获分、命中率都很差时，才会提前结束这轮。
