@@ -66,11 +66,13 @@ from research_v2.notifications import build_discord_summary_message, load_discor
 from research_v2.prompting import (
     EDITABLE_REGIONS,
     build_strategy_agents_instructions,
+    build_strategy_candidate_summary_prompt,
     build_strategy_edit_worker_prompt,
     build_strategy_exploration_repair_prompt,
     build_strategy_no_edit_repair_prompt,
     build_strategy_round_brief_repair_prompt,
     build_strategy_research_prompt,
+    build_strategy_summary_worker_system_prompt,
     build_strategy_runtime_repair_prompt,
     build_strategy_system_prompt,
     build_strategy_worker_system_prompt,
@@ -239,7 +241,7 @@ def _append_model_call_telemetry(payload: dict[str, Any]) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
-def _session_scope_payload() -> dict[str, Any]:
+def _session_scope_payload(*, factor_change_mode: str = "") -> dict[str, Any]:
     reference_code_hash = source_hash(best_source) if best_source else ""
     return {
         "score_regime": SCORE_REGIME,
@@ -247,6 +249,11 @@ def _session_scope_payload() -> dict[str, Any]:
         "reference_code_hash": reference_code_hash,
         "reference_stage_started_at": reference_stage_started_at,
         "reference_stage_iteration": int(reference_stage_iteration or 0),
+        "factor_change_mode": normalize_factor_change_mode(
+            str(factor_change_mode).strip()
+            or str(RUNTIME.base_factor_change_mode or "default").strip()
+            or "default"
+        ),
     }
 
 
@@ -289,18 +296,22 @@ def _clear_research_session_state(*, remove_workspace: bool = False, reason: str
         log_info(f"研究 session 已重置: {reason}")
 
 
-def _session_state_matches_current_stage(state: dict[str, Any] | None) -> bool:
+def _session_state_matches_current_stage(
+    state: dict[str, Any] | None,
+    *,
+    factor_change_mode: str = "",
+) -> bool:
     if not isinstance(state, dict) or not state:
         return False
-    scope = _session_scope_payload()
+    scope = _session_scope_payload(factor_change_mode=factor_change_mode)
     if not scope["reference_code_hash"]:
         return False
     return all(str(state.get(key, "")).strip() == str(scope.get(key, "")).strip() for key in scope)
 
 
-def _active_research_session_id() -> str:
+def _active_research_session_id(*, factor_change_mode: str = "") -> str:
     state = _load_research_session_state()
-    if not _session_state_matches_current_stage(state):
+    if not _session_state_matches_current_stage(state, factor_change_mode=factor_change_mode):
         return ""
     return str(state.get("session_id", "")).strip()
 
@@ -315,51 +326,30 @@ def _store_research_session_metadata(
         return
     previous = _load_research_session_state()
     now = datetime.now(UTC).isoformat()
+    resolved_factor_mode = normalize_factor_change_mode(
+        str(factor_change_mode).strip()
+        or str(previous.get("factor_change_mode", "")).strip()
+        or str(RUNTIME.base_factor_change_mode or "default").strip()
+        or "default"
+    )
     payload = {
-        **_session_scope_payload(),
+        **_session_scope_payload(factor_change_mode=resolved_factor_mode),
         "session_id": session_id,
         "workspace_root": str(workspace_root),
-        "factor_change_mode": normalize_factor_change_mode(
-            str(factor_change_mode).strip()
-            or str(previous.get("factor_change_mode", "")).strip()
-            or str(RUNTIME.base_factor_change_mode or "default").strip()
-            or "default"
-        ),
+        "factor_change_mode": resolved_factor_mode,
         "created_at": str(previous.get("created_at", "")).strip() or now,
         "updated_at": now,
     }
     _persist_research_session_state(payload)
 
 
-def _align_research_session_scope(*, force_reset: bool = False) -> None:
+def _align_research_session_scope(*, force_reset: bool = False, factor_change_mode: str = "") -> None:
     state = _load_research_session_state()
     if force_reset:
         _clear_research_session_state(remove_workspace=True, reason="reference scope changed by explicit reset")
         return
-    if state and not _session_state_matches_current_stage(state):
+    if state and not _session_state_matches_current_stage(state, factor_change_mode=factor_change_mode):
         _clear_research_session_state(remove_workspace=True, reason="reference scope changed")
-
-
-def _maybe_reset_research_session_for_factor_mode(factor_change_mode: str) -> None:
-    state = _load_research_session_state()
-    if not _session_state_matches_current_stage(state):
-        return
-    previous_mode = normalize_factor_change_mode(
-        str(state.get("factor_change_mode", "")).strip()
-        or str(RUNTIME.base_factor_change_mode or "default").strip()
-        or "default"
-    )
-    current_mode = normalize_factor_change_mode(
-        str(factor_change_mode).strip()
-        or str(RUNTIME.base_factor_change_mode or "default").strip()
-        or "default"
-    )
-    if previous_mode == current_mode:
-        return
-    _clear_research_session_state(
-        remove_workspace=False,
-        reason=f"factor mode changed: {previous_mode} -> {current_mode}",
-    )
 
 
 def _refresh_prompt_memory_snapshots() -> str:
@@ -1701,6 +1691,8 @@ def _parse_core_factors_field(lines: list[str]) -> tuple[StrategyCoreFactor, ...
 
 
 def _parse_model_candidate_payload(raw_text: str) -> dict[str, Any]:
+    # 这里只做宽松归一化，真正的合法性由 `_validate_round_brief_payload()`
+    # 和 `_request_validated_round_brief()` 负责；不要把 parser 当成最终校验层。
     text = str(raw_text or "").strip()
     if not text:
         raise StrategySourceError("candidate response is empty")
@@ -1938,6 +1930,7 @@ def _core_factors_from_payload(payload: dict[str, Any]) -> tuple[StrategyCoreFac
 
 
 def _round_brief_from_payload(payload: dict[str, Any]) -> StrategyRoundBrief:
+    _validate_round_brief_payload(payload)
     change_tags = tuple(str(item).strip() for item in payload.get("change_tags", []) if str(item).strip())
     hypothesis = str(payload.get("hypothesis", "")).strip()
     change_plan = str(payload.get("change_plan", "")).strip()
@@ -1985,6 +1978,61 @@ def _round_brief_task_summary(round_brief: StrategyRoundBrief) -> str:
         f"- novelty_proof: {round_brief.novelty_proof or '-'}",
     ]
     return "\n".join(lines)
+
+
+def _rebase_candidate_metadata_to_final_code(
+    *,
+    candidate: StrategyCandidate,
+    round_brief: StrategyRoundBrief,
+    base_source: str,
+    workspace_root: Path,
+    factor_change_mode: str,
+    context_label: str,
+) -> StrategyCandidate:
+    diff_summary = tuple(build_diff_summary(base_source, candidate.strategy_code, limit=18))
+    region_families = tuple(sorted(region_families_for_regions(candidate.edited_regions)))
+    prompt = build_strategy_candidate_summary_prompt(
+        candidate_id=candidate.candidate_id,
+        hypothesis=round_brief.hypothesis,
+        change_plan=round_brief.change_plan,
+        change_tags=round_brief.change_tags,
+        expected_effects=round_brief.expected_effects,
+        closest_failed_cluster=round_brief.closest_failed_cluster,
+        novelty_proof=round_brief.novelty_proof,
+        edited_regions=candidate.edited_regions,
+        region_families=region_families,
+        diff_summary=diff_summary,
+    )
+    try:
+        final_brief = _request_validated_round_brief(
+            base_source=base_source,
+            prompt=prompt,
+            system_prompt=build_strategy_summary_worker_system_prompt(
+                factor_change_mode=factor_change_mode,
+            ),
+            phase="model_summary_worker",
+            workspace_root=workspace_root,
+            factor_change_mode=factor_change_mode,
+            retry_phase="model_summary_brief_repair",
+            session_kind="summary_worker",
+            use_persistent_session=False,
+        )
+    except Exception as exc:
+        log_info(f"{context_label}最终代码元信息回写失败，回退为原 round brief: {exc}")
+        return candidate
+
+    return StrategyCandidate(
+        candidate_id=candidate.candidate_id,
+        hypothesis=final_brief.hypothesis,
+        change_plan=final_brief.change_plan,
+        closest_failed_cluster=final_brief.closest_failed_cluster,
+        novelty_proof=final_brief.novelty_proof,
+        change_tags=final_brief.change_tags,
+        edited_regions=candidate.edited_regions,
+        expected_effects=final_brief.expected_effects,
+        core_factors=final_brief.core_factors,
+        strategy_code=candidate.strategy_code,
+    )
 
 
 def _candidate_stub_from_round_brief(
@@ -2093,7 +2141,11 @@ def _run_model_text_request(
     use_persistent_session: bool = True,
     session_factor_change_mode: str = "",
 ) -> str:
-    session_id = _active_research_session_id() if use_persistent_session else ""
+    session_id = (
+        _active_research_session_id(factor_change_mode=session_factor_change_mode)
+        if use_persistent_session
+        else ""
+    )
 
     def _invoke(active_session_id: str | None, metadata: dict[str, Any]) -> str:
         with _temporary_cwd(workspace_root):
@@ -2259,14 +2311,16 @@ def _request_validated_round_brief(
     workspace_root: Path,
     factor_change_mode: str,
     retry_phase: str,
+    session_kind: str = "planner",
+    use_persistent_session: bool = True,
 ) -> StrategyRoundBrief:
     payload = _run_model_candidate_request(
         prompt=prompt,
         system_prompt=system_prompt,
         phase=phase,
         workspace_root=workspace_root,
-        session_kind="planner",
-        use_persistent_session=True,
+        session_kind=session_kind,
+        use_persistent_session=use_persistent_session,
         session_factor_change_mode=factor_change_mode,
     )
     errors: list[str] = []
@@ -2314,8 +2368,8 @@ def _request_validated_round_brief(
                 phase=retry_phase,
                 workspace_root=workspace_root,
                 repair_attempt=retry_attempt,
-                session_kind="planner",
-                use_persistent_session=True,
+                session_kind=session_kind,
+                use_persistent_session=use_persistent_session,
                 session_factor_change_mode=factor_change_mode,
             )
 
@@ -2336,7 +2390,7 @@ def _build_model_round_brief(
     if benchmark_report is None:
         raise StrategySourceError("reference benchmark is not initialized")
 
-    session_mode = "resume" if _active_research_session_id() else "bootstrap"
+    session_mode = "resume" if _active_research_session_id(factor_change_mode=factor_change_mode) else "bootstrap"
     factor_mode_state = _resolve_iteration_factor_change_state(journal_entries)
     prompt = build_strategy_research_prompt(
         evaluation_summary=report.prompt_summary_text,
@@ -2520,11 +2574,19 @@ def _candidate_from_round_brief_with_validation_repair(
 ) -> StrategyCandidate:
     workspace_strategy_file = workspace_root / MODEL_WORKSPACE_STRATEGY_PATH
     try:
-        return _candidate_from_round_brief(
+        candidate = _candidate_from_round_brief(
             round_brief,
             workspace_strategy_file=workspace_strategy_file,
             base_source=base_source,
             factor_change_mode=factor_change_mode,
+        )
+        return _rebase_candidate_metadata_to_final_code(
+            candidate=candidate,
+            round_brief=round_brief,
+            base_source=base_source,
+            workspace_root=workspace_root,
+            factor_change_mode=factor_change_mode,
+            context_label=context_label,
         )
     except StrategySourceError as exc:
         failed_candidate = _candidate_stub_from_round_brief(
@@ -2559,11 +2621,19 @@ def _candidate_from_round_brief_with_validation_repair(
                 fallback_source=failed_candidate.strategy_code,
             )
             try:
-                return _candidate_from_round_brief(
+                candidate = _candidate_from_round_brief(
                     round_brief,
                     workspace_strategy_file=workspace_strategy_file,
                     base_source=base_source,
                     factor_change_mode=factor_change_mode,
+                )
+                return _rebase_candidate_metadata_to_final_code(
+                    candidate=candidate,
+                    round_brief=round_brief,
+                    base_source=base_source,
+                    workspace_root=workspace_root,
+                    factor_change_mode=factor_change_mode,
+                    context_label=context_label,
                 )
             except StrategySourceError as repair_exc:
                 errors.append(str(repair_exc))
@@ -2826,7 +2896,10 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
                 f"promotion={best_report.metrics['promotion_score']:.2f}, "
                 f"gate={best_report.gate_reason}"
             )
-            _align_research_session_scope(force_reset=False)
+            _align_research_session_scope(
+                force_reset=False,
+                factor_change_mode=RUNTIME.base_factor_change_mode,
+            )
             write_heartbeat(
                 "initialized",
                 message="loaded saved reference",
@@ -2870,7 +2943,10 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
         f"promotion={best_report.metrics['promotion_score']:.2f}, "
         f"gate={best_report.gate_reason}"
     )
-    _align_research_session_scope(force_reset=force_rebuild)
+    _align_research_session_scope(
+        force_reset=force_rebuild,
+        factor_change_mode=RUNTIME.base_factor_change_mode,
+    )
     write_heartbeat(
         "initialized",
         message="reference ready",
@@ -3381,8 +3457,10 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         factor_change_mode=current_factor_change_mode,
         factor_change_reason=factor_change_reason,
     )
-    _align_research_session_scope(force_reset=False)
-    _maybe_reset_research_session_for_factor_mode(current_factor_change_mode)
+    _align_research_session_scope(
+        force_reset=False,
+        factor_change_mode=current_factor_change_mode,
+    )
     workspace_root = _prepare_agent_workspace(
         base_source=best_source,
         factor_change_mode=current_factor_change_mode,

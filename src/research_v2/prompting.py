@@ -247,6 +247,20 @@ def build_strategy_worker_system_prompt(
 """
 
 
+def build_strategy_summary_worker_system_prompt(*, factor_change_mode: str = "default") -> str:
+    return f"""遵守当前工作区本地 `AGENTS.md`，它是当前工作区的长期规则。
+
+当前因子模式：{factor_change_mode_label(factor_change_mode)}
+- {factor_change_mode_prompt_hint(factor_change_mode)}
+
+你当前是短生命周期 `summary_worker`，不是持久研究 planner，也不是 edit worker。
+- 不要修改任何文件，不要开始新一轮研究。
+- 只根据当前提示里的真实 diff、真实改动区域和当前 `src/strategy_macd_aggressive.py`，回写最终候选摘要。
+- 输出仍然使用纯文本字段契约，不要输出 JSON、markdown、解释或源码。
+- 若原 round brief 和最终代码不一致，以最终代码为准修正文案。
+"""
+
+
 def _safe_metric(metrics: dict[str, Any] | None, key: str) -> float:
     if not isinstance(metrics, dict):
         return 0.0
@@ -461,6 +475,51 @@ def build_strategy_edit_worker_prompt(
 {complexity_block}
 当前阶段唯一完成条件：
 {build_edit_completion_instructions()}
+"""
+
+
+def build_strategy_candidate_summary_prompt(
+    *,
+    candidate_id: str,
+    hypothesis: str,
+    change_plan: str,
+    change_tags: tuple[str, ...],
+    expected_effects: tuple[str, ...],
+    closest_failed_cluster: str,
+    novelty_proof: str,
+    edited_regions: tuple[str, ...],
+    region_families: tuple[str, ...],
+    diff_summary: tuple[str, ...],
+) -> str:
+    diff_text = "\n".join(diff_summary) if diff_summary else "- 无"
+    return f"""你现在负责根据最终落地代码回写候选元信息，不是开始新一轮研究，也不是继续改代码。
+
+原始 round brief：
+- candidate_id: {candidate_id or "-"}
+- hypothesis: {hypothesis or "-"}
+- change_plan: {change_plan or "-"}
+- change_tags: {", ".join(change_tags) or "-"}
+- expected_effects: {"；".join(expected_effects) or "-"}
+- closest_failed_cluster: {closest_failed_cluster or "-"}
+- novelty_proof: {novelty_proof or "-"}
+
+系统检测到的最终真实改动：
+- edited_regions: {", ".join(edited_regions) or "-"}
+- ordinary/特殊 family: {", ".join(region_families) or "-"}
+
+当前最终代码 diff 摘要：
+{diff_text}
+
+回写规则：
+- 以当前工作区里的最终 `src/strategy_macd_aggressive.py` 和上面的真实 diff 为准。
+- 如果原 round brief 与最终代码一致，尽量保持 `candidate_id`、`change_tags`、`closest_failed_cluster` 稳定。
+- 如果 worker / repair 实际落码偏离了原 brief，必须修正 `hypothesis`、`change_plan`、`expected_effects`、`novelty_proof`，不要硬沿用旧表述。
+- `change_tags` 应反映最终代码真正修改的机制；不要保留已经没有落到最终代码里的旧标签。
+- 不要输出 `edited_regions`；系统会继续以真实 diff 为准。
+- 不要把“原本想改什么”写进结果，只描述最终已经落到代码里的东西。
+
+输出要求：
+{build_candidate_response_format_instructions()}
 """
 
 

@@ -56,6 +56,7 @@ from research_v2.notifications import build_discord_summary_message
 from research_v2.prompting import (
     EDITABLE_REGIONS,
     build_candidate_response_format_instructions,
+    build_strategy_candidate_summary_prompt,
     build_edit_completion_instructions,
     build_strategy_agents_instructions,
     build_strategy_edit_worker_prompt,
@@ -63,6 +64,7 @@ from research_v2.prompting import (
     build_strategy_no_edit_repair_prompt,
     build_strategy_round_brief_repair_prompt,
     build_strategy_research_prompt,
+    build_strategy_summary_worker_system_prompt,
     build_strategy_runtime_repair_prompt,
     build_strategy_system_prompt,
     build_strategy_worker_system_prompt,
@@ -1378,6 +1380,31 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("只回复 `EDIT_DONE`", prompt)
         self.assertIn("复杂度余量提醒", prompt)
 
+    def test_build_strategy_summary_worker_system_prompt_mentions_no_edit_summary_role(self):
+        prompt = build_strategy_summary_worker_system_prompt()
+
+        self.assertIn("summary_worker", prompt)
+        self.assertIn("不要修改任何文件", prompt)
+        self.assertIn("回写最终候选摘要", prompt)
+
+    def test_build_strategy_candidate_summary_prompt_mentions_final_code_alignment(self):
+        prompt = build_strategy_candidate_summary_prompt(
+            candidate_id="candidate_1",
+            hypothesis="原始多头补法",
+            change_plan="原始计划",
+            change_tags=("long", "merge_veto"),
+            expected_effects=("提高多头到来",),
+            closest_failed_cluster="ownership_cluster",
+            novelty_proof="原始 novelty",
+            edited_regions=("strategy", "long_final_veto_clear"),
+            region_families=("entry_path", "strategy"),
+            diff_summary=("- strategy: 放宽最终路由",),
+        )
+
+        self.assertIn("最终落地代码回写候选元信息", prompt)
+        self.assertIn("如果 worker / repair 实际落码偏离了原 brief", prompt)
+        self.assertIn("不要输出 `edited_regions`", prompt)
+
     def test_build_strategy_worker_system_prompt_mentions_short_lived_worker_role(self):
         prompt = build_strategy_worker_system_prompt(worker_kind="repair_worker")
 
@@ -1678,6 +1705,18 @@ expected_effects: 提高多头上车
         with self.assertRaisesRegex(StrategySourceError, "novelty_proof, change_tags"):
             research_script._validate_round_brief_payload(payload)
 
+    def test_round_brief_from_payload_rejects_missing_core_fields(self):
+        payload = research_script._parse_model_candidate_payload(
+            """
+candidate_id: candidate_bad
+hypothesis: 继续优化多头
+change_plan: 放宽 long_outer_context_ok
+"""
+        )
+
+        with self.assertRaisesRegex(StrategySourceError, "novelty_proof, change_tags"):
+            research_script._round_brief_from_payload(payload)
+
     def test_candidate_from_payload_uses_system_changed_regions_not_declared_regions(self):
         base_source = self._minimal_strategy_source()
         candidate_source = base_source.replace(
@@ -1708,6 +1747,65 @@ expected_effects: 提高多头上车
             )
 
             self.assertEqual(candidate.edited_regions, ("strategy",))
+
+    def test_rebase_candidate_metadata_to_final_code_prefers_summary_worker_output(self):
+        base_source = self._minimal_strategy_source()
+        candidate_source = base_source.replace(
+            "def strategy(*args, **kwargs):\n    return None\n",
+            "def strategy(*args, **kwargs):\n    return 1\n",
+            1,
+        )
+        candidate = StrategyCandidate(
+            candidate_id="candidate_realigned",
+            hypothesis="原 brief 假设",
+            change_plan="原 brief 计划",
+            closest_failed_cluster="ownership_cluster",
+            novelty_proof="原 brief novelty",
+            change_tags=("long",),
+            edited_regions=("strategy",),
+            expected_effects=("原 effect",),
+            core_factors=tuple(),
+            strategy_code=candidate_source,
+        )
+        round_brief = research_script.StrategyRoundBrief(
+            candidate_id="candidate_realigned",
+            hypothesis="原 brief 假设",
+            change_plan="原 brief 计划",
+            closest_failed_cluster="ownership_cluster",
+            novelty_proof="原 brief novelty",
+            change_tags=("long",),
+            expected_effects=("原 effect",),
+            core_factors=tuple(),
+        )
+        summary_brief = research_script.StrategyRoundBrief(
+            candidate_id="candidate_should_not_override",
+            hypothesis="最终代码实际是在改 strategy 最终路由",
+            change_plan="按最终 diff 重写 strategy 路由说明",
+            closest_failed_cluster="route_shift_cluster",
+            novelty_proof="这是按最终代码回写后的 novelty",
+            change_tags=("strategy", "route_shift"),
+            expected_effects=("改变最终入场集合",),
+            core_factors=tuple(),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            research_script,
+            "_request_validated_round_brief",
+            return_value=summary_brief,
+        ):
+            rebased = research_script._rebase_candidate_metadata_to_final_code(
+                candidate=candidate,
+                round_brief=round_brief,
+                base_source=base_source,
+                workspace_root=Path(temp_dir),
+                factor_change_mode="default",
+                context_label="测试候选",
+            )
+
+        self.assertEqual(rebased.candidate_id, "candidate_realigned")
+        self.assertEqual(rebased.hypothesis, "最终代码实际是在改 strategy 最终路由")
+        self.assertEqual(rebased.change_tags, ("strategy", "route_shift"))
+        self.assertEqual(rebased.edited_regions, ("strategy",))
 
     def test_workspace_strategy_changed_source_or_raise_requires_real_file_change(self):
         base_source = self._minimal_strategy_source()
@@ -2665,7 +2763,7 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
             self.assertNotIn("invalid_generation_streak", payload)
             self.assertEqual(payload["factor_change_mode"], "default")
 
-    def test_maybe_reset_research_session_for_factor_mode_clears_session_on_mode_change(self):
+    def test_active_research_session_id_returns_empty_on_factor_mode_scope_mismatch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             temp_paths = replace(
@@ -2690,9 +2788,11 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
                     workspace_root=temp_root / "workspace",
                     factor_change_mode="default",
                 )
-                research_script._maybe_reset_research_session_for_factor_mode("factor_admission")
+                active_session_id = research_script._active_research_session_id(
+                    factor_change_mode="factor_admission"
+                )
 
-            self.assertFalse(temp_paths.session_state_file.exists())
+            self.assertEqual(active_session_id, "")
 
     def test_journal_summary_limits_recent_rows_and_meta_lines_to_requested_limit(self):
         entries = []

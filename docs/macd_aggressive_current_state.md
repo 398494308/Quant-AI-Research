@@ -123,7 +123,7 @@
 
 - 同一个 `baseline / champion stage` 内复用同一个 `planner` session
 - `edit_worker / repair_worker` 不复用 planner session
-- 如果 `factor_change_mode` 在 `default` 和 `factor_admission` 之间切换，会主动清掉旧 planner session
+- `session scope` 现在同时绑定 `stage + factor_change_mode`；如果 `factor_change_mode` 在 `default` 和 `factor_admission` 之间切换，不再沿用旧 planner session
 - 如果 champion 或 baseline 刷新，也会切新 stage 和新 session
 
 当前 session 文件：
@@ -144,6 +144,7 @@
 
 - 候选必须真的改出源码 diff
 - round brief 缺关键字段会 fail fast
+- 候选元信息会在最终代码稳定后按真实 diff 和最终源码回写一次，不再只沿用 planner 的原始 brief
 - `smoke` 先跑，再决定是否值得完整评估
 - `smoke` 行为完全不变时会先同轮重生，连续不变才记 `behavioral_noop`
 - 命中 failure wiki 的 exact cut 会在评估前被挡回
