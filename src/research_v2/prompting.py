@@ -6,12 +6,7 @@ from typing import Any
 
 from research_v2.journal import ORDINARY_REGION_FAMILIES
 from research_v2.strategy_code import (
-    COMPLEXITY_ABSOLUTE_BUDGETS,
-    COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS,
-    complexity_growth_warning_thresholds,
     REQUIRED_FUNCTIONS,
-    factor_change_mode_label,
-    factor_change_mode_prompt_hint,
 )
 
 # ==================== 编辑边界 ====================
@@ -58,34 +53,11 @@ def _ordinary_family_text() -> str:
 
 
 def _complexity_budget_text() -> str:
-    absolute_lines = ["复杂度硬上限（超了直接拒收）:"]
-    for function_name in ("_is_sideways_regime", "_trend_quality_ok", "_trend_followthrough_ok", "strategy"):
-        limits = COMPLEXITY_ABSOLUTE_BUDGETS[function_name]
-        absolute_lines.append(
-            f"- `{function_name}`: lines <= {limits['lines']} / bool_ops <= {limits['bool_ops']} / ifs <= {limits['ifs']}"
-        )
-    absolute_lines.append("决策链 family 硬上限（禁止把复杂度搬家到 long_* / short_* / final_veto 等 helper）:")
-    for family_name in ("sideways_family", "trend_quality_family", "long_path_chain", "short_path_chain"):
-        limits = COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS[family_name]
-        absolute_lines.append(
-            f"- `{family_name}`: lines <= {limits['lines']} / bool_ops <= {limits['bool_ops']} / ifs <= {limits['ifs']}"
-        )
-
-    growth_thresholds = complexity_growth_warning_thresholds()
-    warning_1 = growth_thresholds["warning_1"]
-    warning_2 = growth_thresholds["warning_2"]
-    absolute_lines.append("默认模式单轮增量预警线（相对当前基底，不是硬拒收）:")
-    absolute_lines.append(
-        f"- warning_1: 任一监控函数或决策链 family 接近 lines +{warning_1['lines']} / "
-        f"bool_ops +{warning_1['bool_ops']} / ifs +{warning_1['ifs']}"
+    return (
+        "复杂度信息只做只读诊断，不是本轮的自动分流或自动拦截规则。\n"
+        "- 如果某块明显偏胖，优先删旧、并旧、改旧，不要把复杂度换个名字搬家。\n"
+        "- 新增条件前先检查当前源码里是否已经有近似逻辑；若有，优先直接改旧逻辑。"
     )
-    absolute_lines.append(
-        f"- warning_2: 任一监控函数或决策链 family 接近 lines +{warning_2['lines']} / "
-        f"bool_ops +{warning_2['bool_ops']} / ifs +{warning_2['ifs']}"
-    )
-    absolute_lines.append("- warning_1 开始提醒压缩；warning_2 表示下一步应优先删旧/合并；只有绝对硬上限才会直接拒收。")
-    absolute_lines.append("- 若想新增条件，必须同步删旧条件、合并旧分支，优先保持净复杂度不增长。")
-    return "\n".join(absolute_lines)
 
 
 def _bootstrap_journal_excerpt(journal_summary: str, *, max_lines: int = 28, max_chars: int = 2800) -> str:
@@ -183,6 +155,8 @@ def build_strategy_agents_instructions(*, factor_change_mode: str = "default") -
 - `data/`：OKX K 线 / funding / 成交流量代理等数据，只读参考。
 
 工作方式：
+- 先想再写，先看历史再下手。
+- 不要 hard code，不要堆屎。
 - 先阅读并直接修改 `src/strategy_macd_aggressive.py`，必要时再看回测实现或数据文件，不要靠猜测写策略。
 - 每轮只验证一个可证伪假设；改动要能映射到真实交易路径变化，而不是只制造源码 diff。
 - 优先保持代码结构化、规则块命名清晰、阈值集中、因果链可解释。
@@ -192,8 +166,6 @@ def build_strategy_agents_instructions(*, factor_change_mode: str = "default") -
 - 明确要求：不要“堆屎”。很多你想到的过滤、例外、path 或 veto，当前策略里往往已经以别的名字存在；新增前先检查现有规则块、阈值和最终放行链是否已经表达了同一因果。
 - 若现有脚本里已经有近似逻辑，不要换个名字再写一份重复条件；优先删旧、并旧、改旧，禁止把同一因果链在不同 helper / path / veto 里重复实现。
 - 明确允许结构性删减轮：`remove_dead_gate`、`merge_veto`、`widen_outer_context` 都是合法 change_tags；这类轮次的目标是减少死分支、提高 reachability。
-- `factor_admission` 是临时逃生口，不是常态路线；系统会按当前 stage stall 情况给出提醒、强提醒或强制切换。
-- {factor_change_mode_prompt_hint(factor_change_mode)}
 {complexity_budget_text}
 
 输出与协作规则：
@@ -217,9 +189,6 @@ def build_strategy_agents_instructions(*, factor_change_mode: str = "default") -
 def build_strategy_system_prompt(*, factor_change_mode: str = "default") -> str:
     return f"""遵守当前工作区本地 `AGENTS.md`，它是本 session 的长期规则。
 
-当前因子模式：{factor_change_mode_label(factor_change_mode)}
-- {factor_change_mode_prompt_hint(factor_change_mode)}
-
 你在一个持久研究 session 中工作；当前用户提示只补充本轮目标、诊断和失败反馈。
 {_text_only_output_contract()}
 {_single_strategy_file_scope_rule()}
@@ -234,9 +203,6 @@ def build_strategy_worker_system_prompt(
 ) -> str:
     return f"""遵守当前工作区本地 `AGENTS.md`，它是当前工作区的长期规则。
 
-当前因子模式：{factor_change_mode_label(factor_change_mode)}
-- {factor_change_mode_prompt_hint(factor_change_mode)}
-
 你当前是短生命周期 `{worker_kind}`，不是持久研究 planner。
 - 不要重新做全量历史研究，不要重新定义本轮方向。
 - 只根据当前提示里的 round brief 或 repair 指令，直接修改 `src/strategy_macd_aggressive.py`。
@@ -249,9 +215,6 @@ def build_strategy_worker_system_prompt(
 
 def build_strategy_summary_worker_system_prompt(*, factor_change_mode: str = "default") -> str:
     return f"""遵守当前工作区本地 `AGENTS.md`，它是当前工作区的长期规则。
-
-当前因子模式：{factor_change_mode_label(factor_change_mode)}
-- {factor_change_mode_prompt_hint(factor_change_mode)}
 
 你当前是短生命周期 `summary_worker`，不是持久研究 planner，也不是 edit worker。
 - 不要修改任何文件，不要开始新一轮研究。
@@ -355,13 +318,8 @@ def build_strategy_research_prompt(
             f"- 文件: `{operator_focus_path}`\n"
             f"{operator_focus_text.strip()}\n"
         )
-    factor_mode_status_block = (
-        f"本轮因子准入节奏：\n- {factor_mode_status_text.strip()}\n"
-        if factor_mode_status_text.strip()
-        else ""
-    )
     iteration_lane_block = (
-        f"本轮执行车道：`{iteration_lane}`\n- {iteration_lane_status_text.strip()}\n"
+        f"本轮任务类型：`{iteration_lane}`\n- {iteration_lane_status_text.strip()}\n"
         if iteration_lane_status_text.strip()
         else ""
     )
@@ -383,8 +341,7 @@ def build_strategy_research_prompt(
 - session 状态：`{session_label}`
 - 围绕一个可证伪假设，先产出一个简洁 round brief，交给后续 edit worker 落码。
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若后续落码后的 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
-- 当前评分口径是 `{score_regime}`；正常晋升路径只有在 `gate` 通过，且相对当前 {benchmark_label} 的有效 `promotion_delta > {promotion_min_delta:.2f}` 时，候选才有资格刷新 champion。
-- 若系统把本轮切到 `compaction` lane，则也可能在不刷新 champion 的前提下，仅因复杂度明显改善且 train/val 未明显恶化而保留为新的 working_base。
+- 当前评分口径是 `{score_regime}`；只有在 `gate` 通过，且相对当前 {benchmark_label} 的有效 `promotion_delta > {promotion_min_delta:.2f}` 时，候选才有资格刷新当前 active reference。
 - `train` 看滚动窗口均值/中位数，`val` 看连续 holdout 的 `promotion_score`，`test` 是隐藏验收集。
 
 当前工作基底角色：`{current_base_role}`
@@ -407,9 +364,6 @@ def build_strategy_research_prompt(
 5. 基于上面四步只提出一个单一因果假设，并明确它预计会新增、删除或迁移哪类真实交易。
 6. 形成假设后，必须回看一次 `{duplicate_watchlist_path}` 与 `{failure_wiki_path}` 做自检；若命中相同或高度相似的重复补丁/失败 cut，优先在本轮内改写假设再提交。
 7. 若仍落在同方向簇或同 ordinary family，必须证明这次改的是不同 choke point、不同最终放行链，或不同的真实交易路径层级；`strategy-only` 也可以，但必须说清它改变了哪一层最终路由。
-
-当前因子模式：{factor_change_mode_label(factor_change_mode)}
-{factor_mode_status_block}
 {iteration_lane_block}
 
 {evaluation_summary}
@@ -422,8 +376,7 @@ def build_strategy_research_prompt(
 - 如果主要改 `_trend_followthrough_ok()`、`_trend_quality_ok()` 或 `_flow_confirmation_ok()`，必须确认现有 `strategy()` 路径会触达；否则优先改 `strategy()`。
 - 若最近连续出现 `behavioral_noop` 或结果盆地重复，本轮默认必须放大步长：优先切不同方向簇，或切不同 choke point / 最终放行链；不要只换措辞、tag 或近邻阈值。
 - 若漏斗诊断显示一侧长期 0 交易、outer_context 几乎全死，或 path 能过但 final_veto 基本全死，可以考虑结构性删减轮：`remove_dead_gate` / `merge_veto` / `widen_outer_context`；但只有在它仍是当前最可能改变真实交易路径的根因时才这样做。
-- 默认模式下复杂度采用提醒档而不是增量硬拒收：如果你想加一条新条件，仍必须同步删掉或合并旧条件，避免 `strategy()` 和关键 helper 再次膨胀。
-- 若 headroom 显示某 family 的 `bool_ops` 已经剩余 `0`，或 `lines` 剩余不超过 `8`，默认把它视为饱和区；除非本轮 `change_plan` 明确先删旧条件，否则不要再把主改动落到该 family。
+- 如果复杂度诊断显示某块已经很紧，优先先删旧、并旧、改旧，再考虑新增判断。
 - 若你的主要假设是最终路由或最终 veto 错配，允许只改 `strategy()` 或少量结构化 helper；但必须在 `change_plan` 里写清楚它会新增、删除或迁移哪类真实交易。
 - 如果当前 stage 明确显示某个簇或某种补法已经过热，不要只因为“弱侧还是 long”就继续留在同一路线；优先切到能修 long 但机制不同的方案。
 - 读不到 `{duplicate_watchlist_path}`、`{failure_wiki_path}` 或 `{history_package_path}` 不是合法 no-edit 理由；当前源码仍是硬事实源，必须继续改代码。
@@ -463,12 +416,12 @@ def build_strategy_edit_worker_prompt(
     current_complexity_headroom_text: str = "",
 ) -> str:
     iteration_lane_block = (
-        f"\n本轮执行车道：`{iteration_lane}`\n- {iteration_lane_status_text.strip()}\n"
+        f"\n本轮任务类型：`{iteration_lane}`\n- {iteration_lane_status_text.strip()}\n"
         if iteration_lane_status_text.strip()
         else "\n"
     )
     complexity_block = (
-        f"\n当前复杂度余量提醒：\n{current_complexity_headroom_text}\n"
+        f"\n当前复杂度诊断（只读）：\n{current_complexity_headroom_text}\n"
         if current_complexity_headroom_text.strip()
         else "\n"
     )
@@ -489,7 +442,6 @@ def build_strategy_edit_worker_prompt(
 - 优先改已经存在的命名规则块、阈值和最终放行链；不要为了造 diff 新写一套近似逻辑。
 - 如果你判断 brief 指向的 choke point 根本不在当前代码路径上，应在同一主题内改成能真实触达交易路径的实现，但不要改写研究方向本身。
 - 保持代码结构化，不要做无关重构、大面积格式化或复制已有因果链。
-- 若本轮是 `compaction` lane，优先删旧条件、合并旧分支、移除死门；不要借压缩名义再新增因子、参数或 path。
 - 只要完成真实落码并保存文件，就回复 `EDIT_DONE`。不要输出解释、计划、JSON、markdown 或源码。
 - 如果辅助记忆文件读不到，不是合法 no-edit 理由；直接以当前 `src/strategy_macd_aggressive.py` 为事实源落码。
 {iteration_lane_block}
@@ -656,9 +608,9 @@ def build_strategy_runtime_repair_prompt(
 修复规则：
 - 这是同一轮 repair，不要换研究主题，不要大幅改 hypothesis。
 - 优先做最小必要修复，先保证代码可运行。
-- 若报错是复杂度预算或复杂度增量超限，必须先删旧条件或合并旧分支，让触发报错的 function/family 回到预算内。
-- 不要把复杂度从一个函数搬到同 family 的别的 helper；这类“搬家”仍会因为 family 预算被系统拒收。
-- 默认模式允许少量新 helper/常量做结构化抽离，但它们必须服务于删旧、并旧和降复杂度，不能借机复制旧因果链。
+- 若报错明确指向某块代码过胖或结构失控，优先删旧条件或合并旧分支，再继续保留原研究方向。
+- 不要把复杂度从一个函数搬到同 family 的别的 helper；这类“搬家”通常只是在换名字，没有解决问题。
+- 允许少量新 helper/常量做结构化抽离，但它们必须服务于删旧、并旧和提高清晰度，不能借机复制旧因果链。
 - 若报错涉及缺失 helper / 缺失命名规则块，优先恢复缺失的原函数定义，保留拆分后的结构，不要把多个 helper 合并回旧函数。
 - 若报错涉及 `UnboundLocalError` / `NameError` / 条件变量缺失，优先恢复缺失变量定义，或把该变量的所有引用同步替换到新的等价变量；禁止只修一处而留下半残引用。
 - 除非原标签明显不准确，否则尽量保持 `change_tags`、`edited_regions`、`closest_failed_cluster` 不变。

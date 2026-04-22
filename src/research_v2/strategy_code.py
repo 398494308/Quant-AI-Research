@@ -801,8 +801,8 @@ def format_strategy_complexity_headroom(source: str, *, limit: int = 4) -> str:
     function_items = sorted(headroom["functions"].items(), key=_risk_tuple)[: max(1, limit)]
     lines = [
         f"当前基底复杂度状态：{complexity_pressure_label(str(pressure.get('level', 'normal')))}",
-        "- warning_1 只是提醒开始偏胖；warning_2 表示下一步应优先压缩；只有 hard_cap 才会直接拒收。",
-        "当前基底复杂度余量（剩余越小越容易再次撞复杂度）:",
+        "- 这是一份只读诊断：数值越紧，越适合优先删旧、并旧、改旧。",
+        "当前基底复杂度余量（剩余越小，说明这块越胖）:",
     ]
 
     for name, metrics in family_items:
@@ -819,7 +819,7 @@ def format_strategy_complexity_headroom(source: str, *, limit: int = 4) -> str:
 
     if pressure["headroom_items"]:
         lines.append(f"- 当前最紧张位置：{'；'.join(pressure['headroom_items'][:3])}")
-    lines.append("- 若要继续改最紧张的 family/function，先删旧条件或合并旧分支，再考虑新增判断。")
+    lines.append("- 若要继续改最紧张的 family/function，优先先删旧条件或合并旧分支。")
     return "\n".join(lines)
 
 
@@ -1033,18 +1033,6 @@ def validate_strategy_source(
     undefined_reference_errors = _undefined_function_reference_errors(normalized, tree)
     if undefined_reference_errors:
         raise StrategySourceError(undefined_reference_errors[0])
-    _validate_factor_change_policy(
-        normalized,
-        tree=tree,
-        base_source=base_source,
-        factor_change_mode=factor_change_mode,
-    )
-    _validate_complexity_budget(
-        normalized,
-        tree=tree,
-        base_source=base_source,
-        factor_change_mode=factor_change_mode,
-    )
 
     if not any(isinstance(node, ast.Assign) and any(getattr(target, "id", "") == "PARAMS" for target in node.targets) for node in tree.body):
         raise StrategySourceError("missing top-level PARAMS assignment")

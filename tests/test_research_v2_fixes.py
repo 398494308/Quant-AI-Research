@@ -1066,7 +1066,7 @@ def strategy(*args, **kwargs):
 
         validate_strategy_source(source)
 
-    def test_validate_strategy_source_rejects_new_param_key_in_default_mode(self):
+    def test_validate_strategy_source_allows_new_param_key_in_default_mode(self):
         base_source = self._minimal_validation_source()
         source = base_source.replace(
             "PARAMS = {'intraday_adx_min': 10}",
@@ -1074,12 +1074,11 @@ def strategy(*args, **kwargs):
             1,
         )
 
-        with self.assertRaisesRegex(StrategySourceError, r"forbids new PARAMS keys"):
-            validate_strategy_source(
-                source,
-                base_source=base_source,
-                factor_change_mode="default",
-            )
+        validate_strategy_source(
+            source,
+            base_source=base_source,
+            factor_change_mode="default",
+        )
 
     def test_validate_strategy_source_allows_new_param_key_in_factor_admission_mode(self):
         base_source = self._minimal_validation_source()
@@ -1309,8 +1308,9 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("config/research_v2_operator_focus.md", prompt)
         self.assertIn("wiki/duplicate_watchlist.md", prompt)
         self.assertIn("wiki/failure_wiki.md", prompt)
-        self.assertIn("默认模式", prompt)
-        self.assertIn("禁止新增 `PARAMS` 键", prompt)
+        self.assertIn("先想再写", prompt)
+        self.assertIn("不要 hard code", prompt)
+        self.assertIn("复杂度信息只做只读诊断", prompt)
 
     def test_build_strategy_runtime_prompt_mentions_promotion_gate(self):
         prompt = build_strategy_research_prompt(
@@ -1325,7 +1325,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("duplicate_watchlist.md", prompt)
         self.assertIn("failure_wiki.md", prompt)
         self.assertIn("形成假设后，必须回看一次", prompt)
-        self.assertIn("当前因子模式：默认模式", prompt)
+        self.assertNotIn("当前因子模式", prompt)
         self.assertIn("本轮硬完成条件", prompt)
         self.assertIn("round brief", prompt)
         self.assertIn("change_plan", prompt)
@@ -1412,9 +1412,9 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("round brief", prompt)
         self.assertIn("只修改 `src/strategy_macd_aggressive.py`", prompt)
         self.assertIn("只回复 `EDIT_DONE`", prompt)
-        self.assertIn("复杂度余量提醒", prompt)
+        self.assertIn("复杂度诊断（只读）", prompt)
 
-    def test_build_strategy_edit_worker_prompt_mentions_compaction_lane_when_requested(self):
+    def test_build_strategy_edit_worker_prompt_mentions_compaction_task_when_requested(self):
         prompt = build_strategy_edit_worker_prompt(
             candidate_id="candidate_1",
             hypothesis="压缩多头最终 veto",
@@ -1427,8 +1427,8 @@ class JournalPromptFixesTest(unittest.TestCase):
             iteration_lane_status_text="当前 working_base 已到 warning_2，先压缩再研究。",
         )
 
-        self.assertIn("本轮执行车道：`compaction`", prompt)
-        self.assertIn("不要借压缩名义再新增因子、参数或 path", prompt)
+        self.assertIn("本轮任务类型：`compaction`", prompt)
+        self.assertIn("当前 working_base 已到 warning_2", prompt)
 
     def test_build_strategy_summary_worker_system_prompt_mentions_no_edit_summary_role(self):
         prompt = build_strategy_summary_worker_system_prompt()
@@ -1486,14 +1486,9 @@ class JournalPromptFixesTest(unittest.TestCase):
         )
 
         self.assertNotIn("复杂度硬上限（超了直接拒收）", runtime_prompt)
-        for prompt in (system_prompt,):
-            self.assertIn("复杂度硬上限（超了直接拒收）", prompt)
-            self.assertIn("`_is_sideways_regime`: lines <= 90 / bool_ops <= 32 / ifs <= 14", prompt)
-            self.assertIn("`_trend_followthrough_ok`: lines <= 90 / bool_ops <= 36 / ifs <= 12", prompt)
-            self.assertIn("`strategy`: lines <= 360 / bool_ops <= 180 / ifs <= 12", prompt)
-            self.assertIn("warning_1: 任一监控函数或决策链 family 接近 lines +24 / bool_ops +12 / ifs +3", prompt)
-            self.assertIn("`long_path_chain`", prompt)
-            self.assertIn("warning_2: 任一监控函数或决策链 family 接近 lines +34 / bool_ops +17 / ifs +4", prompt)
+        self.assertNotIn("复杂度硬上限（超了直接拒收）", system_prompt)
+        self.assertIn("复杂度信息只做只读诊断", system_prompt)
+        self.assertIn("删旧、并旧、改旧", system_prompt)
 
     def test_build_strategy_research_prompt_can_include_current_complexity_headroom(self):
         headroom_text = "当前基底复杂度余量（剩余越小越容易再次撞复杂度）:\n- family `trend_quality_family`: lines 剩 8, bool_ops 剩 0, ifs 剩 3"
@@ -1507,7 +1502,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("当前基底复杂度余量", prompt)
         self.assertIn("trend_quality_family", prompt)
 
-    def test_build_strategy_research_prompt_mentions_working_base_compaction_lane(self):
+    def test_build_strategy_research_prompt_can_still_echo_iteration_lane_when_provided(self):
         prompt = build_strategy_research_prompt(
             evaluation_summary="诊断",
             journal_summary="记忆",
@@ -1519,8 +1514,9 @@ class JournalPromptFixesTest(unittest.TestCase):
         )
 
         self.assertIn("当前工作基底角色：`working_base`", prompt)
-        self.assertIn("本轮执行车道：`compaction`", prompt)
-        self.assertIn("保留为新的 working_base", prompt)
+        self.assertIn("本轮任务类型：`compaction`", prompt)
+        self.assertNotIn("working_base_compaction", prompt)
+        self.assertNotIn("满足则更新 working_base", prompt)
 
     def test_build_strategy_runtime_repair_prompt_mentions_complexity_shrink_rule(self):
         prompt = build_strategy_runtime_repair_prompt(
@@ -1536,7 +1532,7 @@ class JournalPromptFixesTest(unittest.TestCase):
             repair_attempt=1,
         )
 
-        self.assertIn("复杂度预算或复杂度增量超限", prompt)
+        self.assertIn("代码过胖或结构失控", prompt)
         self.assertIn("不要把复杂度从一个函数搬到同 family 的别的 helper", prompt)
 
     def test_build_strategy_exploration_repair_prompt_mentions_blocked_cluster(self):
@@ -2826,9 +2822,10 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
             payload = json.loads(temp_paths.session_state_file.read_text())
             self.assertEqual(payload["session_id"], "session-123")
             self.assertNotIn("invalid_generation_streak", payload)
-            self.assertEqual(payload["factor_change_mode"], "default")
+            self.assertNotIn("factor_change_mode", payload)
+            self.assertNotIn("iteration_lane", payload)
 
-    def test_active_research_session_id_returns_empty_on_factor_mode_scope_mismatch(self):
+    def test_active_research_session_id_ignores_factor_mode_scope_mismatch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             temp_paths = replace(
@@ -2857,9 +2854,9 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
                     factor_change_mode="factor_admission"
                 )
 
-            self.assertEqual(active_session_id, "")
+            self.assertEqual(active_session_id, "session-123")
 
-    def test_active_research_session_id_returns_empty_on_iteration_lane_scope_mismatch(self):
+    def test_active_research_session_id_ignores_iteration_lane_scope_mismatch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             temp_paths = replace(
@@ -2890,47 +2887,19 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
                     iteration_lane="compaction",
                 )
 
-            self.assertEqual(active_session_id, "")
+            self.assertEqual(active_session_id, "session-123")
 
-    def test_working_base_compaction_acceptance_allows_small_metric_slack_when_headroom_improves(self):
-        base_source = _minimal_required_strategy_source(trend_quality_bool_ops=31)
-        candidate_source = _minimal_required_strategy_source(trend_quality_bool_ops=27)
-        baseline_report = EvaluationReport(
-            metrics={
-                "promotion_score": 0.20,
-                "quality_score": 0.18,
-                "validation_trend_capture_score": 0.10,
-                "validation_segment_hit_rate": 0.40,
-            },
-            gate_passed=False,
-            gate_reason="baseline",
-            summary_text="",
-            prompt_summary_text="",
-        )
-        candidate_report = EvaluationReport(
-            metrics={
-                "promotion_score": 0.18,
-                "quality_score": 0.17,
-                "validation_trend_capture_score": 0.08,
-                "validation_segment_hit_rate": 0.37,
-            },
-            gate_passed=False,
-            gate_reason="train/val 分数略回撤",
-            summary_text="",
-            prompt_summary_text="",
-        )
+    def test_planner_session_policy_is_always_single_persistent_planner(self):
+        session_kind, use_persistent = research_script._planner_session_policy_for_iteration_lane("compaction")
 
-        with mock.patch.object(research_script, "best_report", baseline_report):
-            accepted, reason, compaction_delta = research_script._working_base_compaction_acceptance_decision(
-                candidate_report,
-                base_source=base_source,
-                candidate_source=candidate_source,
-            )
+        self.assertEqual(session_kind, "planner")
+        self.assertTrue(use_persistent)
 
-        self.assertTrue(accepted)
-        self.assertTrue(compaction_delta["material"])
-        self.assertEqual(compaction_delta["base_level"], "warning_2")
-        self.assertIn("压缩沉淀通过", reason)
+    def test_resolve_iteration_lane_state_always_returns_research(self):
+        state = research_script._resolve_iteration_lane_state([])
+
+        self.assertEqual(state["lane"], "research")
+        self.assertEqual(state["reason"], "")
 
     def test_journal_summary_limits_recent_rows_and_meta_lines_to_requested_limit(self):
         entries = []
@@ -3566,10 +3535,9 @@ class ResearcherAdaptiveModeTest(unittest.TestCase):
             mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
 
         self.assertEqual(mode, "default")
-        self.assertIn("连续 5 轮", reason)
-        self.assertIn("提醒区", reason)
+        self.assertIn("不再自动切换", reason)
 
-    def test_resolve_iteration_factor_change_state_enters_strong_suggestion_band_after_seven_stalls(self):
+    def test_resolve_iteration_factor_change_state_stays_manual_after_many_stalls(self):
         entries = [
             {"iteration": idx + 1, "outcome": "behavioral_noop", "score_regime": research_script.SCORE_REGIME}
             for idx in range(7)
@@ -3583,10 +3551,10 @@ class ResearcherAdaptiveModeTest(unittest.TestCase):
             state = research_script._resolve_iteration_factor_change_state(entries)
 
         self.assertEqual(state["mode"], "default")
-        self.assertEqual(state["guidance_level"], "suggest")
-        self.assertEqual(state["trailing_stalls"], 7)
+        self.assertEqual(state["guidance_level"], "manual")
+        self.assertEqual(state["trailing_stalls"], 0)
 
-    def test_resolve_iteration_factor_change_mode_triggers_factor_admission_after_ten_stalls(self):
+    def test_resolve_iteration_factor_change_mode_keeps_default_after_ten_stalls(self):
         entries = [
             {"iteration": idx + 1, "outcome": "behavioral_noop", "score_regime": research_script.SCORE_REGIME}
             for idx in range(10)
@@ -3599,9 +3567,8 @@ class ResearcherAdaptiveModeTest(unittest.TestCase):
         ):
             mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
 
-        self.assertEqual(mode, "factor_admission")
-        self.assertIn("连续 10 轮", reason)
-        self.assertIn("第 1/4 轮", reason)
+        self.assertEqual(mode, "default")
+        self.assertIn("不再自动切换", reason)
 
     def test_resolve_iteration_factor_change_mode_returns_base_mode_after_positive_delta(self):
         entries = [
@@ -3624,7 +3591,7 @@ class ResearcherAdaptiveModeTest(unittest.TestCase):
             mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
 
         self.assertEqual(mode, "default")
-        self.assertIn("维持 default", reason)
+        self.assertIn("不再自动切换", reason)
 
     def test_consecutive_no_edit_runtime_failures_counts_trailing_no_edit_only(self):
         entries = [
@@ -4137,7 +4104,7 @@ class ReferenceStateFixesTest(unittest.TestCase):
         self.assertEqual(payload["reference_stage_started_at"], "2026-04-20T00:00:00+00:00")
         self.assertEqual(payload["reference_stage_iteration"], 7)
 
-    def test_reference_manifest_uses_working_base_role_when_champion_and_base_diverge(self):
+    def test_reference_manifest_uses_single_active_reference_payload(self):
         working_base_source = "def strategy():\n    return 'working'\n"
         champion_source = "def strategy():\n    return 'champion'\n"
         working_base_report = EvaluationReport(
@@ -4175,11 +4142,11 @@ class ReferenceStateFixesTest(unittest.TestCase):
             research_script.champion_report = original_champion_report
             research_script.champion_shadow_test_metrics = original_champion_shadow
 
-        self.assertEqual(payload["reference_role"], "working_base")
-        self.assertEqual(payload["benchmark_role"], "champion")
-        self.assertEqual(payload["working_base"]["code_hash"], research_script.source_hash(working_base_source))
-        self.assertEqual(payload["champion"]["code_hash"], research_script.source_hash(champion_source))
-        self.assertEqual(payload["champion"]["shadow_test_metrics"]["shadow_test_score"], 1.23)
+        self.assertEqual(payload["reference_role"], "baseline")
+        self.assertEqual(payload["benchmark_role"], "baseline")
+        self.assertEqual(payload["reference"]["code_hash"], research_script.source_hash(working_base_source))
+        self.assertNotIn("working_base", payload)
+        self.assertIsNone(payload["champion"])
 
     def test_promotion_acceptance_accepts_first_gate_passed_champion_when_baseline_fails(self):
         baseline_report = EvaluationReport(
@@ -4351,8 +4318,7 @@ class DiscordSummaryFormattingTest(unittest.TestCase):
 
         self.assertIn("数据范围", message)
         self.assertIn("本轮窗口", message)
-        self.assertIn("因子模式", message)
-        self.assertIn("默认模式", message)
+        self.assertNotIn("因子模式", message)
         self.assertIn("train+val期间收益", message)
         self.assertIn("val期间收益", message)
         self.assertIn("Sharpe(train / val / test)", message)
@@ -4393,7 +4359,6 @@ class DiscordSummaryFormattingTest(unittest.TestCase):
             validation_window_count=1,
             test_window_count=1,
             data_range_text="train 2023-07-01~2024-12-31 / val 2025-01-01~2025-12-31 / test 2026-01-01~2026-03-31",
-            factor_change_mode="factor_admission",
             shadow_test_metrics={
                 "shadow_test_total_return_pct": 3.21,
                 "shadow_test_closed_trades": 9.0,
@@ -4409,7 +4374,7 @@ class DiscordSummaryFormattingTest(unittest.TestCase):
         self.assertIn("Sharpe(train / val / test)", message)
         self.assertIn("0.88 / 0.42 / 0.35", message)
         self.assertIn("7.40% / 0.60%", message)
-        self.assertIn("因子准入模式", message)
+        self.assertNotIn("因子准入模式", message)
 
 
 class ChartRenderingTest(unittest.TestCase):
