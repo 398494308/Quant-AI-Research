@@ -144,6 +144,7 @@
 - `reviewer / edit_worker / repair_worker / summary_worker` 都不复用 planner session
 - session scope 只绑定当前 active reference 的 `code_hash + stage`
 - 一旦手工重开 stage，或 champion 刷新，planner session 就会重置
+- 如果本轮没有刷新 champion，主进程只写回 `journal / wiki / reviewer_summary_card`，然后沿用当前 stage / planner session 进入下一轮
 - 当前同一轮允许出现 `planner -> reviewer -> planner 重写 -> reviewer` 的短链，但只有 planner 复用持久 session
 
 ## 复杂度与手工瘦身

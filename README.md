@@ -52,26 +52,28 @@
 
 ```mermaid
 flowchart TB
-    A[主进程开始第 N 轮] --> B[主 session / planner<br/>读取 reviewer 卡、history package、failure wiki、duplicate watchlist]
-    B --> C[planner 产出 draft round brief]
+    A[主进程开始第 N 轮] --> B[planner 主 session<br/>读 reviewer 卡和前台记忆]
+    B --> C[planner 写 draft brief]
+    C --> D[reviewer 审稿]
+    D --> E{PASS?}
 
-    C --> D[reviewer 子会话<br/>短生命周期审稿]
-    D --> E{PASS or REVISE}
-
-    E -- REVISE --> F[planner 吸收 reviewer 打回信息<br/>重写 draft round brief]
+    E -- 否 --> F[planner 吸收打回信息<br/>重写 draft]
     F --> D
 
-    E -- PASS --> G[edit_worker 子会话<br/>把通过审稿的 brief 落到策略源码]
-    G --> H{源码校验 / no-edit / 运行报错?}
-
-    H -- 修错 --> I[repair_worker 子会话<br/>只修当前轮技术问题]
+    E -- 是 --> G[edit_worker 落码]
+    G --> H{代码通过?}
+    H -- 否 --> I[repair_worker 修错]
     I --> H
 
-    H -- 通过 --> J[主进程执行真实 diff 检查<br/>smoke / full eval / gate]
-    J --> K[summary_worker 子会话<br/>按最终真实 diff 回写候选摘要]
-    K --> L[主进程写 journal / wiki / reviewer 卡 / heartbeat]
-    L --> M[更新当前 stage 记忆]
+    H -- 是 --> J[主进程跑 diff / smoke / full eval / gate]
+    J --> K[summary_worker 回写最终摘要]
+    K --> L{新 champion?}
+
+    L -- 是 --> M[更新 champion<br/>重置 stage 和 planner session]
     M --> B
+
+    L -- 否 --> N[写 journal / wiki / reviewer 卡]
+    N --> B
 ```
 
 当前这套工作流的意思是：
@@ -82,7 +84,8 @@ flowchart TB
 - 如果 `reviewer=PASS`，才会进入 `edit_worker` 落码。
 - `repair_worker` 只在同轮技术修错时出现，不参与研究方向判断。
 - `summary_worker` 只根据最终真实 diff 回写候选摘要，避免“原 brief”和“最终代码”错位。
-- 每轮结束后，主进程会把结果写回 `journal / wiki / reviewer_summary_card`。下一轮 `planner` 会先读这些前台记忆，再继续研究。
+- 如果本轮刷新了 `champion`，主进程会更新 active reference，并开启新的 stage / planner session。
+- 如果本轮没有刷新 `champion`，主进程会把结果写回 `journal / wiki / reviewer_summary_card`，然后直接开始下一轮。
 
 更完整的说明见 [docs/agent_subagent_workflow.md](docs/agent_subagent_workflow.md)。
 
