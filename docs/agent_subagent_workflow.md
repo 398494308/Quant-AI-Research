@@ -163,6 +163,8 @@ flowchart TB
   上一轮 reviewer 为什么放行或打回
 - `wiki/latest_history_package.md`
   当前 stage 的执行摘要、失败核、过热簇和最近轮次
+- `wiki/current_reference_denylist.md`
+  当前 active reference 下已经被反复证伪的调法模式
 - `wiki/failure_wiki.md`
   去重后的失败模式聚合
 - `wiki/duplicate_watchlist.md`
@@ -173,9 +175,10 @@ flowchart TB
 其中最靠前的是：
 
 1. `reviewer_summary_card.md`
-2. `latest_history_package.md`
-3. `failure_wiki.md`
-4. `duplicate_watchlist.md`
+2. `current_reference_denylist.md`
+3. `latest_history_package.md`
+4. `failure_wiki.md`
+5. `duplicate_watchlist.md`
 
 ## 一句话总结
 

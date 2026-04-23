@@ -64,6 +64,15 @@ RESULT_BASIN_ROUND_DIGITS = 6
 RESULT_BASIN_LOOKBACK = 24
 DUPLICATE_WATCHLIST_LOOKBACK = 36
 DUPLICATE_WATCHLIST_LIMIT = 5
+CURRENT_REFERENCE_DENYLIST_LIMIT = 8
+CURRENT_REFERENCE_PROOF_REQUIRED_NOOP_COUNT = 1
+CURRENT_REFERENCE_PROOF_REQUIRED_DUPLICATE_HISTORY_COUNT = 2
+CURRENT_REFERENCE_PROOF_REQUIRED_FAILED_BASIN_COUNT = 2
+CURRENT_REFERENCE_PROOF_REQUIRED_BEST_DELTA_MAX = 0.01
+CURRENT_REFERENCE_HARD_BAN_NOOP_COUNT = 2
+CURRENT_REFERENCE_HARD_BAN_DUPLICATE_HISTORY_COUNT = 3
+CURRENT_REFERENCE_HARD_BAN_FAILED_BASIN_COUNT = 4
+CURRENT_REFERENCE_HARD_BAN_BEST_DELTA_MAX = 0.005
 LONG_TARGET_KEYWORDS = (
     "long",
     "bull",
@@ -124,6 +133,8 @@ def _memory_archive_paths(memory_root: Path) -> dict[str, Path]:
         "failure_wiki_md": memory_root / "wiki/failure_wiki.md",
         "failure_wiki_json": memory_root / "wiki/failure_wiki_index.json",
         "duplicate_watchlist_md": memory_root / "wiki/duplicate_watchlist.md",
+        "current_reference_denylist_md": memory_root / "wiki/current_reference_denylist.md",
+        "current_reference_denylist_json": memory_root / "wiki/current_reference_denylist.json",
     }
 
 
@@ -435,6 +446,253 @@ def format_duplicate_watchlist_markdown(
         )
         lines.append(f"- 最近原因: {_truncate(item['reason'], 96)}")
         lines.append(f"- 避免方式: {_truncate(item['hint'], 120)}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _current_reference_scope_entries(
+    entries: list[dict[str, Any]],
+    *,
+    active_reference_code_hash: str = "",
+) -> list[dict[str, Any]]:
+    scoped_entries = list(entries)
+    reference_code_hash = str(active_reference_code_hash or "").strip()
+    if not scoped_entries or not reference_code_hash:
+        return []
+
+    explicit_matches = [
+        entry
+        for entry in scoped_entries
+        if str(entry.get("reference_code_hash", "")).strip() == reference_code_hash
+    ]
+    if explicit_matches:
+        return explicit_matches
+
+    latest_reference_accept_index = -1
+    for index, entry in enumerate(scoped_entries):
+        if str(entry.get("outcome", "")).strip() != "accepted":
+            continue
+        if str(entry.get("code_hash", "")).strip() != reference_code_hash:
+            continue
+        latest_reference_accept_index = index
+    if latest_reference_accept_index >= 0:
+        return scoped_entries[latest_reference_accept_index + 1:]
+
+    accepted_entries = [
+        entry for entry in scoped_entries
+        if str(entry.get("outcome", "")).strip() == "accepted"
+    ]
+    if not accepted_entries:
+        return scoped_entries
+    return []
+
+
+def _current_reference_denylist_level_rank(level: str) -> int:
+    return {
+        "HARD_BAN": 0,
+        "PROOF_REQUIRED": 1,
+        "WATCHLIST": 2,
+    }.get(str(level or "").strip(), 3)
+
+
+def _current_reference_denylist_level(
+    *,
+    attempts: int,
+    noop_count: int,
+    duplicate_history_count: int,
+    failed_basin_count: int,
+    best_delta: float,
+) -> str:
+    if (
+        noop_count >= CURRENT_REFERENCE_HARD_BAN_NOOP_COUNT
+        or duplicate_history_count >= CURRENT_REFERENCE_HARD_BAN_DUPLICATE_HISTORY_COUNT
+        or (
+            failed_basin_count >= CURRENT_REFERENCE_HARD_BAN_FAILED_BASIN_COUNT
+            and best_delta <= CURRENT_REFERENCE_HARD_BAN_BEST_DELTA_MAX
+        )
+    ):
+        return "HARD_BAN"
+    if (
+        noop_count >= CURRENT_REFERENCE_PROOF_REQUIRED_NOOP_COUNT
+        or duplicate_history_count >= CURRENT_REFERENCE_PROOF_REQUIRED_DUPLICATE_HISTORY_COUNT
+        or (
+            failed_basin_count >= CURRENT_REFERENCE_PROOF_REQUIRED_FAILED_BASIN_COUNT
+            and best_delta <= CURRENT_REFERENCE_PROOF_REQUIRED_BEST_DELTA_MAX
+        )
+    ):
+        return "PROOF_REQUIRED"
+    if attempts >= 2:
+        return "WATCHLIST"
+    return ""
+
+
+def _current_reference_denylist_hint(level: str) -> str:
+    if level == "HARD_BAN":
+        return (
+            "当前 active reference 下，这条调法已经被强证据反复否掉；"
+            "除非你能明确证明目标侧、最终放行链和真实交易路径层级都不同，否则不要继续。"
+        )
+    if level == "PROOF_REQUIRED":
+        return (
+            "若仍研究这条线，必须先举出新的 choke point、最终放行链或真实交易路径层级；"
+            "没有新证据就不要继续横移。"
+        )
+    return "这条调法已经开始过热；继续前先确认自己不是在同簇、同 changed_regions 上做近邻微调。"
+
+
+def build_current_reference_denylist_payload(
+    entries: list[dict[str, Any]],
+    *,
+    score_regime: str = "",
+    active_reference_code_hash: str = "",
+) -> dict[str, Any]:
+    scoped_entries = _entries_for_score_regime(entries, score_regime) if score_regime else list(entries)
+    scoped_entries = _strategy_relevant_entries(scoped_entries)
+    reference_entries = _current_reference_scope_entries(
+        scoped_entries,
+        active_reference_code_hash=active_reference_code_hash,
+    )
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for entry in reference_entries:
+        signature = exploration_signature_for_entry(entry)
+        cut = _failure_cut_payload_from_signature(signature)
+        if not cut:
+            continue
+        bucket_key = json.dumps(cut, ensure_ascii=False, sort_keys=True)
+        bucket = grouped.setdefault(
+            bucket_key,
+            {
+                "pattern": cut,
+                "attempts": 0,
+                "noop_count": 0,
+                "duplicate_history_count": 0,
+                "failed_basin_count": 0,
+                "last_iteration": 0,
+                "best_delta": 0.0,
+                "top_reasons": Counter(),
+                "top_tags": Counter(),
+                "examples": [],
+            },
+        )
+        bucket["attempts"] += 1
+        bucket["last_iteration"] = max(bucket["last_iteration"], _entry_iteration(entry))
+        bucket["best_delta"] = max(bucket["best_delta"], _score_value(entry.get("promotion_delta")))
+        outcome = str(entry.get("outcome", "")).strip()
+        stop_stage = str(entry.get("stop_stage", "")).strip()
+        if outcome == "behavioral_noop":
+            bucket["noop_count"] += 1
+        if outcome == "duplicate_skipped" and stop_stage == "duplicate_history":
+            bucket["duplicate_history_count"] += 1
+        if _failure_category_for_entry(entry) == "FAILED_BASIN":
+            bucket["failed_basin_count"] += 1
+        reason = _entry_decision_reason(entry)
+        if reason and reason != "-":
+            bucket["top_reasons"][reason] += 1
+        for tag in entry.get("change_tags", []):
+            tag_text = str(tag).strip()
+            if tag_text:
+                bucket["top_tags"][tag_text] += 1
+        bucket["examples"].append(
+            {
+                "iteration": _entry_iteration(entry),
+                "candidate_id": str(entry.get("candidate_id", "")).strip() or "-",
+                "outcome": outcome or "-",
+            }
+        )
+
+    items: list[dict[str, Any]] = []
+    for payload in grouped.values():
+        level = _current_reference_denylist_level(
+            attempts=int(payload["attempts"]),
+            noop_count=int(payload["noop_count"]),
+            duplicate_history_count=int(payload["duplicate_history_count"]),
+            failed_basin_count=int(payload["failed_basin_count"]),
+            best_delta=float(payload["best_delta"]),
+        )
+        if not level:
+            continue
+        items.append(
+            {
+                "level": level,
+                "pattern": payload["pattern"],
+                "attempts": int(payload["attempts"]),
+                "noop_count": int(payload["noop_count"]),
+                "duplicate_history_count": int(payload["duplicate_history_count"]),
+                "failed_basin_count": int(payload["failed_basin_count"]),
+                "last_iteration": int(payload["last_iteration"]),
+                "best_delta": float(payload["best_delta"]),
+                "top_reasons": [name for name, _ in payload["top_reasons"].most_common(2)],
+                "top_tags": [name for name, _ in payload["top_tags"].most_common(4)],
+                "examples": sorted(
+                    payload["examples"],
+                    key=lambda row: row["iteration"],
+                    reverse=True,
+                )[:3],
+                "hint": _current_reference_denylist_hint(level),
+            }
+        )
+    items.sort(
+        key=lambda item: (
+            _current_reference_denylist_level_rank(str(item.get("level", ""))),
+            -int(item.get("attempts", 0) or 0),
+            -int(item.get("noop_count", 0) or 0),
+            -int(item.get("failed_basin_count", 0) or 0),
+            -int(item.get("last_iteration", 0) or 0),
+        )
+    )
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "score_regime": score_regime,
+        "active_reference_code_hash": str(active_reference_code_hash or "").strip(),
+        "scope_entry_count": len(reference_entries),
+        "item_count": len(items),
+        "items": items,
+    }
+
+
+def format_current_reference_denylist_markdown(payload: dict[str, Any], *, limit: int = CURRENT_REFERENCE_DENYLIST_LIMIT) -> str:
+    items = list(payload.get("items", []))
+    lines = [
+        f"# Current Reference Denylist ({str(payload.get('score_regime', '')).strip() or 'current'})",
+        "",
+        "用法：",
+        "- 这是一份当前 active reference 作用域下的调法 denylist，不是全局因子黑名单。",
+        "- 它只总结当前 active reference 下，已经被反复证伪的调法模式；reference 刷新后会随 code hash 一起重算。",
+        "- 它不是运行时硬拦截。planner 必须先读，reviewer 可据此要求更强 proof 或直接打回。",
+        "- `HARD_BAN` 只针对当前 reference 下证据最强的坏模式；若你真要继续，必须明确证明目标侧、最终放行链和真实交易路径层级都不同。",
+        "- `PROOF_REQUIRED` 说明这条线没有被彻底封死，但没有新证据就不要继续。",
+        "",
+        f"- 当前 reference hash: `{_truncate(str(payload.get('active_reference_code_hash', '')).strip() or '-', 18)}`",
+        f"- 当前 reference 作用域样本数: {int(payload.get('scope_entry_count', 0) or 0)}",
+        "",
+        "## 当前列表",
+        "| 等级 | cluster | changed_regions | target | 次数 | noop | duplicate_history | failed_basin | best_delta | 最近轮次 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    if not items:
+        lines.append("| - | - | - | - | 0 | 0 | 0 | 0 | 0.00 | - |")
+        lines.append("")
+        lines.append("- 当前没有足够证据把任何调法列进 denylist。")
+        return "\n".join(lines)
+
+    for item in items[: max(1, limit)]:
+        pattern = item.get("pattern", {}) if isinstance(item.get("pattern"), dict) else {}
+        changed_regions = ",".join(pattern.get("changed_regions", []) or []) or "-"
+        lines.append(
+            f"| {item.get('level', '-')} | {pattern.get('cluster', '-') or '-'} | "
+            f"{_truncate(changed_regions, 42)} | {pattern.get('target', '-') or '-'} | "
+            f"{int(item.get('attempts', 0) or 0)} | {int(item.get('noop_count', 0) or 0)} | "
+            f"{int(item.get('duplicate_history_count', 0) or 0)} | {int(item.get('failed_basin_count', 0) or 0)} | "
+            f"{float(item.get('best_delta', 0.0) or 0.0):.2f} | {int(item.get('last_iteration', 0) or 0) or '-'} |"
+        )
+        lines.append(
+            f"- 调法画像: families={','.join(pattern.get('families', []) or []) or '-'}; "
+            f"params={','.join(pattern.get('params', []) or []) or '-'}"
+        )
+        lines.append(f"- 最近原因: {'；'.join(item.get('top_reasons', []) or ['-'])}")
+        lines.append(f"- 高频标签: {', '.join(item.get('top_tags', []) or ['-'])}")
+        lines.append(f"- 使用建议: {item.get('hint', '-')}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -2656,6 +2914,8 @@ def _write_prompt_memory_snapshots(
         "failure_wiki_md",
         "failure_wiki_json",
         "duplicate_watchlist_md",
+        "current_reference_denylist_md",
+        "current_reference_denylist_json",
     ):
         paths[key].parent.mkdir(parents=True, exist_ok=True)
     paths["current_stage"].write_text(
@@ -2683,6 +2943,17 @@ def _write_prompt_memory_snapshots(
             all_entries,
             score_regime=str(current_stage_meta.get("score_regime", "")).strip(),
         )
+    )
+    reference_denylist_payload = build_current_reference_denylist_payload(
+        all_entries,
+        score_regime=str(current_stage_meta.get("score_regime", "")).strip(),
+        active_reference_code_hash=str(current_stage_meta.get("active_reference_code_hash", "")).strip(),
+    )
+    paths["current_reference_denylist_json"].write_text(
+        json.dumps(reference_denylist_payload, ensure_ascii=False, indent=2)
+    )
+    paths["current_reference_denylist_md"].write_text(
+        format_current_reference_denylist_markdown(reference_denylist_payload)
     )
 
 
@@ -3031,6 +3302,7 @@ def build_journal_prompt_summary(
     current_iteration: int = 0,
     active_stage_started_at: str = "",
     active_stage_iteration: int = 0,
+    active_reference_code_hash: str = "",
     reference_role: str = "",
     reference_metrics: dict[str, Any] | None = None,
     memory_root: Path | None = None,
@@ -3044,6 +3316,17 @@ def build_journal_prompt_summary(
         ) + 1
     current_entries = _entries_for_score_regime(all_entries, active_score_regime)
     current_relevant_entries = _strategy_relevant_entries(current_entries)
+    resolved_reference_code_hash = str(active_reference_code_hash or "").strip()
+    if not resolved_reference_code_hash:
+        resolved_reference_code_hash = next(
+            (
+                str(entry.get("code_hash", "")).strip()
+                for entry in reversed(current_entries)
+                if str(entry.get("outcome", "")).strip() == "accepted"
+                and str(entry.get("code_hash", "")).strip()
+            ),
+            "",
+        )
     current_stage_entries, past_stage_entries, stage_meta = _partition_entries_by_stage(
         all_entries,
         score_regime=active_score_regime,
@@ -3209,6 +3492,7 @@ def build_journal_prompt_summary(
             "reference_role": reference_role,
             "score_regime": active_score_regime,
             "stage_name": stage_name,
+            "active_reference_code_hash": resolved_reference_code_hash,
         }
         _write_prompt_memory_snapshots(
             memory_root,

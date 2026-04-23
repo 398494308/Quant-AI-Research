@@ -97,6 +97,68 @@ def _position_side(position):
     return _signal_side(position.get("entry_signal", "long_breakout"))
 
 
+def _resolve_strategy_signal_decision(strategy_func, data, idx, positions, market_state):
+    module = None
+    module_name = getattr(strategy_func, "__module__", "")
+    if module_name:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            module = None
+
+    normalize_hook = getattr(module, "normalize_entry_signal", None) if module is not None else None
+    path_tags = getattr(module, "ENTRY_PATH_TAGS", {}) if module is not None else {}
+    decision_hook = getattr(module, "strategy_decision", None) if module is not None else None
+
+    def _normalize_signal(raw_signal, fallback_side=""):
+        if callable(normalize_hook):
+            normalized = str(normalize_hook(raw_signal, fallback_side=fallback_side) or "").strip()
+            if normalized:
+                return normalized
+        text = str(raw_signal or "").strip()
+        if not text:
+            side = str(fallback_side or "").strip().lower()
+            if side == "long":
+                return "long_pullback"
+            if side == "short":
+                return "short_breakdown"
+            return ""
+        if text.startswith("long_"):
+            return "long_pullback"
+        if text.startswith("short_"):
+            return "short_breakdown"
+        return text
+
+    def _resolve_path_tag(raw_signal, normalized_signal, raw_path_tag=""):
+        if raw_path_tag:
+            return raw_path_tag
+        tag = str(path_tags.get(str(raw_signal or "").strip(), "")).strip()
+        if tag:
+            return tag
+        tag = str(path_tags.get(normalized_signal, "")).strip()
+        if tag:
+            return tag
+        return normalized_signal
+
+    if callable(decision_hook):
+        payload = decision_hook(data, idx, positions, market_state)
+        if isinstance(payload, dict):
+            raw_signal = payload.get("entry_signal", "")
+            normalized_signal = _normalize_signal(raw_signal, payload.get("entry_side", ""))
+            if normalized_signal:
+                return normalized_signal, _resolve_path_tag(
+                    raw_signal,
+                    normalized_signal,
+                    str(payload.get("entry_path_tag", "")).strip(),
+                )
+
+    raw_signal = strategy_func(data, idx, positions, market_state)
+    normalized_signal = _normalize_signal(raw_signal)
+    if not normalized_signal:
+        return None, None
+    return normalized_signal, _resolve_path_tag(raw_signal, normalized_signal)
+
+
 def _infer_data_venue(filename):
     name = Path(str(filename)).name.lower()
     if "okx" in name:
@@ -581,6 +643,7 @@ def _close_trade(position, price, reason, leverage, allocated_entry_fee=0.0, exi
         "hold_bars": position["hold_bars"],
         "reason": reason,
         "entry_signal": position["entry_signal"],
+        "entry_path_tag": position.get("entry_path_tag", position["entry_signal"]),
         "size": position["size"],
         "pyramids_done": position.get("pyramids_done", 0),
     }
@@ -675,6 +738,7 @@ def _build_closed_trade(position):
         "hold_bars": hold_bars,
         "reason": position.get("last_close_reason", ""),
         "entry_signal": position["entry_signal"],
+        "entry_path_tag": position.get("entry_path_tag", position["entry_signal"]),
         "size": opened_size,
         "closed_size": closed_size,
         "pyramids_done": position.get("pyramids_done", 0),
@@ -892,7 +956,7 @@ def _should_pyramid(position, market_state, close_pnl_pct, exit_p, allow_pyramid
         and
         int(exit_p.get("pyramid_enabled", 0)) > 0
         and position.get("pyramids_done", 0) < int(exit_p.get("pyramid_max_times", 3))
-        and position.get("entry_signal") in {"long_breakout", "short_breakdown"}
+        and position.get("entry_signal") in {"long_breakout", "long_pullback", "short_breakdown"}
         and close_pnl_pct >= float(exit_p.get("pyramid_trigger_pnl", 20.0))
         and market_state["adx"] >= float(exit_p.get("pyramid_adx_min", 30.0))
         and (
@@ -1341,6 +1405,10 @@ def backtest_macd_aggressive(
     signal_closed_pnl = {}
     signal_closed_trades = {}
     signal_closed_wins = {}
+    signal_path_entries = {}
+    signal_path_closed_pnl = {}
+    signal_path_closed_trades = {}
+    signal_path_closed_wins = {}
     max_equity = capital
     max_drawdown = 0.0
     pyramid_add_count = 0
@@ -1374,6 +1442,12 @@ def backtest_macd_aggressive(
         signal_closed_trades[signal] = signal_closed_trades.get(signal, 0) + 1
         if trade["pnl_pct"] > 0:
             signal_closed_wins[signal] = signal_closed_wins.get(signal, 0) + 1
+
+        path_tag = trade.get("entry_path_tag", signal)
+        signal_path_closed_pnl[path_tag] = signal_path_closed_pnl.get(path_tag, 0.0) + trade["pnl_amount"]
+        signal_path_closed_trades[path_tag] = signal_path_closed_trades.get(path_tag, 0) + 1
+        if trade["pnl_pct"] > 0:
+            signal_path_closed_wins[path_tag] = signal_path_closed_wins.get(path_tag, 0) + 1
 
     def record_settlement_leg(trade):
         settlement_legs.append(trade)
@@ -1485,6 +1559,7 @@ def backtest_macd_aggressive(
                         "hold_bars": position["hold_bars"],
                         "reason": "爆仓",
                         "entry_signal": position["entry_signal"],
+                        "entry_path_tag": position.get("entry_path_tag", position["entry_signal"]),
                         "size": position["size"],
                         "pyramids_done": position.get("pyramids_done", 0),
                         "trade_id": position.get("trade_id"),
@@ -1615,7 +1690,13 @@ def backtest_macd_aggressive(
 
         positions = remaining
 
-        signal = strategy_func(intraday_all, idx, positions, market_state)
+        signal, signal_path_tag = _resolve_strategy_signal_decision(
+            strategy_func,
+            intraday_all,
+            idx,
+            positions,
+            market_state,
+        )
         if signal and positions and _signal_side(signal) != _position_side(positions[0]):
             for position in positions:
                 rev_side = _position_side(position)
@@ -1660,11 +1741,14 @@ def backtest_macd_aggressive(
                 capital -= target_position_size + entry_fee
                 total_trading_fees += entry_fee
                 signal_entries[signal] = signal_entries.get(signal, 0) + 1
+                path_tag = signal_path_tag or signal
+                signal_path_entries[path_tag] = signal_path_entries.get(path_tag, 0) + 1
                 positions.append(
                     {
                         "trade_id": next_trade_id,
                         "entry_price": entry_fill,
                         "entry_signal": signal,
+                        "entry_path_tag": path_tag,
                         "size": target_position_size,
                         "opened_size_total": target_position_size,
                         "hold_bars": 0,
@@ -1753,6 +1837,16 @@ def backtest_macd_aggressive(
             "win_rate": (signal_closed_wins.get(signal, 0) / closed_trades * 100.0 if closed_trades else 0.0),
         }
 
+    signal_path_stats = {}
+    for path_tag in sorted(set(signal_path_entries) | set(signal_path_closed_pnl)):
+        closed_trades = signal_path_closed_trades.get(path_tag, 0)
+        signal_path_stats[path_tag] = {
+            "entries": signal_path_entries.get(path_tag, 0),
+            "closed_trades": closed_trades,
+            "pnl_amount": signal_path_closed_pnl.get(path_tag, 0.0),
+            "win_rate": (signal_path_closed_wins.get(path_tag, 0) / closed_trades * 100.0 if closed_trades else 0.0),
+        }
+
     result = {
         "trades": len(trades),
         "return": total_return,
@@ -1778,6 +1872,7 @@ def backtest_macd_aggressive(
         "liquidations": sum(1 for trade in settlement_legs if trade["reason"] == "爆仓"),
         "pyramid_add_count": pyramid_add_count,
         "signal_stats": signal_stats,
+        "signal_path_stats": signal_path_stats,
         "strategy_funnel": _strategy_funnel_snapshot(funnel_snapshot_hook),
         "filled_side_entries": _filled_side_entries(signal_entries),
     }

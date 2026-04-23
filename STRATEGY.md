@@ -94,12 +94,19 @@
 
 ## 当前对外信号
 
-从 `strategy()` 的真实返回值看，当前对外只有两类开仓标签：
+从 `strategy()` 的真实返回值看，当前对外只有两类执行主标签：
 
 - `long_pullback`
 - `short_breakdown`
 
-这不代表长侧只会做“回踩”，而是说明长侧多条路径最终会汇到同一个对外标签上。
+这不代表长侧只会做“回踩”，而是说明长侧多条路径最终会汇到同一个执行标签上。
+
+为了让研究器和实盘壳能看清到底是哪条路径在起作用，当前同时会输出路径标签：
+
+- 多头：`long_impulse / long_retest / long_reaccel / long_relay`
+- 空头：`short_impulse / short_retest / short_reaccel`
+
+主标签负责执行语义和退出参数族；路径标签只负责诊断、统计和 `freqtrade enter_tag`。
 
 ## 风控与退出
 

@@ -305,10 +305,15 @@ def _collect_trend_path(results: list[dict[str, Any]], group: str | None) -> Poi
     )
 
 
-def _aggregate_signal_stats(results: list[dict[str, Any]], group: str) -> list[str]:
+def _aggregate_signal_stats(
+    results: list[dict[str, Any]],
+    group: str,
+    *,
+    stats_key: str = "signal_stats",
+) -> list[str]:
     aggregate: dict[str, dict[str, float]] = {}
     for item in _window_payloads(results, group):
-        signal_stats = item["result"].get("signal_stats", {})
+        signal_stats = item["result"].get(stats_key, {})
         for signal, stats in signal_stats.items():
             bucket = aggregate.setdefault(signal, {"pnl_amount": 0.0, "closed_trades": 0.0, "wins": 0.0})
             bucket["pnl_amount"] += float(stats.get("pnl_amount", 0.0))
@@ -1257,6 +1262,7 @@ def summarize_evaluation(
     gate_reason = "通过" if gate_passed else "；".join(gate_reasons)
 
     weakest_signals = _aggregate_signal_stats(results, "eval")
+    weakest_signal_paths = _aggregate_signal_stats(results, "eval", stats_key="signal_path_stats")
     summary_lines = [
         "研究评估摘要（15m 为唯一事实源，1h/4h 只是由 15m 聚合的确认层；成交量诊断同时看总量、OKX K 线方向流量代理和成交活跃度）",
         (
@@ -1315,7 +1321,9 @@ def summarize_evaluation(
     if low_activity_payload["lines"]:
         summary_lines.extend(["", *low_activity_payload["lines"]])
     if weakest_signals:
-        summary_lines.extend(["", "拖累较大的信号:", *weakest_signals])
+        summary_lines.extend(["", "拖累较大的执行标签:", *weakest_signals])
+    if weakest_signal_paths:
+        summary_lines.extend(["", "拖累较大的路径标签:", *weakest_signal_paths])
 
     prompt_lines = [
         "当前诊断（必须先读）:",
@@ -1365,7 +1373,9 @@ def summarize_evaluation(
     if low_activity_payload["prompt_line"]:
         prompt_lines.append(low_activity_payload["prompt_line"])
     if weakest_signals:
-        prompt_lines.append("train拖累信号: " + " | ".join(weakest_signals))
+        prompt_lines.append("train拖累执行标签: " + " | ".join(weakest_signals))
+    if weakest_signal_paths:
+        prompt_lines.append("train拖累路径标签: " + " | ".join(weakest_signal_paths))
 
     metrics = {
         "development_mean_score": development_mean_score,

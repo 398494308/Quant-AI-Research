@@ -40,6 +40,7 @@ from research_v2.charting import charts_available, render_performance_chart
 from research_v2.journal import (
     ORDINARY_REGION_FAMILIES,
     append_journal_archive,
+    build_current_reference_denylist_payload,
     build_exploration_guard_state,
     _format_compact_for_prompt,
     build_journal_prompt_summary,
@@ -48,6 +49,7 @@ from research_v2.journal import (
     cluster_key_for_entry,
     evaluate_candidate_failure_wiki_guard,
     evaluate_candidate_exploration_guard,
+    format_current_reference_denylist_markdown,
     load_failure_wiki_index,
     ordinary_region_families,
     region_families_for_regions,
@@ -285,6 +287,28 @@ class BacktestFixesTest(unittest.TestCase):
         backtest._refresh_stop_after_resize(position, market_state, exit_params, leverage=10.0)
 
         self.assertAlmostEqual(position["stop_price"], 99.75, places=6)
+
+    def test_should_pyramid_accepts_long_pullback_execution_signal(self):
+        position = {
+            "entry_signal": "long_pullback",
+            "pyramids_done": 0,
+        }
+        market_state = {
+            "adx": 30.0,
+            "macd_line": 2.0,
+            "signal_line": 1.0,
+            "hourly": {"close": 105.0, "ema_fast": 100.0},
+        }
+        exit_params = {
+            "pyramid_enabled": 1,
+            "pyramid_max_times": 2,
+            "pyramid_trigger_pnl": 16.0,
+            "pyramid_adx_min": 19.0,
+        }
+
+        allowed = backtest._should_pyramid(position, market_state, close_pnl_pct=18.0, exit_p=exit_params)
+
+        self.assertTrue(allowed)
 
 
 class EvaluationFixesTest(unittest.TestCase):
@@ -864,6 +888,27 @@ class StrategyValidationFixesTest(unittest.TestCase):
             },
         )
 
+    def test_strategy_decision_returns_long_path_tag(self):
+        with mock.patch.object(strategy_module, "_build_signal_context", return_value={"ready": True}):
+            with mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False):
+                with mock.patch.object(strategy_module, "long_outer_context_ok", return_value=True):
+                    with mock.patch.object(strategy_module, "long_breakout_ok", return_value=True):
+                        with mock.patch.object(strategy_module, "long_pullback_ok", return_value=False):
+                            with mock.patch.object(strategy_module, "long_trend_reaccel_ok", return_value=False):
+                                with mock.patch.object(strategy_module, "_flow_entry_ok", return_value=False):
+                                    with mock.patch.object(strategy_module, "long_final_veto_clear", return_value=True):
+                                        decision = strategy_module.strategy_decision(
+                                            [{}] * (strategy_module.PARAMS["min_history"] + 1),
+                                            strategy_module.PARAMS["min_history"],
+                                            [],
+                                            {},
+                                        )
+
+        self.assertEqual(decision["entry_signal"], "long_pullback")
+        self.assertEqual(decision["entry_path_key"], "long_breakout")
+        self.assertEqual(decision["entry_path_tag"], "long_impulse")
+        self.assertEqual(strategy_module.normalize_entry_signal(decision["entry_path_tag"]), "long_pullback")
+
     def test_validate_strategy_source_accepts_new_flow_params(self):
         source = """
 # PARAMS_START
@@ -1311,6 +1356,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("方向流量代理", prompt)
         self.assertIn("config/research_v2_operator_focus.md", prompt)
         self.assertIn("wiki/reviewer_summary_card.md", prompt)
+        self.assertIn("wiki/current_reference_denylist.md", prompt)
         self.assertIn("wiki/duplicate_watchlist.md", prompt)
         self.assertIn("wiki/failure_wiki.md", prompt)
         self.assertIn("先想再写", prompt)
@@ -1328,6 +1374,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("当前回合任务", prompt)
         self.assertIn("本轮阅读顺序（必须执行）", prompt)
         self.assertIn("reviewer_summary_card.md", prompt)
+        self.assertIn("current_reference_denylist.md", prompt)
         self.assertIn("duplicate_watchlist.md", prompt)
         self.assertIn("failure_wiki.md", prompt)
         self.assertIn("先复盘最近一条最强结构化失败证据", prompt)
@@ -1509,6 +1556,7 @@ class JournalPromptFixesTest(unittest.TestCase):
 
         self.assertIn("当前 draft round brief", prompt)
         self.assertIn("高信号证据包", prompt)
+        self.assertIn("current_reference_denylist.md", prompt)
         self.assertIn("duplicate_watchlist.md", prompt)
         self.assertIn("failure_wiki.md", prompt)
         self.assertIn("不能替 planner 发明新方向", prompt)
@@ -2335,6 +2383,57 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         tail = signal_frame.tail(1).iloc[0]
         self.assertFalse(pd.isna(tail["trade_count_ratio_1h"]))
         self.assertFalse(pd.isna(tail["flow_imbalance_4h"]))
+
+    def test_apply_entry_logic_uses_path_tag_as_enter_tag(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "timestamp": 0,
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 10.0,
+                    "trade_count": 100.0,
+                    "taker_buy_volume": 6.0,
+                    "taker_sell_volume": 4.0,
+                },
+                {
+                    "timestamp": 900_000,
+                    "open": 100.5,
+                    "high": 101.5,
+                    "low": 100.0,
+                    "close": 101.0,
+                    "volume": 11.0,
+                    "trade_count": 110.0,
+                    "taker_buy_volume": 6.4,
+                    "taker_sell_volume": 4.6,
+                },
+                {
+                    "timestamp": 1_800_000,
+                    "open": 101.0,
+                    "high": 101.2,
+                    "low": 99.8,
+                    "close": 100.0,
+                    "volume": 12.0,
+                    "trade_count": 120.0,
+                    "taker_buy_volume": 5.0,
+                    "taker_sell_volume": 7.0,
+                },
+            ]
+        )
+
+        with mock.patch.object(
+            ft_adapter,
+            "_core_signal_decision",
+            side_effect=[("long_pullback", "long_impulse"), (None, None), ("short_breakdown", "short_reaccel")],
+        ):
+            signal_frame = ft_adapter.apply_entry_logic(frame)
+
+        self.assertEqual(int(signal_frame.loc[0, "enter_long"]), 1)
+        self.assertEqual(signal_frame.loc[0, "enter_tag"], "long_impulse")
+        self.assertEqual(int(signal_frame.loc[2, "enter_short"]), 1)
+        self.assertEqual(signal_frame.loc[2, "enter_tag"], "short_reaccel")
 
     def test_cluster_key_prefers_stable_canonical_cluster(self):
         self.assertEqual(
@@ -3274,6 +3373,8 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
             self.assertTrue((memory_root / "wiki/duplicate_watchlist.md").exists())
             self.assertTrue((memory_root / "wiki/failure_wiki.md").exists())
             self.assertTrue((memory_root / "wiki/failure_wiki_index.json").exists())
+            self.assertTrue((memory_root / "wiki/current_reference_denylist.md").exists())
+            self.assertTrue((memory_root / "wiki/current_reference_denylist.json").exists())
             self.assertIn("blocked_cuts", load_failure_wiki_index(memory_root))
 
     def test_journal_summary_writes_duplicate_watchlist_markdown(self):
@@ -3341,6 +3442,91 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         self.assertIn("cand_repeat_alpha", duplicate_watchlist)
         self.assertIn("ownership_cluster", duplicate_watchlist)
         self.assertIn("duplicate_history", duplicate_watchlist)
+
+    def test_current_reference_denylist_marks_repeated_noop_pattern(self):
+        entries = [
+            {
+                "iteration": 1,
+                "candidate_id": "champion_ref",
+                "outcome": "accepted",
+                "stop_stage": "full_eval",
+                "promotion_score": 0.20,
+                "quality_score": 0.20,
+                "promotion_delta": 0.03,
+                "gate_reason": "通过",
+                "decision_reason": "通过",
+                "code_hash": "ref_hash_alpha",
+                "change_tags": ["champion_refresh"],
+                "edited_regions": ["strategy"],
+                "system_changed_regions": ["strategy"],
+                "hypothesis": "新 champion",
+                "target_family": "mixed",
+                "closest_failed_cluster": "ownership_cluster",
+                "metrics": {},
+                "score_regime": "trend_capture_v6",
+            },
+            {
+                "iteration": 2,
+                "candidate_id": "cand_noop_1",
+                "outcome": "behavioral_noop",
+                "stop_stage": "behavioral_noop",
+                "promotion_score": None,
+                "quality_score": None,
+                "promotion_delta": None,
+                "gate_reason": "smoke 行为指纹与当前主参考完全一致",
+                "decision_reason": "smoke 行为指纹与当前主参考完全一致",
+                "code_hash": "cand_hash_1",
+                "reference_code_hash": "ref_hash_alpha",
+                "change_tags": ["long_routing", "veto_rewire"],
+                "edited_regions": ["long_final_veto_clear"],
+                "system_changed_regions": ["long_final_veto_clear"],
+                "system_ordinary_changed_regions": ["long_final_veto_clear"],
+                "system_ordinary_region_families": ["entry_path"],
+                "hypothesis": "第一次 noop",
+                "target_family": "long",
+                "closest_failed_cluster": "ownership_cluster",
+                "metrics": {},
+                "score_regime": "trend_capture_v6",
+            },
+            {
+                "iteration": 3,
+                "candidate_id": "cand_noop_2",
+                "outcome": "behavioral_noop",
+                "stop_stage": "behavioral_noop",
+                "promotion_score": None,
+                "quality_score": None,
+                "promotion_delta": None,
+                "gate_reason": "smoke 行为指纹与当前主参考完全一致",
+                "decision_reason": "smoke 行为指纹与当前主参考完全一致",
+                "code_hash": "cand_hash_2",
+                "reference_code_hash": "ref_hash_alpha",
+                "change_tags": ["long_routing", "relay_split"],
+                "edited_regions": ["long_final_veto_clear"],
+                "system_changed_regions": ["long_final_veto_clear"],
+                "system_ordinary_changed_regions": ["long_final_veto_clear"],
+                "system_ordinary_region_families": ["entry_path"],
+                "hypothesis": "第二次 noop",
+                "target_family": "long",
+                "closest_failed_cluster": "ownership_cluster",
+                "metrics": {},
+                "score_regime": "trend_capture_v6",
+            },
+        ]
+
+        payload = build_current_reference_denylist_payload(
+            entries,
+            score_regime="trend_capture_v6",
+            active_reference_code_hash="ref_hash_alpha",
+        )
+        markdown = format_current_reference_denylist_markdown(payload)
+
+        self.assertEqual(payload["scope_entry_count"], 2)
+        self.assertEqual(payload["item_count"], 1)
+        self.assertEqual(payload["items"][0]["level"], "HARD_BAN")
+        self.assertIn("Current Reference Denylist", markdown)
+        self.assertIn("HARD_BAN", markdown)
+        self.assertIn("ownership_cluster", markdown)
+        self.assertIn("long_final_veto_clear", markdown)
 
     def test_append_journal_archive_writes_raw_history_files(self):
         entry = {

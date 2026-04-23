@@ -195,6 +195,9 @@ def _apply_fourh_indicators(dataframe: DataFrame) -> DataFrame:
     frame["ema_slow_slope_pct"] = [item["ema_slow_slope_pct"] for item in state]
     frame["adx"] = [item["adx"] for item in state]
     frame["chop"] = [item["chop"] for item in state]
+    frame["macd_line"] = [item["macd_line"] for item in state]
+    frame["macd_signal"] = [item["signal_line"] for item in state]
+    frame["histogram"] = [item["histogram"] for item in state]
     return frame
 
 
@@ -229,6 +232,31 @@ def _merge_informative_on_timestamp(
     ).drop(columns=[merge_col])
 
 
+def _core_signal_decision(ohlcv: list[dict], idx: int, market_state: dict) -> tuple[str | None, str | None]:
+    decision_hook = getattr(core_strategy, "strategy_decision", None)
+    if callable(decision_hook):
+        payload = decision_hook(ohlcv, idx, [], market_state)
+        if isinstance(payload, dict):
+            signal = core_strategy.normalize_entry_signal(
+                payload.get("entry_signal", ""),
+                fallback_side=payload.get("entry_side", ""),
+            )
+            if signal:
+                path_tag = str(payload.get("entry_path_tag", "")).strip()
+                if not path_tag:
+                    path_tag = str(core_strategy.ENTRY_PATH_TAGS.get(signal, signal))
+                return signal, path_tag
+
+    raw_signal = core_strategy.strategy(ohlcv, idx, [], market_state)
+    signal = core_strategy.normalize_entry_signal(raw_signal)
+    if not signal:
+        return None, None
+    path_tag = str(core_strategy.ENTRY_PATH_TAGS.get(str(raw_signal or "").strip(), "")).strip()
+    if not path_tag:
+        path_tag = str(core_strategy.ENTRY_PATH_TAGS.get(signal, signal))
+    return signal, path_tag
+
+
 def apply_entry_logic(dataframe: DataFrame) -> DataFrame:
     frame = dataframe.copy()
     frame["enter_long"] = 0
@@ -261,19 +289,23 @@ def apply_entry_logic(dataframe: DataFrame) -> DataFrame:
         ]
     ].to_dict("records")
     signals: list[str | None] = []
+    path_tags: list[str | None] = []
     for idx in range(len(frame)):
         row = frame.iloc[idx]
         prev_row = frame.iloc[idx - 1] if idx > 0 else row
         market_state = _row_to_market_state(row, prev_row)
-        signals.append(core_strategy.strategy(ohlcv, idx, [], market_state))
+        signal, path_tag = _core_signal_decision(ohlcv, idx, market_state)
+        signals.append(signal)
+        path_tags.append(path_tag)
 
     signal_series = pd.Series(signals, index=frame.index, dtype="object")
-    long_mask = signal_series == "long_breakout"
+    path_tag_series = pd.Series(path_tags, index=frame.index, dtype="object")
+    long_mask = signal_series == "long_pullback"
     short_mask = signal_series == "short_breakdown"
     frame.loc[long_mask, "enter_long"] = 1
-    frame.loc[long_mask, "enter_tag"] = "long_breakout"
+    frame.loc[long_mask, "enter_tag"] = path_tag_series.loc[long_mask]
     frame.loc[short_mask, "enter_short"] = 1
-    frame.loc[short_mask, "enter_tag"] = "short_breakdown"
+    frame.loc[short_mask, "enter_tag"] = path_tag_series.loc[short_mask]
     return frame
 
 
@@ -357,6 +389,9 @@ def build_signal_frame(df_15m: DataFrame, df_1h: DataFrame | None = None, df_4h:
             "taker_buy_ratio",
             "taker_sell_ratio",
             "flow_imbalance",
+            "macd_line",
+            "macd_signal",
+            "histogram",
             "adx",
             "trend_spread_pct",
             "ema_slow_slope_pct",
@@ -369,9 +404,13 @@ def build_signal_frame(df_15m: DataFrame, df_1h: DataFrame | None = None, df_4h:
 
 def _trade_entry_tag(trade: Trade) -> str:
     entry_tag = getattr(trade, "enter_tag", None) or getattr(trade, "buy_tag", None)
-    if entry_tag in {"long_breakout", "short_breakdown"}:
-        return entry_tag
-    return "short_breakdown" if getattr(trade, "is_short", False) else "long_breakout"
+    normalized = core_strategy.normalize_entry_signal(
+        entry_tag,
+        fallback_side="short" if getattr(trade, "is_short", False) else "long",
+    )
+    if normalized:
+        return normalized
+    return "short_breakdown" if getattr(trade, "is_short", False) else "long_pullback"
 
 
 def _trade_side(trade: Trade) -> str:
@@ -482,6 +521,8 @@ def _row_to_market_state(row: pd.Series, prev_row: pd.Series | None = None) -> d
             "taker_buy_ratio_4h",
             "taker_sell_ratio_4h",
             "flow_imbalance_4h",
+            "macd_line_4h",
+            "macd_signal_4h",
             "adx_4h",
             "trend_spread_pct_4h",
             "ema_slow_slope_pct_4h",
@@ -495,6 +536,8 @@ def _row_to_market_state(row: pd.Series, prev_row: pd.Series | None = None) -> d
             "taker_buy_ratio": _safe_float(row.get("taker_buy_ratio_4h"), 0.5),
             "taker_sell_ratio": _safe_float(row.get("taker_sell_ratio_4h"), 0.5),
             "flow_imbalance": _safe_float(row.get("flow_imbalance_4h")),
+            "macd_line": _safe_float(row.get("macd_line_4h")),
+            "signal_line": _safe_float(row.get("macd_signal_4h")),
             "adx": _safe_float(row.get("adx_4h")),
             "trend_spread_pct": _safe_float(row.get("trend_spread_pct_4h")),
             "ema_slow_slope_pct": _safe_float(row.get("ema_slow_slope_pct_4h")),
@@ -806,7 +849,7 @@ class MacdAggressiveStrategy(IStrategy):
             risk_profile["allow_pyramid"]
             and int(E.get("pyramid_enabled", 0)) > 0
             and pyramids_done < int(E.get("pyramid_max_times", 0))
-            and entry_signal in {"long_breakout", "short_breakdown"}
+            and entry_signal in {"long_breakout", "long_pullback", "short_breakdown"}
             and close_pnl_pct >= float(E.get("pyramid_trigger_pnl", 20.0))
             and market_state["adx"] >= float(E.get("pyramid_adx_min", 30.0))
             and market_state["hourly"] is not None

@@ -129,8 +129,16 @@ def run_core_signal_check():
             "histogram": intraday_context["histogram"],
             "prev_histogram": intraday_state[idx - 1]["histogram"] if idx > 0 else intraday_context["histogram"],
         }
-        signal = strat_module.strategy(intraday_all, idx, [], market_state)
-        if signal == "long_breakout":
+        decision_hook = getattr(strat_module, "strategy_decision", None)
+        if callable(decision_hook):
+            decision = decision_hook(intraday_all, idx, [], market_state)
+            signal = strat_module.normalize_entry_signal(
+                (decision or {}).get("entry_signal", ""),
+                fallback_side=(decision or {}).get("entry_side", ""),
+            )
+        else:
+            signal = strat_module.normalize_entry_signal(strat_module.strategy(intraday_all, idx, [], market_state))
+        if signal == "long_pullback":
             long_timestamps.append(current_ts)
         elif signal == "short_breakdown":
             short_timestamps.append(current_ts)

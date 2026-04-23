@@ -81,6 +81,8 @@ bash real-money-test/start_live.sh
 
 - 主策略参数源
 - 入场信号
+- 主标签退出语义
+- 路径标签 `enter_tag` 透传
 - 主要趋势过滤
 - ATR 初始止损
 - 保本止损
@@ -99,6 +101,7 @@ bash real-money-test/start_live.sh
 所以它的用途应该理解为：
 
 - 验证执行链路
+- 验证主标签与路径标签有没有对齐
 - 验证持仓管理
 - 验证 Discord / cron / systemd / restart 行为
 

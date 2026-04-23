@@ -60,7 +60,7 @@ def _complexity_budget_text() -> str:
     )
 
 
-def _bootstrap_journal_excerpt(journal_summary: str, *, max_lines: int = 28, max_chars: int = 2800) -> str:
+def _bootstrap_journal_excerpt(journal_summary: str, *, max_lines: int = 20, max_chars: int = 1800) -> str:
     if not journal_summary.strip():
         return ""
     lines: list[str] = []
@@ -154,6 +154,7 @@ def build_strategy_agents_instructions(*, factor_change_mode: str = "default") -
 持久 session 规则（只对 `planner` 生效）：
 - 这是一个跨多轮复用的研究 session。不要假设主进程会每轮重复灌完整历史；你需要主动利用本地只读记忆文件。
 - 每轮开始优先快速扫一遍 `wiki/reviewer_summary_card.md`；它记录上一轮 reviewer 为什么放行或打回。
+- 每轮开始优先快速扫一遍 `wiki/current_reference_denylist.md`；它只约束当前 active reference 下已经被反复证伪的调法模式，不是全局因子黑名单。
 - 每轮开始优先快速扫一遍 `wiki/duplicate_watchlist.md`；它只列最近最容易重复提交的少量源码指纹。
 - 再读 `wiki/failure_wiki.md` 的概览；新 session 首轮优先再读 `wiki/latest_history_package.md` 的摘要段。
 - 先复盘，再方案：先判断最近结构化失败证据说明上一轮为什么错、错在交易路径哪一层，再决定本轮继续还是转向；不要一上来替当前方向辩护。
@@ -166,6 +167,7 @@ def build_strategy_agents_instructions(*, factor_change_mode: str = "default") -
 - `src/backtest_macd_aggressive.py`：回测、成交路径与指标口径定义，只读参考。
 - `config/research_v2_operator_focus.md`：人工方向卡，只是软引导，不是系统硬限制。
 - `wiki/reviewer_summary_card.md`：上一轮 reviewer 审稿卡；若它明确打回某条近邻方向，planner 下一版必须先吸收这张卡里的打回理由。
+- `wiki/current_reference_denylist.md`：当前 active reference 作用域下的调法 denylist；若命中 `HARD_BAN`，默认转向；若命中 `PROOF_REQUIRED`，必须先证明这次换了不同 choke point、最终放行链或真实交易路径层级。
 - `wiki/duplicate_watchlist.md`：最近高频重复源码黑名单摘要；先扫它，避免把同一份补丁再交一次。
 - `wiki/failure_wiki.md`：当前评分口径下的失败 wiki；先看它，避免重走已知坏 cut。
 - `wiki/latest_history_package.md`：当前 stage 历史摘要包；先看前部执行摘要与失败核，再决定是否下钻表格。
@@ -342,6 +344,7 @@ def build_strategy_research_prompt(
     operator_focus_path: str = "config/research_v2_operator_focus.md",
     reviewer_summary_text: str = "",
     reviewer_summary_path: str = "wiki/reviewer_summary_card.md",
+    current_reference_denylist_path: str = "wiki/current_reference_denylist.md",
     history_package_path: str = "wiki/latest_history_package.md",
     failure_wiki_path: str = "wiki/failure_wiki.md",
     duplicate_watchlist_path: str = "wiki/duplicate_watchlist.md",
@@ -367,7 +370,7 @@ def build_strategy_research_prompt(
         if current_complexity_headroom_text.strip()
         else "\n"
     )
-    bootstrap_excerpt = _bootstrap_journal_excerpt(journal_summary)
+    bootstrap_excerpt = _bootstrap_journal_excerpt(journal_summary, max_lines=16, max_chars=1400)
     bootstrap_block = ""
     if session_mode == "bootstrap":
         bootstrap_block = (
@@ -377,8 +380,8 @@ def build_strategy_research_prompt(
         )
     reviewer_summary_excerpt = _bootstrap_journal_excerpt(
         reviewer_summary_text,
-        max_lines=10,
-        max_chars=1200,
+        max_lines=8,
+        max_chars=900,
     )
     reviewer_summary_block = (
         "上一轮 reviewer 总结卡（高优先级，先看）:\n"
@@ -392,7 +395,7 @@ def build_strategy_research_prompt(
 - 围绕一个可证伪假设，先产出一个简洁 round brief，交给后续 edit worker 落码。
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若后续落码后的 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
 - 当前评分口径是 `{score_regime}`；只有在 `gate` 通过，且相对当前 {benchmark_label} 的有效 `promotion_delta > {promotion_min_delta:.2f}` 时，候选才有资格刷新当前 active reference。
-- `train` 看滚动窗口均值/中位数，`val` 看连续 holdout 的 `promotion_score`，`test` 是隐藏验收集。
+- `train` 看滚动窗口均值/中位数，`val` 看连续 holdout 的 `promotion_score`，`test` 只做只读观察，不参与晋升。
 
 当前工作基底角色：`{current_base_role}`
 当前 {benchmark_label} 参考晋级分：{previous_best_score:.2f}
@@ -402,6 +405,7 @@ def build_strategy_research_prompt(
 {reviewer_summary_block}
 本轮本地只读记忆文件：
 - reviewer 总结卡：`{reviewer_summary_path}`
+- 当前 reference denylist：`{current_reference_denylist_path}`
 - 重复黑名单：`{duplicate_watchlist_path}`
 - 失败 wiki：`{failure_wiki_path}`
 - 历史摘要包：`{history_package_path}`
@@ -411,14 +415,15 @@ def build_strategy_research_prompt(
 本轮阅读顺序（必须执行）：
 1. 先看“刷新条件与本轮目标”，确认本轮不是为了造 diff，而是为了改变真实交易路径。
 2. 再看上一轮 `reviewer` 总结卡；如果它明确把上一条近邻方向打回，本轮 draft brief 必须先吸收这张卡里的打回理由，再决定新的方向。
-3. 再看“当前诊断”，先定位当前 gate 主失败项、弱侧和 val 漏斗堵点。
-4. 快速扫一遍 `{duplicate_watchlist_path}`；如果你的假设与其中某条在 cluster / changed_regions / target 上高度相似，先改写，不要再交同一份补丁。
-5. 再看 `{failure_wiki_path}` 与 `{history_package_path}` 的前部摘要；相同失败核或 exact cut 只算一个已知坏盆地，不要逐条重读。若这些辅助文件暂不可用，直接改为核对当前源码继续改，不要停在 no-edit。
-6. 先用最近一条结构化失败证据做复盘：上一轮为什么失败、失败更像发生在 `outer_context / path / final_veto / routing / followthrough / exit / unknown` 的哪一层。
-7. 再决定本轮继续还是转向；如果你写不清这次相对上一轮到底换了哪个 choke point / 最终放行链 / 目标侧，默认转向，而不是继续在原方向上自辩。
-8. 最后才提出一个单一因果假设，并明确它预计会新增、删除或迁移哪类真实交易。
-9. 形成假设后，必须回看一次 `{duplicate_watchlist_path}` 与 `{failure_wiki_path}` 做自检；若命中相同或高度相似的重复补丁/失败 cut，优先在本轮内改写假设再提交。
-10. 若仍落在同方向簇或同 ordinary family，必须证明这次改的是不同 choke point、不同最终放行链，或不同的真实交易路径层级；`strategy-only` 也可以，但必须说清它改变了哪一层最终路由。
+3. 快速扫一遍 `{current_reference_denylist_path}`；若命中 `HARD_BAN`，默认转向；若命中 `PROOF_REQUIRED`，先明确写出这次换了哪个 choke point、最终放行链或真实交易路径层级。
+4. 再看“当前诊断”，先定位当前 gate 主失败项、弱侧和 val 漏斗堵点。
+5. 快速扫一遍 `{duplicate_watchlist_path}`；如果你的假设与其中某条在 cluster / changed_regions / target 上高度相似，先改写，不要再交同一份补丁。
+6. 再看 `{failure_wiki_path}` 与 `{history_package_path}` 的前部摘要；相同失败核或 exact cut 只算一个已知坏盆地，不要逐条重读。若这些辅助文件暂不可用，直接改为核对当前源码继续改，不要停在 no-edit。
+7. 先用最近一条结构化失败证据做复盘：上一轮为什么失败、失败更像发生在 `outer_context / path / final_veto / routing / followthrough / exit / unknown` 的哪一层。
+8. 再决定本轮继续还是转向；如果你写不清这次相对上一轮到底换了哪个 choke point / 最终放行链 / 目标侧，默认转向，而不是继续在原方向上自辩。
+9. 最后才提出一个单一因果假设，并明确它预计会新增、删除或迁移哪类真实交易。
+10. 形成假设后，必须回看一次 `{current_reference_denylist_path}`、`{duplicate_watchlist_path}` 与 `{failure_wiki_path}` 做自检；若命中相同或高度相似的重复补丁/失败 cut，优先在本轮内改写假设再提交。
+11. 若仍落在同方向簇或同 ordinary family，必须证明这次改的是不同 choke point、不同最终放行链，或不同的真实交易路径层级；`strategy-only` 也可以，但必须说清它改变了哪一层最终路由。
 {iteration_lane_block}
 
 {evaluation_summary}
@@ -436,7 +441,7 @@ def build_strategy_research_prompt(
 - 如果复杂度诊断显示某块已经很紧，优先先删旧、并旧、改旧，再考虑新增判断。
 - 若你的主要假设是最终路由或最终 veto 错配，允许只改 `strategy()` 或少量结构化 helper；但必须在 `change_plan` 里写清楚它会新增、删除或迁移哪类真实交易。
 - 如果当前 stage 明确显示某个簇或某种补法已经过热，不要只因为“弱侧还是 long”就继续留在同一路线；优先切到能修 long 但机制不同的方案。
-- 读不到 `{duplicate_watchlist_path}`、`{failure_wiki_path}` 或 `{history_package_path}` 不是合法 no-edit 理由；当前源码仍是硬事实源，必须继续改代码。
+- 读不到 `{current_reference_denylist_path}`、`{duplicate_watchlist_path}`、`{failure_wiki_path}` 或 `{history_package_path}` 不是合法 no-edit 理由；当前源码仍是硬事实源，必须继续改代码。
 {complexity_headroom_block}
 
 当前口径的 gate / 评分提醒：
@@ -466,6 +471,7 @@ def build_strategy_reviewer_prompt(
     journal_summary: str,
     round_brief_text: str,
     reviewer_summary_path: str = "wiki/reviewer_summary_card.md",
+    current_reference_denylist_path: str = "wiki/current_reference_denylist.md",
     history_package_path: str = "wiki/latest_history_package.md",
     failure_wiki_path: str = "wiki/failure_wiki.md",
     duplicate_watchlist_path: str = "wiki/duplicate_watchlist.md",
@@ -473,13 +479,13 @@ def build_strategy_reviewer_prompt(
 ) -> str:
     evidence_excerpt = _bootstrap_journal_excerpt(
         journal_summary,
-        max_lines=18,
-        max_chars=2200,
+        max_lines=14,
+        max_chars=1600,
     )
     evaluation_excerpt = _bootstrap_journal_excerpt(
         evaluation_summary,
-        max_lines=10,
-        max_chars=1200,
+        max_lines=8,
+        max_chars=900,
     )
     return f"""当前任务：你要审稿 planner 刚写出的 draft round brief，判断它当前是否值得进入落码。
 
@@ -501,6 +507,7 @@ def build_strategy_reviewer_prompt(
 
 本地只读证据文件：
 - 历史摘要包：`{history_package_path}`
+- 当前 reference denylist：`{current_reference_denylist_path}`
 - 失败 wiki：`{failure_wiki_path}`
 - 重复黑名单：`{duplicate_watchlist_path}`
 - 最近一次被系统判错的快照：`{last_rejected_snapshot_path}`
@@ -508,11 +515,13 @@ def build_strategy_reviewer_prompt(
 
 审稿要求：
 1. 先判断这份 draft 是不是仍落在最近重复失败核、过热方向簇或 duplicate watchlist 的近邻。
-2. 如果它仍是近邻，但只是换了措辞、tag 或局部阈值，应判 `REVISE`。
-3. 如果它虽然仍以 `long` 为主目标，但已经换了机制层、关键 choke point 或真实交易路径层级，可以判 `PASS`。
-4. `REVISE` 时不要替 planner 写新方案；只指出必须改变的层级，例如 `机制层`、`最终放行链`、`changed_regions`、`目标侧` 或 `真实交易路径层级`。
-5. 如果你判断它属于“有行为影响但同盆地”的饱和近邻，应明确写出来；这类情况不等于完全无效，但也不应直接进入落码。
-6. 若证据不足，优先回看本地只读证据文件；不要因为 draft 自己写了 `novelty_proof` 就直接放行。
+2. 若它命中 `{current_reference_denylist_path}` 里的 `HARD_BAN`，且 draft 没有明确证明目标侧、最终放行链和真实交易路径层级都不同，应判 `REVISE`。
+3. 若它命中 `PROOF_REQUIRED`，但 `novelty_proof` 仍说不清新的 choke point、最终放行链或真实交易路径层级，也应判 `REVISE`。
+4. 如果它仍是近邻，但只是换了措辞、tag 或局部阈值，应判 `REVISE`。
+5. 如果它虽然仍以 `long` 为主目标，但已经换了机制层、关键 choke point 或真实交易路径层级，可以判 `PASS`。
+6. `REVISE` 时不要替 planner 写新方案；只指出必须改变的层级，例如 `机制层`、`最终放行链`、`changed_regions`、`目标侧` 或 `真实交易路径层级`。
+7. 如果你判断它属于“有行为影响但同盆地”的饱和近邻，应明确写出来；这类情况不等于完全无效，但也不应直接进入落码。
+8. 若证据不足，优先回看本地只读证据文件；不要因为 draft 自己写了 `novelty_proof` 就直接放行。
 
 输出要求：
 {build_reviewer_response_format_instructions()}

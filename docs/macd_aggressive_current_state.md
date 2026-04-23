@@ -46,6 +46,7 @@
 - 滚动步长：`21` 天
 - `smoke` 窗口数：`5`
 - 主循环等待：`10s`
+- `test`：只在新 champion 后运行，作为只读观察集，不参与晋升
 - provider 恢复等待：`90s`
 
 ## 评分与晋升
@@ -117,14 +118,17 @@
 2. workspace 局部 `AGENTS.md`
 3. planner runtime prompt
 4. `wiki/reviewer_summary_card.md`
-5. `wiki/latest_history_package.md`
-6. `wiki/failure_wiki.md`
-7. `wiki/duplicate_watchlist.md`
-8. worker prompt
+5. `wiki/current_reference_denylist.md`
+6. `wiki/latest_history_package.md`
+7. `wiki/failure_wiki.md`
+8. `wiki/duplicate_watchlist.md`
+9. worker prompt
 
 当前 planner 的顺序约束：
 
 - 先看上一轮 `reviewer` 总结卡
+- 再看 `current_reference_denylist`，确认当前 champion 下哪些调法已经被反复证伪
+- 再看路径级诊断，确认当前到底是 `long_impulse / long_retest / long_reaccel / long_relay` 还是 `short_impulse / short_retest / short_reaccel` 在拖分
 - 先看结构化失败反馈和当前诊断
 - 先复盘上一轮为什么失败、失败更像发生在哪一层交易路径
 - 先决定这轮继续同方向还是转向，再写 draft brief
@@ -135,6 +139,7 @@
 
 - reviewer 不负责提出新方向，只负责审稿
 - reviewer 只能输出 `PASS` 或 `REVISE`
+- reviewer 会把 `current_reference_denylist` 当成高优先级证据，但它只审“当前 draft 值不值得继续”，不会把因子永久封死
 - 若 `REVISE`，必须指出当前 draft 仍落在哪个失败近邻，以及 planner 下一版至少要换哪一层
 - 未通过 reviewer 的 brief 不会进入 `edit_worker`
 
