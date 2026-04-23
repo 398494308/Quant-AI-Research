@@ -163,8 +163,8 @@ flowchart TB
   上一轮 reviewer 为什么放行或打回
 - `wiki/latest_history_package.md`
   当前 stage 的执行摘要、失败核、过热簇和最近轮次
-- `wiki/current_reference_denylist.md`
-  当前 active reference 下已经被反复证伪的调法模式
+- `wiki/direction_board.md`
+  当前 active reference 下各主方向的后验热度
 - `wiki/failure_wiki.md`
   去重后的失败模式聚合
 - `wiki/duplicate_watchlist.md`
@@ -175,14 +175,14 @@ flowchart TB
 其中最靠前的是：
 
 1. `reviewer_summary_card.md`
-2. `current_reference_denylist.md`
+2. `direction_board.md`
 3. `latest_history_package.md`
 4. `failure_wiki.md`
 5. `duplicate_watchlist.md`
 
 说明：
 
-- `latest_history_package.md` 现在只保留精简前台记忆，重点给 planner 看执行摘要、失败核、方向风险、过热簇和最近轮次元信息。
+- `latest_history_package.md` 现在只保留精简前台记忆，重点给 planner 看执行摘要、失败核、方向账本摘要和最近轮次元信息。
 - 全量历史表格仍写入 `memory/raw/*` 和对应 json 归档，但不再反复塞进主研究 prompt。
 
 ## 一句话总结

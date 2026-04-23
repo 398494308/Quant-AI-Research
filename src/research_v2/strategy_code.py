@@ -40,13 +40,13 @@ class StrategyCandidate:
     expected_effects: tuple[str, ...]
     core_factors: tuple[StrategyCoreFactor, ...]
     strategy_code: str
+    primary_direction: str = ""
 
 
 # ==================== 源码基础操作 ====================
 
 
 PARAM_BLOCK_PATTERN = re.compile(r"# PARAMS_START\s*\nPARAMS = (.*?)\n# PARAMS_END", re.DOTALL)
-FACTOR_CHANGE_MODES = frozenset({"default", "factor_admission"})
 DEFAULT_MODE_MAX_NEW_TOP_LEVEL_CONSTANTS = 2
 DEFAULT_MODE_MAX_NEW_TOP_LEVEL_HELPERS = 2
 
@@ -216,37 +216,6 @@ COMPLEXITY_SNAPSHOT_FUNCTIONS = frozenset(
 )
 
 
-def normalize_factor_change_mode(mode: str | None) -> str:
-    normalized = str(mode or "default").strip().lower().replace("-", "_")
-    if normalized not in FACTOR_CHANGE_MODES:
-        raise StrategySourceError(
-            f"unsupported factor change mode: {mode}; expected one of {sorted(FACTOR_CHANGE_MODES)}"
-        )
-    return normalized
-
-
-def factor_change_mode_label(mode: str | None) -> str:
-    normalized = normalize_factor_change_mode(mode)
-    if normalized == "factor_admission":
-        return "因子准入模式"
-    return "默认模式"
-
-
-def factor_change_mode_prompt_hint(mode: str | None) -> str:
-    normalized = normalize_factor_change_mode(mode)
-    if normalized == "factor_admission":
-        return (
-            "当前因子模式：因子准入模式。仅当现有规则无法表达你的假设时，才允许新增少量参数或局部规则；"
-            "新增后必须同时删减旧复杂度，避免净复杂度继续膨胀。"
-        )
-    return (
-        "当前因子模式：默认模式。禁止新增 `PARAMS` 键；"
-        f"允许最多新增 {DEFAULT_MODE_MAX_NEW_TOP_LEVEL_CONSTANTS} 个顶层常量和 "
-        f"{DEFAULT_MODE_MAX_NEW_TOP_LEVEL_HELPERS} 个顶层 helper，用于结构化抽离现有逻辑；"
-        "不允许借这个口子堆新因子或复制旧规则。"
-    )
-
-
 def complexity_pressure_label(level: str) -> str:
     normalized = str(level or "normal").strip().lower()
     if normalized == "warning_1":
@@ -317,12 +286,27 @@ def _offset_for_line_column(line_offsets: list[int], lineno: int, column: int) -
     return line_offsets[lineno - 1] + column
 
 
+def _line_offsets(source: str) -> list[int]:
+    offsets = [0]
+    for line in source.splitlines(keepends=True):
+        offsets.append(offsets[-1] + len(line))
+    return offsets
+
+
+def _node_source_span(source: str, node: ast.AST, *, line_offsets: list[int] | None = None) -> tuple[int, int]:
+    normalized = normalize_strategy_source(source)
+    offsets = line_offsets or _line_offsets(normalized)
+    start = _offset_for_line_column(offsets, getattr(node, "lineno", 1), getattr(node, "col_offset", 0))
+    end_lineno = getattr(node, "end_lineno", getattr(node, "lineno", 1))
+    end_col_offset = getattr(node, "end_col_offset", getattr(node, "col_offset", 0))
+    end = _offset_for_line_column(offsets, end_lineno, end_col_offset)
+    return start, end
+
+
 def _editable_spans(source: str, editable_regions: tuple[str, ...]) -> list[tuple[int, int, str]]:
     normalized = normalize_strategy_source(source)
     tree = ast.parse(normalized)
-    line_offsets = [0]
-    for line in normalized.splitlines(keepends=True):
-        line_offsets.append(line_offsets[-1] + len(line))
+    line_offsets = _line_offsets(normalized)
 
     spans: list[tuple[int, int, str]] = []
     if "PARAMS" in editable_regions:
@@ -384,12 +368,40 @@ def _rebuild_source_from_regions(
     return normalize_strategy_source("".join(parts))
 
 
+def _required_top_level_source_map(source: str) -> dict[str, str]:
+    normalized = normalize_strategy_source(source)
+    tree = ast.parse(normalized)
+    line_offsets = _line_offsets(normalized)
+    sections: dict[str, str] = {}
+
+    match = PARAM_BLOCK_PATTERN.search(normalized)
+    if match is not None:
+        sections["PARAMS"] = normalize_strategy_source(match.group(0))
+
+    for node in tree.body:
+        start, end = _node_source_span(normalized, node, line_offsets=line_offsets)
+        snippet = normalize_strategy_source(normalized[start:end])
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in REQUIRED_FUNCTION_SET:
+            sections[node.name] = snippet
+            continue
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            for name in _iter_target_names(target):
+                if name in REQUIRED_TOP_LEVEL_CONSTANT_SET:
+                    sections[name] = snippet
+    return sections
+
+
 def repair_editable_region_drift(
     base_source: str,
     candidate_source: str,
     editable_regions: tuple[str, ...],
 ) -> tuple[str, bool]:
     normalized_candidate = normalize_strategy_source(candidate_source)
+    if not editable_regions:
+        return normalized_candidate, False
     candidate_regions = _editable_region_source_map(normalized_candidate, editable_regions)
     repaired_source = _rebuild_source_from_regions(
         base_source,
@@ -404,11 +416,11 @@ def changed_editable_regions(
     candidate_source: str,
     editable_regions: tuple[str, ...],
 ) -> tuple[str, ...]:
-    base_regions = _editable_region_source_map(base_source, editable_regions)
-    candidate_regions = _editable_region_source_map(candidate_source, editable_regions)
+    base_regions = _tracked_region_source_map(base_source)
+    candidate_regions = _tracked_region_source_map(candidate_source)
     changed = [
         region_name
-        for region_name in editable_regions
+        for region_name in sorted(set(base_regions) | set(candidate_regions))
         if base_regions.get(region_name, "") != candidate_regions.get(region_name, "")
     ]
     return tuple(changed)
@@ -429,16 +441,35 @@ def repair_missing_required_functions(
     candidate_source: str,
     editable_regions: tuple[str, ...],
 ) -> tuple[str, tuple[str, ...]]:
+    normalized_base = normalize_strategy_source(base_source)
     normalized_candidate = normalize_strategy_source(candidate_source)
     missing = missing_required_functions(normalized_candidate)
     candidate_tree = ast.parse(normalized_candidate)
     missing_constants = tuple(sorted(REQUIRED_TOP_LEVEL_CONSTANT_SET - _top_level_constant_names(candidate_tree)))
-    if not missing and not missing_constants:
+    missing_param_block = PARAM_BLOCK_PATTERN.search(normalized_candidate) is None
+    if not missing and not missing_constants and not missing_param_block:
         return normalized_candidate, ()
+
+    if not editable_regions:
+        base_sections = _required_top_level_source_map(normalized_base)
+        tail_sections = [
+            base_sections[name].rstrip()
+            for name in (*missing_constants, *missing)
+            if base_sections.get(name, "").strip()
+        ]
+        body = normalized_candidate.rstrip()
+        if missing_param_block:
+            param_block = base_sections.get("PARAMS", "").rstrip()
+            if param_block:
+                body = f"{param_block}\n\n{body}" if body else param_block
+        if tail_sections:
+            body = f"{body}\n\n" if body else ""
+            body += "\n\n".join(tail_sections)
+        return normalize_strategy_source(body), tuple(sorted(missing))
 
     candidate_regions = _editable_region_source_map(normalized_candidate, editable_regions)
     repaired_source = _rebuild_source_from_regions(
-        base_source,
+        normalized_base,
         candidate_regions,
         editable_regions,
     )
@@ -572,6 +603,39 @@ def _top_level_constant_names(tree: ast.Module) -> set[str]:
                 if name.isupper() and name != "PARAMS":
                     constants.add(name)
     return constants
+
+
+def _tracked_region_source_map(source: str) -> dict[str, str]:
+    normalized = normalize_strategy_source(source)
+    tree = ast.parse(normalized)
+    line_offsets = _line_offsets(normalized)
+    regions: dict[str, str] = {}
+
+    match = PARAM_BLOCK_PATTERN.search(normalized)
+    if match is not None:
+        regions["PARAMS"] = match.group(0)
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            start, end = _node_source_span(normalized, node, line_offsets=line_offsets)
+            regions[node.name] = normalized[start:end]
+            continue
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        target_names: list[str] = []
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                target_names.extend(_iter_target_names(target))
+        else:
+            target_names.extend(_iter_target_names(node.target))
+        constant_names = [name for name in target_names if name.isupper() and name != "PARAMS"]
+        if not constant_names:
+            continue
+        start, end = _node_source_span(normalized, node, line_offsets=line_offsets)
+        snippet = normalized[start:end]
+        for constant_name in constant_names:
+            regions[constant_name] = snippet
+    return regions
 
 
 def _function_complexity_metrics(node: ast.FunctionDef) -> dict[str, int]:
@@ -849,39 +913,11 @@ def _validate_complexity_budget(
     base_source: str | None,
     factor_change_mode: str,
 ) -> None:
-    node_map = {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-    }
-
-    for function_name, limits in COMPLEXITY_ABSOLUTE_BUDGETS.items():
-        node = node_map.get(function_name)
-        if node is None:
-            continue
-        metrics = _function_complexity_metrics(node)
-        for metric_name, limit in limits.items():
-            value = int(metrics.get(metric_name, 0))
-            if value > int(limit):
-                raise StrategySourceError(
-                    f"complexity budget exceeded: {function_name}.{metric_name}={value} > {limit}"
-                )
-
-    candidate_snapshot = build_strategy_complexity_snapshot(source)
-    for family_name, limits in COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS.items():
-        metrics = _family_complexity_metrics(candidate_snapshot, family_name)
-        for metric_name, limit in limits.items():
-            value = int(metrics.get(metric_name, 0))
-            if value > int(limit):
-                raise StrategySourceError(
-                    f"complexity family budget exceeded: {family_name}.{metric_name}={value} > {limit}"
-                )
-
-    if base_source is None or normalize_factor_change_mode(factor_change_mode) != "default":
-        return
-    # 默认模式仍会记录单轮复杂度增量，但这里只保留绝对复杂度硬帽拒收。
-    # 软增量限制改为 prompt/journal 预警，避免把可尝试但偏胖的候选过早拦死。
-    _ = build_strategy_complexity_delta(base_source, source)
+    # 复杂度只保留快照与人工诊断，不再作为自动拒收条件。
+    _ = source
+    _ = tree
+    _ = base_source
+    _ = factor_change_mode
 
 
 def _undefined_function_reference_errors(source: str, tree: ast.Module) -> list[str]:
@@ -914,17 +950,13 @@ def _undefined_function_reference_errors(source: str, tree: ast.Module) -> list[
     return errors
 
 
-def _validate_factor_change_policy(
+def _validate_source_shape_policy(
     source: str,
     *,
     tree: ast.Module,
     base_source: str | None,
-    factor_change_mode: str,
 ) -> None:
     if base_source is None:
-        return
-    normalized_mode = normalize_factor_change_mode(factor_change_mode)
-    if normalized_mode != "default":
         return
 
     base_tree = ast.parse(normalize_strategy_source(base_source))
@@ -934,7 +966,7 @@ def _validate_factor_change_policy(
     new_param_keys = sorted(set(candidate_params) - set(base_params))
     if new_param_keys:
         raise StrategySourceError(
-            "factor mode default forbids new PARAMS keys: "
+            "new PARAMS keys are not allowed: "
             + ", ".join(new_param_keys[:8])
         )
 
@@ -942,12 +974,12 @@ def _validate_factor_change_policy(
     invalid_constant_names = [name for name in new_constant_names if name.upper() != name]
     if invalid_constant_names:
         raise StrategySourceError(
-            "default mode new top-level constants must use UPPER_CASE names: "
+            "new top-level constants must use UPPER_CASE names: "
             + ", ".join(invalid_constant_names[:8])
         )
     if len(new_constant_names) > DEFAULT_MODE_MAX_NEW_TOP_LEVEL_CONSTANTS:
         raise StrategySourceError(
-            "default mode allows at most "
+            "strategy source allows at most "
             f"{DEFAULT_MODE_MAX_NEW_TOP_LEVEL_CONSTANTS} new top-level constants: "
             + ", ".join(new_constant_names[:8])
         )
@@ -956,12 +988,12 @@ def _validate_factor_change_policy(
     invalid_function_names = [name for name in new_function_names if not name.startswith("_")]
     if invalid_function_names:
         raise StrategySourceError(
-            "default mode new top-level helpers must use private helper names: "
+            "new top-level helpers must use private helper names: "
             + ", ".join(invalid_function_names[:8])
         )
     if len(new_function_names) > DEFAULT_MODE_MAX_NEW_TOP_LEVEL_HELPERS:
         raise StrategySourceError(
-            "default mode allows at most "
+            "strategy source allows at most "
             f"{DEFAULT_MODE_MAX_NEW_TOP_LEVEL_HELPERS} new top-level helpers: "
             + ", ".join(new_function_names[:8])
         )
@@ -970,9 +1002,10 @@ def _validate_factor_change_policy(
 def build_system_edit_signature(
     base_source: str,
     candidate_source: str,
-    editable_regions: tuple[str, ...],
+    editable_regions: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
-    changed_regions = changed_editable_regions(base_source, candidate_source, editable_regions)
+    _ = editable_regions
+    changed_regions = changed_editable_regions(base_source, candidate_source, tuple())
     changed_param_keys = _param_keys_changed(base_source, candidate_source)
     param_families = tuple(
         sorted({param_family_for_key(key) for key in changed_param_keys})
@@ -981,7 +1014,7 @@ def build_system_edit_signature(
     function_names = tuple(
         region_name
         for region_name in changed_regions
-        if region_name != "PARAMS"
+        if region_name != "PARAMS" and not region_name.isupper()
     )
     function_nodes = _function_node_map(candidate_source, function_names)
 
@@ -1029,12 +1062,10 @@ def validate_editable_region_boundaries(
     candidate_source: str,
     editable_regions: tuple[str, ...],
 ) -> None:
-    base_masked = _mask_editable_regions(base_source, editable_regions)
-    candidate_masked = _mask_editable_regions(candidate_source, editable_regions)
-    if base_masked != candidate_masked:
-        raise StrategySourceError(
-            "candidate modified content outside editable regions"
-        )
+    _ = base_source
+    _ = candidate_source
+    _ = editable_regions
+    return None
 
 
 def validate_strategy_source(
@@ -1043,6 +1074,7 @@ def validate_strategy_source(
     base_source: str | None = None,
     factor_change_mode: str = "default",
 ) -> None:
+    _ = factor_change_mode
     normalized = normalize_strategy_source(source)
     missing_functions = missing_required_functions(normalized)
     if missing_functions:
@@ -1060,7 +1092,7 @@ def validate_strategy_source(
     if not any(isinstance(node, ast.Assign) and any(getattr(target, "id", "") == "PARAMS" for target in node.targets) for node in tree.body):
         raise StrategySourceError("missing top-level PARAMS assignment")
 
-    banned_import_modules = {"requests", "subprocess", "socket", "asyncio"}
+    banned_import_modules = {"requests", "subprocess", "socket", "asyncio", "random", "aiohttp", "httpx"}
     for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -1070,6 +1102,26 @@ def validate_strategy_source(
             module = (node.module or "").split(".", 1)[0]
             if module in banned_import_modules:
                 raise StrategySourceError(f"banned import in strategy source: {module}")
+
+    banned_call_names = {"open", "exec", "eval", "__import__"}
+    banned_call_attrs = {
+        "write_text",
+        "write_bytes",
+        "mkdir",
+        "unlink",
+        "replace",
+        "rename",
+        "rmdir",
+        "touch",
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        call_name = _call_name(node.func).strip()
+        if call_name in banned_call_names:
+            raise StrategySourceError(f"banned call in strategy source: {call_name}")
+        if call_name in banned_call_attrs:
+            raise StrategySourceError(f"banned file mutation call in strategy source: {call_name}")
 
     params = extract_params(normalized)
     for key, value in params.items():
@@ -1091,3 +1143,15 @@ def validate_strategy_source(
             raise StrategySourceError(f"invalid parameter relation: {left_key}={left_value} > {right_key}={right_value}")
         if operator == "<" and left_value >= right_value:
             raise StrategySourceError(f"invalid parameter relation: {left_key}={left_value} >= {right_key}={right_value}")
+
+    _validate_source_shape_policy(
+        normalized,
+        tree=tree,
+        base_source=base_source,
+    )
+    _validate_complexity_budget(
+        normalized,
+        tree=tree,
+        base_source=base_source,
+        factor_change_mode="default",
+    )

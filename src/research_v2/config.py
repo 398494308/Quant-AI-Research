@@ -94,7 +94,6 @@ class ResearchRuntimeConfig:
     paths: ResearchPaths
     windows: WindowConfig
     gates: GateConfig
-    base_factor_change_mode: str
     loop_interval_seconds: int
     provider_recovery_wait_seconds: int
     failure_cooldown_seconds: int
@@ -166,7 +165,6 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         paths=paths,
         windows=windows,
         gates=gates,
-        base_factor_change_mode=_env_text("MACD_V2_FACTOR_CHANGE_MODE", "default"),
         loop_interval_seconds=_env_int("MACD_V2_LOOP_INTERVAL_SECONDS", 10),
         provider_recovery_wait_seconds=_env_int("MACD_V2_PROVIDER_RECOVERY_WAIT_SECONDS", 90),
         failure_cooldown_seconds=_env_int("MACD_V2_FAILURE_COOLDOWN_SECONDS", 10),

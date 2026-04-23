@@ -40,7 +40,7 @@ from research_v2.charting import charts_available, render_performance_chart
 from research_v2.journal import (
     ORDINARY_REGION_FAMILIES,
     append_journal_archive,
-    build_current_reference_denylist_payload,
+    build_direction_board_payload,
     build_exploration_guard_state,
     _format_compact_for_prompt,
     build_journal_prompt_summary,
@@ -49,7 +49,7 @@ from research_v2.journal import (
     cluster_key_for_entry,
     evaluate_candidate_failure_wiki_guard,
     evaluate_candidate_exploration_guard,
-    format_current_reference_denylist_markdown,
+    format_direction_board_markdown,
     load_failure_wiki_index,
     ordinary_region_families,
     region_families_for_regions,
@@ -1154,7 +1154,7 @@ def strategy(*args, **kwargs):
 
         validate_strategy_source(source)
 
-    def test_validate_strategy_source_allows_new_param_key_in_default_mode(self):
+    def test_validate_strategy_source_rejects_new_param_key_even_with_legacy_default_mode_arg(self):
         base_source = self._minimal_validation_source()
         source = base_source.replace(
             "PARAMS = {'intraday_adx_min': 10}",
@@ -1162,13 +1162,14 @@ def strategy(*args, **kwargs):
             1,
         )
 
-        validate_strategy_source(
-            source,
-            base_source=base_source,
-            factor_change_mode="default",
-        )
+        with self.assertRaisesRegex(StrategySourceError, "new PARAMS keys are not allowed"):
+            validate_strategy_source(
+                source,
+                base_source=base_source,
+                factor_change_mode="default",
+            )
 
-    def test_validate_strategy_source_allows_new_param_key_in_factor_admission_mode(self):
+    def test_validate_strategy_source_rejects_new_param_key_even_with_legacy_factor_admission_arg(self):
         base_source = self._minimal_validation_source()
         source = base_source.replace(
             "PARAMS = {'intraday_adx_min': 10}",
@@ -1176,11 +1177,12 @@ def strategy(*args, **kwargs):
             1,
         )
 
-        validate_strategy_source(
-            source,
-            base_source=base_source,
-            factor_change_mode="factor_admission",
-        )
+        with self.assertRaisesRegex(StrategySourceError, "new PARAMS keys are not allowed"):
+            validate_strategy_source(
+                source,
+                base_source=base_source,
+                factor_change_mode="factor_admission",
+            )
 
     def test_validate_strategy_source_keeps_default_mode_complexity_growth_as_warning_only(self):
         base_source = self._minimal_validation_source()
@@ -1219,7 +1221,7 @@ def strategy(*args, **kwargs):
         self.assertIn("family", summary)
         self.assertIn("function", summary)
 
-    def test_validate_editable_boundaries_rejects_non_editable_changes(self):
+    def test_validate_editable_boundaries_no_longer_rejects_full_file_edits(self):
         base_source = """
 # PARAMS_START
 PARAMS = {'intraday_adx_min': 10, 'hourly_adx_min': 10, 'fourh_adx_min': 10, 'breakout_adx_min': 10, 'breakdown_adx_min': 10, 'breakout_lookback': 10, 'breakdown_lookback': 10, 'breakout_rsi_min': 40, 'breakout_rsi_max': 60, 'breakdown_rsi_min': 20, 'breakdown_rsi_max': 60, 'breakout_volume_ratio_min': 1.0, 'breakdown_volume_ratio_min': 1.0, 'breakout_body_ratio_min': 0.3, 'breakdown_body_ratio_min': 0.3, 'breakout_close_pos_min': 0.5, 'breakdown_close_pos_max': 0.5, 'intraday_ema_fast': 9, 'intraday_ema_slow': 20, 'hourly_ema_fast': 10, 'hourly_ema_slow': 20, 'fourh_ema_fast': 10, 'fourh_ema_slow': 20, 'macd_fast': 12, 'macd_slow': 26, 'macd_signal': 9, 'volume_lookback': 10}
@@ -1245,8 +1247,7 @@ def strategy(*args, **kwargs):
 """
         candidate_source = base_source.replace("return 1", "return 2", 1)
 
-        with self.assertRaises(StrategySourceError):
-            validate_editable_region_boundaries(base_source, candidate_source, EDITABLE_REGIONS)
+        validate_editable_region_boundaries(base_source, candidate_source, EDITABLE_REGIONS)
 
     def test_validate_editable_boundaries_allows_strategy_change(self):
         base_source = """
@@ -1372,7 +1373,7 @@ def strategy(*args, **kwargs):
         self.assertIn("PARAMS = {'intraday_adx_min': 12}", repaired_source)
         self.assertIn("def strategy(*args, **kwargs):\n    return None", repaired_source)
 
-    def test_repair_editable_region_drift_keeps_editable_changes_and_reverts_other_regions(self):
+    def test_repair_editable_region_drift_becomes_noop_when_whole_file_is_editable(self):
         base_source = """
 # PARAMS_START
 PARAMS = {'intraday_adx_min': 10}
@@ -1444,8 +1445,8 @@ def strategy(*args, **kwargs):
             EDITABLE_REGIONS,
         )
 
-        self.assertTrue(repaired)
-        self.assertIn("def helper():\n    return 1", repaired_source)
+        self.assertFalse(repaired)
+        self.assertIn("def helper():\n    return 2", repaired_source)
         self.assertIn("def strategy(*args, **kwargs):\n    return None", repaired_source)
         validate_editable_region_boundaries(base_source, repaired_source, EDITABLE_REGIONS)
 
@@ -1492,12 +1493,12 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("方向流量代理", prompt)
         self.assertIn("config/research_v2_operator_focus.md", prompt)
         self.assertIn("wiki/reviewer_summary_card.md", prompt)
-        self.assertIn("wiki/current_reference_denylist.md", prompt)
+        self.assertIn("wiki/direction_board.md", prompt)
         self.assertIn("wiki/duplicate_watchlist.md", prompt)
         self.assertIn("wiki/failure_wiki.md", prompt)
         self.assertIn("先想再写", prompt)
         self.assertIn("不要 hard code", prompt)
-        self.assertIn("复杂度信息只做只读诊断", prompt)
+        self.assertIn("整份文件都允许修改", prompt)
 
     def test_build_strategy_runtime_prompt_mentions_promotion_gate(self):
         prompt = build_strategy_research_prompt(
@@ -1510,7 +1511,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("当前回合任务", prompt)
         self.assertIn("本轮阅读顺序（必须执行）", prompt)
         self.assertIn("reviewer_summary_card.md", prompt)
-        self.assertIn("current_reference_denylist.md", prompt)
+        self.assertIn("direction_board.md", prompt)
         self.assertIn("duplicate_watchlist.md", prompt)
         self.assertIn("failure_wiki.md", prompt)
         self.assertIn("先复盘最近一条最强结构化失败证据", prompt)
@@ -1558,10 +1559,9 @@ class JournalPromptFixesTest(unittest.TestCase):
     def test_build_strategy_agents_instructions_mentions_ordinary_family_budget(self):
         prompt = build_strategy_agents_instructions()
 
-        self.assertIn("`strategy()` 与 `PARAMS` 属于特殊区域", prompt)
-        for family_name in ORDINARY_REGION_FAMILIES:
-            self.assertIn(f"`{family_name}`", prompt)
-        self.assertIn("普通 family", prompt)
+        self.assertIn("整份文件都允许修改", prompt)
+        self.assertIn("真实 diff 自动归类 region / family", prompt)
+        self.assertIn("不允许新增 `PARAMS` 键", prompt)
 
     def test_build_strategy_agents_instructions_mentions_delete_first_rule(self):
         prompt = build_strategy_agents_instructions()
@@ -1613,6 +1613,7 @@ class JournalPromptFixesTest(unittest.TestCase):
     def test_build_strategy_edit_worker_prompt_mentions_round_brief_and_edit_only(self):
         prompt = build_strategy_edit_worker_prompt(
             candidate_id="candidate_1",
+            primary_direction="long | widen outer context",
             hypothesis="放宽多头 outer_context，让内层路径真正触达到出单层。",
             change_plan="在 long_outer_context_ok 和 long_final_veto_clear 上删旧 gate，不新增平行 path。",
             change_tags=("widen_outer_context", "merge_veto"),
@@ -1624,13 +1625,14 @@ class JournalPromptFixesTest(unittest.TestCase):
 
         self.assertIn("round brief", prompt)
         self.assertIn("只修改 `src/strategy_macd_aggressive.py`", prompt)
-        self.assertIn("主进程会自动按当前 base 回灌", prompt)
+        self.assertIn("整份策略文件都允许修改", prompt)
         self.assertIn("只回复 `EDIT_DONE`", prompt)
-        self.assertIn("复杂度诊断（只读）", prompt)
+        self.assertNotIn("当前基底复杂度余量", prompt)
 
     def test_build_strategy_edit_worker_prompt_mentions_compaction_task_when_requested(self):
         prompt = build_strategy_edit_worker_prompt(
             candidate_id="candidate_1",
+            primary_direction="structure | merge veto",
             hypothesis="压缩多头最终 veto",
             change_plan="合并重复否决，不新增 path",
             change_tags=("merge_veto",),
@@ -1654,6 +1656,7 @@ class JournalPromptFixesTest(unittest.TestCase):
     def test_build_strategy_candidate_summary_prompt_mentions_final_code_alignment(self):
         prompt = build_strategy_candidate_summary_prompt(
             candidate_id="candidate_1",
+            primary_direction="long | final veto rewrite",
             hypothesis="原始多头补法",
             change_plan="原始计划",
             change_tags=("long", "merge_veto"),
@@ -1693,7 +1696,7 @@ class JournalPromptFixesTest(unittest.TestCase):
 
         self.assertIn("当前 draft round brief", prompt)
         self.assertIn("高信号证据包", prompt)
-        self.assertIn("current_reference_denylist.md", prompt)
+        self.assertIn("direction_board.md", prompt)
         self.assertIn("duplicate_watchlist.md", prompt)
         self.assertIn("failure_wiki.md", prompt)
         self.assertIn("不能替 planner 发明新方向", prompt)
@@ -1734,7 +1737,7 @@ class JournalPromptFixesTest(unittest.TestCase):
 
         self.assertNotIn("复杂度硬上限（超了直接拒收）", runtime_prompt)
         self.assertNotIn("复杂度硬上限（超了直接拒收）", system_prompt)
-        self.assertIn("复杂度信息只做只读诊断", system_prompt)
+        self.assertNotIn("当前基底复杂度余量", runtime_prompt)
         self.assertIn("删旧、并旧、改旧", system_prompt)
 
     def test_build_strategy_research_prompt_can_include_current_complexity_headroom(self):
@@ -1746,8 +1749,8 @@ class JournalPromptFixesTest(unittest.TestCase):
             current_complexity_headroom_text=headroom_text,
         )
 
-        self.assertIn("当前基底复杂度余量", prompt)
-        self.assertIn("trend_quality_family", prompt)
+        self.assertNotIn("当前基底复杂度余量", prompt)
+        self.assertNotIn("trend_quality_family", prompt)
 
     def test_build_strategy_research_prompt_can_still_echo_iteration_lane_when_provided(self):
         prompt = build_strategy_research_prompt(
@@ -1768,6 +1771,7 @@ class JournalPromptFixesTest(unittest.TestCase):
     def test_build_strategy_runtime_repair_prompt_mentions_complexity_shrink_rule(self):
         prompt = build_strategy_runtime_repair_prompt(
             candidate_id="candidate_1",
+            primary_direction="long | ownership routing",
             hypothesis="继续优化多头上车",
             change_plan="调整 ownership 方向过滤",
             change_tags=("ownership_takeover",),
@@ -1785,6 +1789,7 @@ class JournalPromptFixesTest(unittest.TestCase):
     def test_build_strategy_exploration_repair_prompt_mentions_blocked_cluster(self):
         prompt = build_strategy_exploration_repair_prompt(
             candidate_id="candidate_1",
+            primary_direction="long | ownership routing",
             hypothesis="继续优化多头上车",
             change_plan="调整 ownership 方向过滤",
             change_tags=("ownership_takeover", "acceptance_continuity"),
@@ -1807,6 +1812,7 @@ class JournalPromptFixesTest(unittest.TestCase):
     def test_build_strategy_exploration_repair_prompt_mentions_feedback_note(self):
         prompt = build_strategy_exploration_repair_prompt(
             candidate_id="candidate_1",
+            primary_direction="long | ownership routing",
             hypothesis="继续优化多头上车",
             change_plan="调整 ownership 方向过滤",
             change_tags=("ownership_takeover", "acceptance_continuity"),
@@ -1831,6 +1837,7 @@ class JournalPromptFixesTest(unittest.TestCase):
     def test_build_strategy_exploration_repair_prompt_requires_rebase_to_reference(self):
         prompt = build_strategy_exploration_repair_prompt(
             candidate_id="candidate_1",
+            primary_direction="long | ownership routing",
             hypothesis="继续优化多头上车",
             change_plan="调整 ownership 方向过滤",
             change_tags=("ownership_takeover",),
@@ -1860,6 +1867,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         agents_prompt = build_strategy_agents_instructions()
         exploration_prompt = build_strategy_exploration_repair_prompt(
             candidate_id="candidate_1",
+            primary_direction="long | ownership routing",
             hypothesis="继续优化多头上车",
             change_plan="调整 ownership 方向过滤",
             change_tags=("ownership_takeover", "acceptance_continuity"),
@@ -1901,9 +1909,9 @@ class JournalPromptFixesTest(unittest.TestCase):
 
             payload = {
                 "candidate_id": "candidate_only_strategy",
+                "primary_direction": "long | final routing",
                 "hypothesis": "只改最终入场",
                 "change_plan": "调整 strategy",
-                "closest_failed_cluster": "ownership_cluster",
                 "novelty_proof": "这次会改变交易路径。",
                 "change_tags": ["ownership_takeover"],
                 "edited_regions": ["strategy"],
@@ -1949,9 +1957,9 @@ class JournalPromptFixesTest(unittest.TestCase):
 
             payload = {
                 "candidate_id": "candidate_four_families",
+                "primary_direction": "mixed | four family sweep",
                 "hypothesis": "一次覆盖四个普通 family",
                 "change_plan": "同时调整横盘、流量、质量和入场路径",
-                "closest_failed_cluster": "ownership_cluster",
                 "novelty_proof": "这次会改变交易路径。",
                 "change_tags": ["ownership_takeover"],
                 "edited_regions": [
@@ -1975,6 +1983,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         payload = research_script._parse_model_candidate_payload(
             """
 candidate_id: candidate_text_mode
+primary_direction: long | final veto rewrite
 hypothesis: 先放宽 long 最后 veto，让多头真实触达最终路由
 change_plan: 调整 long_final_veto_clear，并同步检查 strategy 最终合流
 change_tags: long, merge_veto, strategy
@@ -2011,7 +2020,7 @@ expected_effects: 提高多头上车
 """
         )
 
-        with self.assertRaisesRegex(StrategySourceError, "novelty_proof, change_tags"):
+        with self.assertRaisesRegex(StrategySourceError, "primary_direction, novelty_proof, change_tags"):
             research_script._validate_round_brief_payload(payload)
 
     def test_round_brief_from_payload_rejects_missing_core_fields(self):
@@ -2023,7 +2032,7 @@ change_plan: 放宽 long_outer_context_ok
 """
         )
 
-        with self.assertRaisesRegex(StrategySourceError, "novelty_proof, change_tags"):
+        with self.assertRaisesRegex(StrategySourceError, "primary_direction, novelty_proof, change_tags"):
             research_script._round_brief_from_payload(payload)
 
     def test_candidate_from_payload_uses_system_changed_regions_not_declared_regions(self):
@@ -2042,9 +2051,9 @@ change_plan: 放宽 long_outer_context_ok
             candidate = research_script._candidate_from_payload(
                 {
                     "candidate_id": "candidate_real_diff",
+                    "primary_direction": "structure | route shift",
                     "hypothesis": "改最终路由",
                     "change_plan": "只动 strategy",
-                    "closest_failed_cluster": "ownership_cluster",
                     "novelty_proof": "真实 diff 会触达 strategy。",
                     "change_tags": ["route_shift"],
                     "edited_regions": ["_trend_quality_ok"],
@@ -2078,9 +2087,9 @@ change_plan: 放宽 long_outer_context_ok
         )
         round_brief = research_script.StrategyRoundBrief(
             candidate_id="candidate_realigned",
+            primary_direction="long | original brief",
             hypothesis="原 brief 假设",
             change_plan="原 brief 计划",
-            closest_failed_cluster="ownership_cluster",
             novelty_proof="原 brief novelty",
             change_tags=("long",),
             expected_effects=("原 effect",),
@@ -2088,9 +2097,9 @@ change_plan: 放宽 long_outer_context_ok
         )
         summary_brief = research_script.StrategyRoundBrief(
             candidate_id="candidate_should_not_override",
+            primary_direction="structure | route shift",
             hypothesis="最终代码实际是在改 strategy 最终路由",
             change_plan="按最终 diff 重写 strategy 路由说明",
-            closest_failed_cluster="route_shift_cluster",
             novelty_proof="这是按最终代码回写后的 novelty",
             change_tags=("strategy", "route_shift"),
             expected_effects=("改变最终入场集合",),
@@ -2488,7 +2497,7 @@ def strategy(*args, **kwargs):
 
         self.assertNotIn("方向冷却表", summary)
         self.assertIn("ownership_cluster", summary)
-        self.assertIn("方向风险表", summary)
+        self.assertIn("方向账本摘要", summary)
 
 
 class FreqtradeAdapterFixesTest(unittest.TestCase):
@@ -2709,9 +2718,9 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         first_line = summary.splitlines()[0]
 
         self.assertIn("当前 stage 执行摘要", first_line)
-        self.assertIn("方向风险表", summary)
+        self.assertIn("方向账本摘要", summary)
         self.assertIn("ownership_cluster", summary)
-        self.assertIn("EXHAUSTED", summary)
+        self.assertIn("HOT", summary)
 
     def test_journal_summary_can_emit_compact_prompt_package(self):
         entries = []
@@ -2739,7 +2748,7 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         summary = build_journal_prompt_summary(entries, limit=8, prompt_compact=True)
 
         self.assertIn("当前 stage 执行摘要", summary)
-        self.assertIn("方向风险表", summary)
+        self.assertIn("方向账本摘要", summary)
         self.assertIn("最近轮次元信息（精简）", summary)
         self.assertNotIn("当前 stage 核心指标表", summary)
         self.assertNotIn("全局方向统计", summary)
@@ -2803,11 +2812,11 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
 
         summary = build_journal_prompt_summary(entries, limit=8)
 
-        direction_index = summary.index("方向风险表")
+        direction_index = summary.index("方向账本摘要")
         overfit_index = summary.index("过拟合风险表")
         self.assertLess(direction_index, overfit_index)
         self.assertIn("| 7 | 保留 | 0.72 | 高 | 48 |", summary)
-        self.assertIn("慎重参考", summary)
+        self.assertIn("谨慎参考", summary)
 
     def test_journal_summary_emits_exploration_trigger_after_three_low_change_rounds(self):
         entries = []
@@ -3178,7 +3187,7 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
                 research_script.RUNTIME.paths,
                 session_state_file=temp_root / "state/session.json",
             )
-            temp_runtime = replace(research_script.RUNTIME, paths=temp_paths, base_factor_change_mode="default")
+            temp_runtime = replace(research_script.RUNTIME, paths=temp_paths)
 
             with mock.patch.object(research_script, "RUNTIME", temp_runtime), mock.patch.object(
                 research_script, "best_source", "def strategy(*args, **kwargs):\n    return None\n"
@@ -3209,7 +3218,7 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
                 research_script.RUNTIME.paths,
                 session_state_file=temp_root / "state/session.json",
             )
-            temp_runtime = replace(research_script.RUNTIME, paths=temp_paths, base_factor_change_mode="default")
+            temp_runtime = replace(research_script.RUNTIME, paths=temp_paths)
 
             with mock.patch.object(research_script, "RUNTIME", temp_runtime), mock.patch.object(
                 research_script, "best_source", "def strategy(*args, **kwargs):\n    return None\n"
@@ -3320,7 +3329,7 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
 
         summary = build_journal_prompt_summary(entries, limit=8, current_score_regime="trend_capture_v3")
 
-        self.assertIn("方向风险表", summary)
+        self.assertIn("方向账本摘要", summary)
         self.assertIn("等待新历史", summary)
         self.assertIn("旧评分口径弱参考", summary)
         self.assertIn("trend_capture_v2", summary)
@@ -3329,7 +3338,7 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
     def test_journal_summary_keeps_empty_table_after_reset(self):
         summary = build_journal_prompt_summary([], limit=8)
 
-        self.assertIn("方向风险表", summary)
+        self.assertIn("方向账本摘要", summary)
         self.assertIn("当前 stage 核心指标表", summary)
         self.assertIn("等待新历史", summary)
 
@@ -3557,8 +3566,8 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
             self.assertTrue((memory_root / "wiki/duplicate_watchlist.md").exists())
             self.assertTrue((memory_root / "wiki/failure_wiki.md").exists())
             self.assertTrue((memory_root / "wiki/failure_wiki_index.json").exists())
-            self.assertTrue((memory_root / "wiki/current_reference_denylist.md").exists())
-            self.assertTrue((memory_root / "wiki/current_reference_denylist.json").exists())
+            self.assertTrue((memory_root / "wiki/direction_board.md").exists())
+            self.assertTrue((memory_root / "wiki/direction_board.json").exists())
             self.assertIn("blocked_cuts", load_failure_wiki_index(memory_root))
 
     def test_journal_summary_writes_duplicate_watchlist_markdown(self):
@@ -3627,7 +3636,7 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         self.assertIn("ownership_cluster", duplicate_watchlist)
         self.assertIn("duplicate_history", duplicate_watchlist)
 
-    def test_current_reference_denylist_marks_repeated_noop_pattern(self):
+    def test_direction_board_marks_repeated_noop_pattern(self):
         entries = [
             {
                 "iteration": 1,
@@ -3697,20 +3706,20 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
             },
         ]
 
-        payload = build_current_reference_denylist_payload(
+        payload = build_direction_board_payload(
             entries,
             score_regime="trend_capture_v6",
             active_reference_code_hash="ref_hash_alpha",
         )
-        markdown = format_current_reference_denylist_markdown(payload)
+        markdown = format_direction_board_markdown(payload)
 
         self.assertEqual(payload["scope_entry_count"], 2)
         self.assertEqual(payload["item_count"], 1)
-        self.assertEqual(payload["items"][0]["level"], "HARD_BAN")
-        self.assertIn("Current Reference Denylist", markdown)
-        self.assertIn("HARD_BAN", markdown)
-        self.assertIn("ownership_cluster", markdown)
-        self.assertIn("long_final_veto_clear", markdown)
+        self.assertEqual(payload["items"][0]["level"], "WARM")
+        self.assertIn("Direction Board", markdown)
+        self.assertIn("WARM", markdown)
+        self.assertIn("long | 历史遗留方向", markdown)
+        self.assertIn("behavioral_noop", markdown)
 
     def test_append_journal_archive_writes_raw_history_files(self):
         entry = {
@@ -3765,7 +3774,7 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
 
         summary = build_journal_prompt_summary(entries, limit=8, current_score_regime="trend_capture_v4")
 
-        self.assertIn("方向风险表", summary)
+        self.assertIn("方向账本摘要", summary)
         self.assertIn("current_breakout", summary)
         self.assertIn("旧评分口径弱参考", summary)
         self.assertIn("trend_capture_v1", summary)
@@ -3794,13 +3803,13 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
 
         summary = build_journal_prompt_summary(entries, limit=8, current_score_regime="trend_capture_v4")
 
-        self.assertIn("主簇过热（必须先读）", summary)
+        self.assertIn("方向账本摘要", summary)
         self.assertIn("当前复盘优先级", summary)
         self.assertIn("当前过热近邻/慎入区", summary)
         self.assertIn("trigger_efficiency_cluster", summary)
-        self.assertIn("占比 100%", summary)
+        self.assertIn("探索触发（必须执行）", summary)
         self.assertNotIn("ACTIVE_WINNER", summary)
-        self.assertIn("WARM", summary)
+        self.assertIn("HOT", summary)
 
     def test_journal_summary_emits_stage_operating_metrics_table(self):
         entries = [
@@ -3913,7 +3922,8 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         summary = build_journal_prompt_summary(entries, limit=8, current_score_regime="trend_capture_v4")
 
         self.assertIn("源码校验", summary)
-        self.assertIn("复杂度超标 1", summary)
+        self.assertIn("运行失败 1", summary)
+        self.assertIn("complexity family", summary)
 
 
 class SmokeWindowSelectionTest(unittest.TestCase):
@@ -3962,14 +3972,9 @@ class ResearcherAdaptiveModeTest(unittest.TestCase):
             {"iteration": 5, "outcome": "runtime_failed", "decision_reason": "complexity budget exceeded", "score_regime": research_script.SCORE_REGIME},
         ]
 
-        with mock.patch.object(
-            research_script,
-            "RUNTIME",
-            replace(research_script.RUNTIME, base_factor_change_mode="default"),
-        ):
-            mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
+        mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
 
-        self.assertEqual(mode, "default")
+        self.assertEqual(mode, "")
         self.assertIn("不再自动切换", reason)
 
     def test_resolve_iteration_factor_change_state_stays_manual_after_many_stalls(self):
@@ -3978,14 +3983,9 @@ class ResearcherAdaptiveModeTest(unittest.TestCase):
             for idx in range(7)
         ]
 
-        with mock.patch.object(
-            research_script,
-            "RUNTIME",
-            replace(research_script.RUNTIME, base_factor_change_mode="default"),
-        ):
-            state = research_script._resolve_iteration_factor_change_state(entries)
+        state = research_script._resolve_iteration_factor_change_state(entries)
 
-        self.assertEqual(state["mode"], "default")
+        self.assertEqual(state["mode"], "")
         self.assertEqual(state["guidance_level"], "manual")
         self.assertEqual(state["trailing_stalls"], 0)
 
@@ -3995,14 +3995,9 @@ class ResearcherAdaptiveModeTest(unittest.TestCase):
             for idx in range(10)
         ]
 
-        with mock.patch.object(
-            research_script,
-            "RUNTIME",
-            replace(research_script.RUNTIME, base_factor_change_mode="default"),
-        ):
-            mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
+        mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
 
-        self.assertEqual(mode, "default")
+        self.assertEqual(mode, "")
         self.assertIn("不再自动切换", reason)
 
     def test_resolve_iteration_factor_change_mode_returns_base_mode_after_positive_delta(self):
@@ -4018,14 +4013,9 @@ class ResearcherAdaptiveModeTest(unittest.TestCase):
             {"iteration": 3, "outcome": "behavioral_noop", "score_regime": research_script.SCORE_REGIME},
         ]
 
-        with mock.patch.object(
-            research_script,
-            "RUNTIME",
-            replace(research_script.RUNTIME, base_factor_change_mode="default"),
-        ):
-            mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
+        mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
 
-        self.assertEqual(mode, "default")
+        self.assertEqual(mode, "")
         self.assertIn("不再自动切换", reason)
 
     def test_consecutive_no_edit_runtime_failures_counts_trailing_no_edit_only(self):
@@ -4519,9 +4509,9 @@ class ReferenceStateFixesTest(unittest.TestCase):
             memory_root = Path(temp_dir)
             round_brief = research_script.StrategyRoundBrief(
                 candidate_id="candidate_review_1",
+                primary_direction="long | routing repair",
                 hypothesis="继续修 long routing",
                 change_plan="继续改 strategy 与 long_final_veto_clear",
-                closest_failed_cluster="ownership_cluster",
                 novelty_proof="最近几轮都卡在同一盆地",
                 change_tags=("long", "routing"),
                 expected_effects=("改善多头捕获",),

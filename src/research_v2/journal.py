@@ -73,6 +73,9 @@ CURRENT_REFERENCE_HARD_BAN_NOOP_COUNT = 2
 CURRENT_REFERENCE_HARD_BAN_DUPLICATE_HISTORY_COUNT = 3
 CURRENT_REFERENCE_HARD_BAN_FAILED_BASIN_COUNT = 4
 CURRENT_REFERENCE_HARD_BAN_BEST_DELTA_MAX = 0.005
+PRIMARY_DIRECTION_DOMAINS = frozenset({"long", "short", "mixed", "structure"})
+DIRECTION_HOT_FAILURE_STREAK = 3
+DIRECTION_EXCEPTION_DELTA = 0.01
 LONG_TARGET_KEYWORDS = (
     "long",
     "bull",
@@ -123,6 +126,8 @@ def append_journal_entry(path: Path, entry: dict[str, Any]) -> None:
 
 
 def _memory_archive_paths(memory_root: Path) -> dict[str, Path]:
+    direction_board_md = memory_root / "wiki/direction_board.md"
+    direction_board_json = memory_root / "wiki/direction_board.json"
     return {
         "raw_history": memory_root / "raw/full_history.jsonl",
         "raw_rounds_dir": memory_root / "raw/rounds",
@@ -133,8 +138,10 @@ def _memory_archive_paths(memory_root: Path) -> dict[str, Path]:
         "failure_wiki_md": memory_root / "wiki/failure_wiki.md",
         "failure_wiki_json": memory_root / "wiki/failure_wiki_index.json",
         "duplicate_watchlist_md": memory_root / "wiki/duplicate_watchlist.md",
-        "current_reference_denylist_md": memory_root / "wiki/current_reference_denylist.md",
-        "current_reference_denylist_json": memory_root / "wiki/current_reference_denylist.json",
+        "direction_board_md": direction_board_md,
+        "direction_board_json": direction_board_json,
+        "current_reference_denylist_md": direction_board_md,
+        "current_reference_denylist_json": direction_board_json,
     }
 
 
@@ -487,60 +494,27 @@ def _current_reference_scope_entries(
     return []
 
 
-def _current_reference_denylist_level_rank(level: str) -> int:
-    return {
-        "HARD_BAN": 0,
-        "PROOF_REQUIRED": 1,
-        "WATCHLIST": 2,
-    }.get(str(level or "").strip(), 3)
+def _direction_heat_level_rank(level: str) -> int:
+    return {"HOT": 0, "WARM": 1, "OPEN": 2}.get(str(level or "").strip(), 3)
 
 
-def _current_reference_denylist_level(
-    *,
-    attempts: int,
-    noop_count: int,
-    duplicate_history_count: int,
-    failed_basin_count: int,
-    best_delta: float,
-) -> str:
-    if (
-        noop_count >= CURRENT_REFERENCE_HARD_BAN_NOOP_COUNT
-        or duplicate_history_count >= CURRENT_REFERENCE_HARD_BAN_DUPLICATE_HISTORY_COUNT
-        or (
-            failed_basin_count >= CURRENT_REFERENCE_HARD_BAN_FAILED_BASIN_COUNT
-            and best_delta <= CURRENT_REFERENCE_HARD_BAN_BEST_DELTA_MAX
-        )
-    ):
-        return "HARD_BAN"
-    if (
-        noop_count >= CURRENT_REFERENCE_PROOF_REQUIRED_NOOP_COUNT
-        or duplicate_history_count >= CURRENT_REFERENCE_PROOF_REQUIRED_DUPLICATE_HISTORY_COUNT
-        or (
-            failed_basin_count >= CURRENT_REFERENCE_PROOF_REQUIRED_FAILED_BASIN_COUNT
-            and best_delta <= CURRENT_REFERENCE_PROOF_REQUIRED_BEST_DELTA_MAX
-        )
-    ):
-        return "PROOF_REQUIRED"
-    if attempts >= 2:
-        return "WATCHLIST"
-    return ""
+def _direction_heat_level(current_failure_streak: int) -> str:
+    if current_failure_streak >= DIRECTION_HOT_FAILURE_STREAK:
+        return "HOT"
+    if current_failure_streak >= 2:
+        return "WARM"
+    return "OPEN"
 
 
-def _current_reference_denylist_hint(level: str) -> str:
-    if level == "HARD_BAN":
-        return (
-            "当前 active reference 下，这条调法已经被强证据反复否掉；"
-            "除非你能明确证明目标侧、最终放行链和真实交易路径层级都不同，否则不要继续。"
-        )
-    if level == "PROOF_REQUIRED":
-        return (
-            "若仍研究这条线，必须先举出新的 choke point、最终放行链或真实交易路径层级；"
-            "没有新证据就不要继续横移。"
-        )
-    return "这条调法已经开始过热；继续前先确认自己不是在同簇、同 changed_regions 上做近邻微调。"
+def _direction_heat_hint(level: str) -> str:
+    if level == "HOT":
+        return "该主方向已连续失败至少 3 次；若继续，至少换失败层、关键规则链或真实触达路径。"
+    if level == "WARM":
+        return "该主方向已经开始升温；继续前先确认自己不是只在同一热区里横移。"
+    return "当前主方向没有形成持续连败，可继续尝试。"
 
 
-def build_current_reference_denylist_payload(
+def build_direction_board_payload(
     entries: list[dict[str, Any]],
     *,
     score_regime: str = "",
@@ -554,38 +528,41 @@ def build_current_reference_denylist_payload(
     )
 
     grouped: dict[str, dict[str, Any]] = {}
-    for entry in reference_entries:
-        signature = exploration_signature_for_entry(entry)
-        cut = _failure_cut_payload_from_signature(signature)
-        if not cut:
-            continue
-        bucket_key = json.dumps(cut, ensure_ascii=False, sort_keys=True)
+    streaks: dict[str, int] = defaultdict(int)
+    ordered_reference_entries = sorted(reference_entries, key=_entry_iteration)
+    for entry in ordered_reference_entries:
+        direction_text = primary_direction_for_entry(entry)
         bucket = grouped.setdefault(
-            bucket_key,
+            direction_text,
             {
-                "pattern": cut,
+                "primary_direction": direction_text,
+                "domain": primary_direction_domain(direction_text),
                 "attempts": 0,
-                "noop_count": 0,
-                "duplicate_history_count": 0,
-                "failed_basin_count": 0,
+                "failures": 0,
+                "exception_win_count": 0,
+                "current_failure_streak": 0,
                 "last_iteration": 0,
                 "best_delta": 0.0,
                 "top_reasons": Counter(),
                 "top_tags": Counter(),
+                "top_shadow_keys": Counter(),
                 "examples": [],
             },
         )
         bucket["attempts"] += 1
         bucket["last_iteration"] = max(bucket["last_iteration"], _entry_iteration(entry))
         bucket["best_delta"] = max(bucket["best_delta"], _score_value(entry.get("promotion_delta")))
-        outcome = str(entry.get("outcome", "")).strip()
-        stop_stage = str(entry.get("stop_stage", "")).strip()
-        if outcome == "behavioral_noop":
-            bucket["noop_count"] += 1
-        if outcome == "duplicate_skipped" and stop_stage == "duplicate_history":
-            bucket["duplicate_history_count"] += 1
-        if _failure_category_for_entry(entry) == "FAILED_BASIN":
-            bucket["failed_basin_count"] += 1
+        if _direction_entry_is_exception_win(entry):
+            bucket["exception_win_count"] += 1
+            streaks[direction_text] = 0
+        elif _direction_entry_is_failure(entry):
+            bucket["failures"] += 1
+            streaks[direction_text] += 1
+            bucket["current_failure_streak"] = max(
+                int(bucket["current_failure_streak"]),
+                int(streaks[direction_text]),
+            )
+            bucket["top_shadow_keys"][direction_shadow_key_for_entry(entry)] += 1
         reason = _entry_decision_reason(entry)
         if reason and reason != "-":
             bucket["top_reasons"][reason] += 1
@@ -597,47 +574,41 @@ def build_current_reference_denylist_payload(
             {
                 "iteration": _entry_iteration(entry),
                 "candidate_id": str(entry.get("candidate_id", "")).strip() or "-",
-                "outcome": outcome or "-",
+                "outcome": str(entry.get("outcome", "")).strip() or "-",
             }
         )
 
     items: list[dict[str, Any]] = []
     for payload in grouped.values():
-        level = _current_reference_denylist_level(
-            attempts=int(payload["attempts"]),
-            noop_count=int(payload["noop_count"]),
-            duplicate_history_count=int(payload["duplicate_history_count"]),
-            failed_basin_count=int(payload["failed_basin_count"]),
-            best_delta=float(payload["best_delta"]),
-        )
-        if not level:
-            continue
+        level = _direction_heat_level(int(payload["current_failure_streak"]))
         items.append(
             {
                 "level": level,
-                "pattern": payload["pattern"],
+                "primary_direction": payload["primary_direction"],
+                "domain": payload["domain"],
                 "attempts": int(payload["attempts"]),
-                "noop_count": int(payload["noop_count"]),
-                "duplicate_history_count": int(payload["duplicate_history_count"]),
-                "failed_basin_count": int(payload["failed_basin_count"]),
+                "failures": int(payload["failures"]),
+                "exception_win_count": int(payload["exception_win_count"]),
+                "current_failure_streak": int(payload["current_failure_streak"]),
                 "last_iteration": int(payload["last_iteration"]),
                 "best_delta": float(payload["best_delta"]),
                 "top_reasons": [name for name, _ in payload["top_reasons"].most_common(2)],
                 "top_tags": [name for name, _ in payload["top_tags"].most_common(4)],
+                "top_shadow_keys": [name for name, _ in payload["top_shadow_keys"].most_common(2)],
                 "examples": sorted(
                     payload["examples"],
                     key=lambda row: row["iteration"],
                     reverse=True,
                 )[:3],
-                "hint": _current_reference_denylist_hint(level),
+                "hint": _direction_heat_hint(level),
             }
         )
     items.sort(
         key=lambda item: (
-            _current_reference_denylist_level_rank(str(item.get("level", ""))),
+            _direction_heat_level_rank(str(item.get("level", ""))),
+            -int(item.get("current_failure_streak", 0) or 0),
+            -int(item.get("failures", 0) or 0),
             -int(item.get("attempts", 0) or 0),
-            -int(item.get("noop_count", 0) or 0),
-            -int(item.get("failed_basin_count", 0) or 0),
             -int(item.get("last_iteration", 0) or 0),
         )
     )
@@ -651,50 +622,61 @@ def build_current_reference_denylist_payload(
     }
 
 
-def format_current_reference_denylist_markdown(payload: dict[str, Any], *, limit: int = CURRENT_REFERENCE_DENYLIST_LIMIT) -> str:
+def format_direction_board_markdown(payload: dict[str, Any], *, limit: int = CURRENT_REFERENCE_DENYLIST_LIMIT) -> str:
     items = list(payload.get("items", []))
     lines = [
-        f"# Current Reference Denylist ({str(payload.get('score_regime', '')).strip() or 'current'})",
+        f"# Direction Board ({str(payload.get('score_regime', '')).strip() or 'current'})",
         "",
         "用法：",
-        "- 这是一份当前 active reference 作用域下的调法 denylist，不是全局因子黑名单。",
-        "- 它只总结当前 active reference 下，已经被反复证伪的调法模式；reference 刷新后会随 code hash 一起重算。",
-        "- 它不是运行时硬拦截。planner 必须先读，reviewer 可据此要求更强 proof 或直接打回。",
-        "- `HARD_BAN` 只针对当前 reference 下证据最强的坏模式；若你真要继续，必须明确证明目标侧、最终放行链和真实交易路径层级都不同。",
-        "- `PROOF_REQUIRED` 说明这条线没有被彻底封死，但没有新证据就不要继续。",
+        "- 这是一份当前 active reference 作用域下的方向账本，不是全局因子黑名单，也不是运行时硬门。",
+        "- 它只记录 planner 主方向最近的后验结果；reference 刷新后会随 code hash 一起重算。",
+        "- `HOT` 只表示该主方向最近已经连续失败很多次；不是永久封禁。",
+        "- reviewer 只在命中 `HOT` 时额外要求结构性差异，不会因为解释不漂亮就默认打回。",
         "",
         f"- 当前 reference hash: `{_truncate(str(payload.get('active_reference_code_hash', '')).strip() or '-', 18)}`",
         f"- 当前 reference 作用域样本数: {int(payload.get('scope_entry_count', 0) or 0)}",
         "",
         "## 当前列表",
-        "| 等级 | cluster | changed_regions | target | 次数 | noop | duplicate_history | failed_basin | best_delta | 最近轮次 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 等级 | 主方向 | 当前连败 | 总尝试 | 失败 | exception_win | best_delta | 最近热区 | 最近轮次 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     if not items:
-        lines.append("| - | - | - | - | 0 | 0 | 0 | 0 | 0.00 | - |")
+        lines.append("| OPEN | - | 0 | 0 | 0 | 0 | 0.00 | - | - |")
         lines.append("")
-        lines.append("- 当前没有足够证据把任何调法列进 denylist。")
+        lines.append("- 当前还没有形成明显的方向热度。")
         return "\n".join(lines)
 
     for item in items[: max(1, limit)]:
-        pattern = item.get("pattern", {}) if isinstance(item.get("pattern"), dict) else {}
-        changed_regions = ",".join(pattern.get("changed_regions", []) or []) or "-"
         lines.append(
-            f"| {item.get('level', '-')} | {pattern.get('cluster', '-') or '-'} | "
-            f"{_truncate(changed_regions, 42)} | {pattern.get('target', '-') or '-'} | "
-            f"{int(item.get('attempts', 0) or 0)} | {int(item.get('noop_count', 0) or 0)} | "
-            f"{int(item.get('duplicate_history_count', 0) or 0)} | {int(item.get('failed_basin_count', 0) or 0)} | "
-            f"{float(item.get('best_delta', 0.0) or 0.0):.2f} | {int(item.get('last_iteration', 0) or 0) or '-'} |"
-        )
-        lines.append(
-            f"- 调法画像: families={','.join(pattern.get('families', []) or []) or '-'}; "
-            f"params={','.join(pattern.get('params', []) or []) or '-'}"
+            f"| {item.get('level', '-')} | {item.get('primary_direction', '-') or '-'} | "
+            f"{int(item.get('current_failure_streak', 0) or 0)} | {int(item.get('attempts', 0) or 0)} | "
+            f"{int(item.get('failures', 0) or 0)} | {int(item.get('exception_win_count', 0) or 0)} | "
+            f"{float(item.get('best_delta', 0.0) or 0.0):.2f} | "
+            f"{_truncate(','.join(item.get('top_shadow_keys', []) or []) or '-', 42)} | "
+            f"{int(item.get('last_iteration', 0) or 0) or '-'} |"
         )
         lines.append(f"- 最近原因: {'；'.join(item.get('top_reasons', []) or ['-'])}")
         lines.append(f"- 高频标签: {', '.join(item.get('top_tags', []) or ['-'])}")
         lines.append(f"- 使用建议: {item.get('hint', '-')}")
         lines.append("")
     return "\n".join(lines).rstrip()
+
+
+def build_current_reference_denylist_payload(
+    entries: list[dict[str, Any]],
+    *,
+    score_regime: str = "",
+    active_reference_code_hash: str = "",
+) -> dict[str, Any]:
+    return build_direction_board_payload(
+        entries,
+        score_regime=score_regime,
+        active_reference_code_hash=active_reference_code_hash,
+    )
+
+
+def format_current_reference_denylist_markdown(payload: dict[str, Any], *, limit: int = CURRENT_REFERENCE_DENYLIST_LIMIT) -> str:
+    return format_direction_board_markdown(payload, limit=limit)
 
 
 def _normalize_cluster_name(raw: Any) -> str:
@@ -813,12 +795,22 @@ def region_families_for_regions(regions: list[str] | tuple[str, ...]) -> tuple[s
         "short_bounce_fail_ok": "entry_path",
         "short_trend_reaccel_ok": "entry_path",
         "short_final_veto_clear": "entry_path",
+        "normalize_entry_signal": "strategy",
+        "strategy_decision": "strategy",
         "strategy": "strategy",
     }
     normalized = []
     for region in regions:
         name = str(region).strip()
-        family = family_map.get(name, name)
+        if not name:
+            continue
+        family = family_map.get(name, "")
+        if not family and name.isupper():
+            family = "structure"
+        if not family and name.startswith("_"):
+            family = "structure"
+        if not family:
+            family = name
         if family and family not in normalized:
             normalized.append(family)
     return tuple(normalized)
@@ -877,6 +869,100 @@ def target_family_from_text(
     if long_hits > 0 and short_hits > 0:
         return "mixed"
     return "unknown"
+
+
+def _normalize_primary_direction_text(raw: Any) -> str:
+    text = " ".join(str(raw or "").split())
+    if not text or "|" not in text:
+        return ""
+    domain, label = [part.strip() for part in text.split("|", 1)]
+    domain = domain.lower()
+    if domain not in PRIMARY_DIRECTION_DOMAINS or not label or "|" in label:
+        return ""
+    return f"{domain} | {label}"
+
+
+def primary_direction_for_entry(entry: dict[str, Any]) -> str:
+    for key in ("primary_direction", "declared_primary_direction"):
+        normalized = _normalize_primary_direction_text(entry.get(key, ""))
+        if normalized:
+            return normalized
+    target = str(entry.get("target_family", "")).strip().lower()
+    if target in {"long", "short", "mixed"}:
+        return f"{target} | 历史遗留方向"
+    return "structure | 历史遗留方向"
+
+
+def primary_direction_domain(direction_text: Any) -> str:
+    normalized = _normalize_primary_direction_text(direction_text)
+    if not normalized:
+        return "structure"
+    return normalized.split("|", 1)[0].strip()
+
+
+def _direction_failure_layer(entry: dict[str, Any]) -> str:
+    outcome = str(entry.get("outcome", "")).strip()
+    stop_stage = str(entry.get("stop_stage", "")).strip()
+    if outcome == "behavioral_noop" or stop_stage == "behavioral_noop":
+        return "behavioral_noop"
+    if outcome == "runtime_failed":
+        return str(entry.get("runtime_failure_stage", "")).strip() or "runtime"
+    if outcome == "early_rejected" or stop_stage == "early_reject":
+        return "early_reject"
+    if outcome == "duplicate_skipped" and stop_stage == "duplicate_history":
+        return "duplicate_history"
+    if outcome == "duplicate_skipped" and stop_stage == "duplicate_result_basin":
+        return "result_basin"
+    ordinary_families = sorted(
+        str(item).strip()
+        for item in entry.get("system_ordinary_region_families", []) or entry.get("ordinary_region_families", [])
+        if str(item).strip()
+    )
+    if ordinary_families:
+        return ordinary_families[0]
+    return stop_stage or outcome or "unknown"
+
+
+def direction_shadow_key_for_entry(entry: dict[str, Any]) -> str:
+    stored = str(entry.get("direction_shadow_key", "")).strip()
+    if stored:
+        return stored
+    ordinary_families = sorted(
+        str(item).strip()
+        for item in entry.get("system_ordinary_region_families", []) or entry.get("ordinary_region_families", [])
+        if str(item).strip()
+    )
+    param_families = sorted(
+        str(item).strip()
+        for item in entry.get("system_param_families", []) or entry.get("param_families", [])
+        if str(item).strip()
+    )
+    family_part = ",".join(ordinary_families[:3] or param_families[:2]) or "none"
+    return "|".join(
+        [
+            primary_direction_domain(primary_direction_for_entry(entry)),
+            _direction_failure_layer(entry),
+            family_part,
+        ]
+    )
+
+
+def _direction_entry_is_exception_win(entry: dict[str, Any]) -> bool:
+    if bool(entry.get("direction_exception_win")):
+        return True
+    if str(entry.get("outcome", "")).strip() == "accepted":
+        return True
+    return _score_value(entry.get("promotion_delta")) > DIRECTION_EXCEPTION_DELTA
+
+
+def _direction_entry_is_failure(entry: dict[str, Any]) -> bool:
+    outcome = str(entry.get("outcome", "")).strip()
+    stop_stage = str(entry.get("stop_stage", "")).strip()
+    if outcome in {"rejected", "runtime_failed", "behavioral_noop", "early_rejected"}:
+        return True
+    if outcome == "duplicate_skipped" and stop_stage in {"duplicate_history", "duplicate_result_basin"}:
+        return True
+    return False
 
 
 def _system_cluster_key_from_regions(
@@ -1022,7 +1108,7 @@ def exploration_signature_for_candidate(
     editable_regions: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     system_signature: dict[str, object] | None = None
-    if base_source is not None and editable_regions:
+    if base_source is not None:
         system_signature = build_system_edit_signature(
             base_source,
             getattr(candidate, "strategy_code", ""),
@@ -1720,28 +1806,36 @@ def _direction_risk_board(entries: list[dict[str, Any]], limit: int) -> list[str
         return []
 
     buckets: dict[str, dict[str, Any]] = {}
+    streaks: dict[str, int] = defaultdict(int)
     for entry in entries:
-        cluster = cluster_key_for_entry(entry)
-        outcome = _outcome_bucket(str(entry.get("outcome", "")))
+        direction_text = primary_direction_for_entry(entry)
         promotion_delta = _score_value(entry.get("promotion_delta"))
         bucket = buckets.setdefault(
-            cluster,
+            direction_text,
             {
                 "attempts": 0,
                 "failures": 0,
-                "zero_delta": 0,
-                "runtime_errors": 0,
+                "current_failure_streak": 0,
+                "exception_win_count": 0,
                 "best_delta": 0.0,
                 "tags": [],
+                "shadow_keys": [],
             },
         )
         bucket["attempts"] += 1
-        if outcome == "rejected":
+        if _direction_entry_is_exception_win(entry):
+            bucket["exception_win_count"] += 1
+            streaks[direction_text] = 0
+        elif _direction_entry_is_failure(entry):
             bucket["failures"] += 1
-        if abs(promotion_delta) <= 1e-9:
-            bucket["zero_delta"] += 1
-        if str(entry.get("outcome", "")) == "runtime_failed":
-            bucket["runtime_errors"] += 1
+            streaks[direction_text] += 1
+            bucket["current_failure_streak"] = max(
+                int(bucket["current_failure_streak"]),
+                int(streaks[direction_text]),
+            )
+            shadow_key = direction_shadow_key_for_entry(entry)
+            if shadow_key and shadow_key not in bucket["shadow_keys"]:
+                bucket["shadow_keys"].append(shadow_key)
         bucket["best_delta"] = max(bucket["best_delta"], promotion_delta)
         for tag in entry.get("change_tags", []):
             tag_text = str(tag).strip()
@@ -1751,38 +1845,27 @@ def _direction_risk_board(entries: list[dict[str, Any]], limit: int) -> list[str
     ordered = sorted(
         buckets.items(),
         key=lambda item: (
-            {"EXHAUSTED": 0, "SATURATED": 1, "RUNTIME_RISK": 2, "WARM": 3, "ACTIVE_WINNER": 4, "OPEN": 5}[
-                _risk_label(
-                    attempts=int(item[1]["attempts"]),
-                    failures=int(item[1]["failures"]),
-                    zero_delta=int(item[1]["zero_delta"]),
-                    runtime_errors=int(item[1]["runtime_errors"]),
-                    best_delta=float(item[1]["best_delta"]),
-                )
-            ],
+            _direction_heat_level_rank(_direction_heat_level(int(item[1]["current_failure_streak"]))),
+            -int(item[1]["current_failure_streak"]),
             -int(item[1]["attempts"]),
             -int(item[1]["failures"]),
         ),
     )
 
     lines = [
-        "方向风险表（必须先读）:",
-        "| 方向簇 | 最近尝试 | 失败 | 零增益 | 运行报错 | 最佳delta | 标签 | 最近标签 |",
+        "方向账本摘要（必须先读）:",
+        "| 主方向 | 当前连败 | 总尝试 | 失败 | exception_win | best_delta | 热度 | 最近热区 |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for cluster, stats in ordered[:limit]:
-        label = _risk_label(
-            attempts=int(stats["attempts"]),
-            failures=int(stats["failures"]),
-            zero_delta=int(stats["zero_delta"]),
-            runtime_errors=int(stats["runtime_errors"]),
-            best_delta=float(stats["best_delta"]),
-        )
+    for direction_text, stats in ordered[:limit]:
+        label = _direction_heat_level(int(stats["current_failure_streak"]))
         tags = _truncate(",".join(stats["tags"][:4]) or "-", 48)
         lines.append(
-            f"| {cluster} | {stats['attempts']} | {stats['failures']} | {stats['zero_delta']} | "
-            f"{stats['runtime_errors']} | {stats['best_delta']:.2f} | {label} | {tags} |"
+            f"| {direction_text} | {stats['current_failure_streak']} | {stats['attempts']} | {stats['failures']} | "
+            f"{stats['exception_win_count']} | {stats['best_delta']:.2f} | {label} | "
+            f"{_truncate(','.join(stats['shadow_keys'][:2]) or '-', 42)} |"
         )
+        lines.append(f"- 高频标签: {tags}")
     return lines
 
 
@@ -2914,6 +2997,8 @@ def _write_prompt_memory_snapshots(
         "failure_wiki_md",
         "failure_wiki_json",
         "duplicate_watchlist_md",
+        "direction_board_md",
+        "direction_board_json",
         "current_reference_denylist_md",
         "current_reference_denylist_json",
     ):
@@ -2944,16 +3029,16 @@ def _write_prompt_memory_snapshots(
             score_regime=str(current_stage_meta.get("score_regime", "")).strip(),
         )
     )
-    reference_denylist_payload = build_current_reference_denylist_payload(
+    direction_board_payload = build_direction_board_payload(
         all_entries,
         score_regime=str(current_stage_meta.get("score_regime", "")).strip(),
         active_reference_code_hash=str(current_stage_meta.get("active_reference_code_hash", "")).strip(),
     )
-    paths["current_reference_denylist_json"].write_text(
-        json.dumps(reference_denylist_payload, ensure_ascii=False, indent=2)
+    paths["direction_board_json"].write_text(
+        json.dumps(direction_board_payload, ensure_ascii=False, indent=2)
     )
-    paths["current_reference_denylist_md"].write_text(
-        format_current_reference_denylist_markdown(reference_denylist_payload)
+    paths["direction_board_md"].write_text(
+        format_direction_board_markdown(direction_board_payload)
     )
 
 
@@ -3114,13 +3199,12 @@ def _recent_round_meta_lines(entries: list[dict[str, Any]], start_index: int) ->
     for round_label, entry in zip(display_labels, entries):
         candidate_id = _truncate(entry.get("candidate_id", "unknown"), 28)
         cluster = _truncate(cluster_key_for_entry(entry) or "-", 24)
+        primary_direction = _truncate(primary_direction_for_entry(entry), 32)
         tags = _truncate(",".join(entry.get("change_tags", [])) or "-", 40)
         regions = _truncate(",".join(_entry_changed_regions(entry)) or "-", 20)
         summary = _truncate(entry.get("note") or entry.get("hypothesis") or "-", 64)
-        complexity = _truncate(entry.get("system_complexity_summary") or "-", 48)
-        bloat_suffix = "; bloat=YES" if bool(entry.get("system_bloat_flag")) else ""
         lines.append(
-            f"- {round_label} {candidate_id}: cluster={cluster}; tags={tags}; regions={regions}; complexity={complexity}{bloat_suffix}; 摘要={summary}"
+            f"- {round_label} {candidate_id}: direction={primary_direction}; cluster={cluster}; tags={tags}; regions={regions}; 摘要={summary}"
         )
     return lines
 
@@ -3153,8 +3237,8 @@ def _stage_round_labels(entries: list[dict[str, Any]], start_index: int) -> list
 
 def _empty_prompt_tables(stage_title: str = "当前 stage") -> list[str]:
     return [
-        "方向风险表（必须先读）:",
-        "| 方向簇 | 最近尝试 | 失败 | 零增益 | 运行报错 | 最佳delta | 标签 | 最近标签 |",
+        "方向账本摘要（必须先读）:",
+        "| 主方向 | 当前连败 | 总尝试 | 失败 | exception_win | 最佳delta | 热度 | 最近热区 |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
         "| - | 0 | 0 | 0 | 0 | 0.00 | OPEN | - |",
         "",
@@ -3388,11 +3472,6 @@ def build_journal_prompt_summary(
                     parts.extend(board_lines)
                     parts.append("")
 
-                overheat_lines = _cluster_overheat_lines(board_entries, limit=min(8, limit))
-                if overheat_lines:
-                    parts.extend(overheat_lines)
-                    parts.append("")
-
                 accepted_count = sum(1 for entry in board_entries if entry.get("outcome") == "accepted")
                 rejected_count = sum(1 for entry in board_entries if entry.get("outcome") == "rejected")
                 duplicate_skipped_count = sum(1 for entry in board_entries if entry.get("outcome") == "duplicate_skipped")
@@ -3400,7 +3479,6 @@ def build_journal_prompt_summary(
                 exploration_blocked_count = sum(1 for entry in board_entries if entry.get("outcome") == "exploration_blocked")
                 early_rejected_count = sum(1 for entry in board_entries if entry.get("outcome") == "early_rejected")
                 runtime_failed_count = sum(1 for entry in board_entries if entry.get("outcome") == "runtime_failed")
-                bloat_flag_count = sum(1 for entry in board_entries if bool(entry.get("system_bloat_flag")))
                 repeated_basin_count = _repeated_result_basin_entry_count(board_entries)
                 operating_metrics = _stage_operating_metrics(
                     board_entries,
@@ -3414,7 +3492,7 @@ def build_journal_prompt_summary(
                     f"行为无变化 {behavioral_noop_count}，"
                     f"探索拦截 {exploration_blocked_count}，"
                     f"提前淘汰 {early_rejected_count}，运行失败 {runtime_failed_count}，"
-                    f"复杂度超标 {bloat_flag_count}，技术空转 {current_stage_technical_invalid_count}。"
+                    f"技术空转 {current_stage_technical_invalid_count}。"
                 )
                 if prompt_compact:
                     weak_side = str(operating_metrics.get("weak_side", "")).strip() or "-"

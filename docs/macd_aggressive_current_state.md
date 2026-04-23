@@ -118,7 +118,7 @@
 2. workspace 局部 `AGENTS.md`
 3. planner runtime prompt
 4. `wiki/reviewer_summary_card.md`
-5. `wiki/current_reference_denylist.md`
+5. `wiki/direction_board.md`
 6. `wiki/latest_history_package.md`
 7. `wiki/failure_wiki.md`
 8. `wiki/duplicate_watchlist.md`
@@ -136,7 +136,7 @@
 当前 planner 的顺序约束：
 
 - 先看上一轮 `reviewer` 总结卡
-- 再看 `current_reference_denylist`，确认当前 champion 下哪些调法已经被反复证伪
+- 再看 `direction_board`，确认当前主方向是否已经高热，以及这次是不是还在同一热区横移
 - 再看结构化失败反馈和当前诊断，确认当前到底是 `long_impulse / long_retest / long_reaccel / long_relay` 还是 `short_impulse / short_retest / short_reaccel` 在拖分
 - 先复盘上一轮为什么失败、失败更像发生在哪一层交易路径
 - 先决定这轮继续同方向还是转向，再写 draft brief
@@ -146,14 +146,14 @@
 当前 edit_worker 约束：
 
 - worker 仍然只改 [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)
-- 主进程会把非可编辑区域自动回灌到当前 base
-- 真正会进入 diff / smoke / full eval 的，只是可编辑区域里的最终落地改动
+- 整份策略文件都允许修改，但改动必须克制、结构准确、添加有必要
+- 真正会进入 diff / smoke / full eval 的，是最终源码里的真实落地改动
 
 当前 reviewer 的职责：
 
 - reviewer 不负责提出新方向，只负责审稿
 - reviewer 只能输出 `PASS` 或 `REVISE`
-- reviewer 会把 `current_reference_denylist` 当成高优先级证据，但它只审“当前 draft 值不值得继续”，不会把因子永久封死
+- reviewer 会把 `direction_board` 当成高优先级证据，但它只在命中高热方向时检查“有没有结构性差异”，不会把方向永久封死
 - 若 `REVISE`，必须指出当前 draft 仍落在哪个失败近邻，以及 planner 下一版至少要换哪一层
 - 未通过 reviewer 的 brief 不会进入 `edit_worker`
 
@@ -181,6 +181,8 @@
 - 自动拒绝“只是偏胖”的候选
 - 自动触发压缩任务
 - 自动切另一种因子准入模式
+- 把复杂度提示反复塞进 planner / reviewer prompt
+- 把复杂度状态发到 Discord 作为流程提示
 
 推荐 SOP：
 

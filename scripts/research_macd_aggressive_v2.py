@@ -64,7 +64,6 @@ from research_v2.journal import (
 )
 from research_v2.notifications import build_discord_summary_message, load_discord_config, send_discord_message
 from research_v2.prompting import (
-    EDITABLE_REGIONS,
     build_strategy_agents_instructions,
     build_strategy_candidate_summary_prompt,
     build_strategy_edit_worker_prompt,
@@ -90,13 +89,9 @@ from research_v2.strategy_code import (
     build_strategy_complexity_pressure,
     build_system_edit_signature,
     build_strategy_complexity_delta,
-    format_strategy_complexity_headroom,
     load_strategy_source,
     normalize_strategy_source,
-    repair_editable_region_drift,
-    repair_missing_required_functions,
     source_hash,
-    validate_editable_region_boundaries,
     validate_strategy_source,
     write_strategy_source,
 )
@@ -114,7 +109,8 @@ VALIDATION_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "valida
 TEST_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "test")
 SCORE_REGIME = "trend_capture_v6"
 MODEL_WORKSPACE_STRATEGY_PATH = Path("src/strategy_macd_aggressive.py")
-PLANNER_BRIEF_REQUIRED_FIELDS = ("hypothesis", "change_plan", "novelty_proof", "change_tags")
+PRIMARY_DIRECTION_DOMAINS = frozenset({"long", "short", "mixed", "structure"})
+PLANNER_BRIEF_REQUIRED_FIELDS = ("primary_direction", "hypothesis", "change_plan", "novelty_proof", "change_tags")
 MAX_PLANNER_BRIEF_REPAIR_ATTEMPTS = 1
 REVIEWER_REQUIRED_FIELDS = (
     "verdict",
@@ -147,9 +143,9 @@ logging.basicConfig(
 @dataclass(frozen=True)
 class StrategyRoundBrief:
     candidate_id: str
+    primary_direction: str
     hypothesis: str
     change_plan: str
-    closest_failed_cluster: str
     novelty_proof: str
     change_tags: tuple[str, ...]
     expected_effects: tuple[str, ...]
@@ -495,8 +491,8 @@ def _prepare_agent_workspace(
         "duplicate_watchlist": RUNTIME.paths.memory_dir / "wiki/duplicate_watchlist.md",
         "failure_wiki_md": RUNTIME.paths.memory_dir / "wiki/failure_wiki.md",
         "failure_wiki_json": RUNTIME.paths.memory_dir / "wiki/failure_wiki_index.json",
-        "current_reference_denylist_md": RUNTIME.paths.memory_dir / "wiki/current_reference_denylist.md",
-        "current_reference_denylist_json": RUNTIME.paths.memory_dir / "wiki/current_reference_denylist.json",
+        "direction_board_md": RUNTIME.paths.memory_dir / "wiki/direction_board.md",
+        "direction_board_json": RUNTIME.paths.memory_dir / "wiki/direction_board.json",
         "reviewer_summary_card": RUNTIME.paths.memory_dir / "wiki/reviewer_summary_card.md",
         "last_rejected_candidate": RUNTIME.paths.memory_dir / "wiki/last_rejected_candidate.py",
         "last_rejected_snapshot": RUNTIME.paths.memory_dir / "wiki/last_rejected_snapshot.md",
@@ -508,8 +504,8 @@ def _prepare_agent_workspace(
                 "duplicate_watchlist": workspace_root / "wiki/duplicate_watchlist.md",
                 "failure_wiki_md": workspace_root / "wiki/failure_wiki.md",
                 "failure_wiki_json": workspace_root / "wiki/failure_wiki_index.json",
-                "current_reference_denylist_md": workspace_root / "wiki/current_reference_denylist.md",
-                "current_reference_denylist_json": workspace_root / "wiki/current_reference_denylist.json",
+                "direction_board_md": workspace_root / "wiki/direction_board.md",
+                "direction_board_json": workspace_root / "wiki/direction_board.json",
                 "reviewer_summary_card": workspace_root / "wiki/reviewer_summary_card.md",
                 "last_rejected_candidate": workspace_root / "wiki/last_rejected_candidate.py",
                 "last_rejected_snapshot": workspace_root / "wiki/last_rejected_snapshot.md",
@@ -556,6 +552,7 @@ def _persist_reviewer_summary_card(
                 f"- iteration: {iteration_id}",
                 f"- stage_label: {stage_label}",
                 f"- candidate_id: {round_brief.candidate_id or '-'}",
+                f"- primary_direction: {round_brief.primary_direction or '-'}",
                 f"- verdict: {decision.verdict}",
                 f"- reviewer_summary: {decision.reviewer_summary or '-'}",
                 f"- rejection_type: {decision.rejection_type or '-'}",
@@ -609,6 +606,7 @@ def _persist_last_rejected_candidate_snapshot(
                 "- 如果上一版里有局部思路仍然值得保留，必须在正确基底上重新实现。",
                 "",
                 f"- candidate_id: {failed_candidate.candidate_id or '-'}",
+                f"- primary_direction: {failed_candidate.primary_direction or '-'}",
                 f"- blocked_kind: {str(block_info.get('block_kind', '')).strip() or '-'}",
                 f"- blocked_cluster: {str(block_info.get('blocked_cluster', '')).strip() or '-'}",
                 f"- blocked_reason: {str(block_info.get('blocked_reason', '')).strip() or '-'}",
@@ -729,18 +727,18 @@ def _current_stage_journal_entries(entries: list[dict[str, Any]]) -> list[dict[s
 
 
 def _resolve_iteration_factor_change_state(journal_entries: list[dict[str, Any]]) -> dict[str, Any]:
+    _ = journal_entries
     return {
-        "mode": "default",
-        "reason": "当前 stage 不再自动切换因子准入或压缩模式；新增、删减和替换都由本轮假设自行决定。",
+        "mode": "",
         "guidance_level": "manual",
         "trailing_stalls": 0,
-        "factor_admission_rounds": 0,
+        "reason": "factor_change_mode 已移除；研究器不再自动切换模式。",
     }
 
 
 def _resolve_iteration_factor_change_mode(journal_entries: list[dict[str, Any]]) -> tuple[str, str]:
-    state = _resolve_iteration_factor_change_state(journal_entries)
-    return str(state.get("mode", "default")).strip() or "default", str(state.get("reason", "")).strip()
+    _ = journal_entries
+    return "", "factor_change_mode 已移除；研究器不再自动切换模式。"
 
 
 def _load_saved_reference_state() -> dict[str, Any]:
@@ -1470,15 +1468,10 @@ def _behavioral_noop_block_info(
     candidate_signature = exploration_signature_for_candidate(
         candidate,
         base_source=base_source,
-        editable_regions=EDITABLE_REGIONS,
     )
     cluster_key = (
         str(candidate_signature.get("cluster_key", "")).strip()
-        or cluster_key_for_components(
-            candidate.closest_failed_cluster,
-            candidate.change_tags,
-        )
-        or str(candidate.closest_failed_cluster).strip()
+        or cluster_key_for_components("", candidate.change_tags)
         or "-"
     )
     changed_regions = ", ".join(sorted(candidate_signature["changed_regions"])) or "-"
@@ -1550,7 +1543,6 @@ def _candidate_invalid_generation_block_info(
     candidate_signature = exploration_signature_for_candidate(
         candidate,
         base_source=base_source,
-        editable_regions=EDITABLE_REGIONS,
     )
     candidate_hash = source_hash(candidate.strategy_code)
     base_hash = source_hash(base_source)
@@ -1580,10 +1572,10 @@ def _candidate_invalid_generation_block_info(
         f"- 系统检测改动区域: {', '.join(actual_changed_regions) or '-'}",
         f"- diff 摘要条数: {len(diff_summary)}",
         f"- 无效原因: {'；'.join(invalid_reasons)}",
-        "- `wiki/current_reference_denylist.md` / `wiki/duplicate_watchlist.md` / `wiki/failure_wiki.md` / `wiki/latest_history_package.md` 是高优先级参考，但读不到它们不是合法 no-edit 理由。",
+        "- `wiki/direction_board.md` / `wiki/duplicate_watchlist.md` / `wiki/failure_wiki.md` / `wiki/latest_history_package.md` 是高优先级参考，但读不到它们不是合法 no-edit 理由。",
         "- 即使辅助记忆文件暂不可用，也必须继续以 `src/strategy_macd_aggressive.py` 为事实源直接改代码。",
         "- 禁止继续提交 `blocked` / `no_edit` / `no_change` / “未执行代码改动” 这类占位答案。",
-        "- 下一版提交前自检：至少一个可编辑区域真的发生变化，且文本摘要只描述你已经实际落到代码里的改动。",
+        "- 下一版提交前自检：至少一处真实源码区域真的发生变化，且文本摘要只描述你已经实际落到代码里的改动。",
     ]
     if blocked_tags:
         feedback_lines.append(f"- 当前候选使用了占位标签: {', '.join(blocked_tags)}")
@@ -1606,11 +1598,11 @@ def _candidate_invalid_generation_block_info(
 
 MODEL_RESPONSE_FIELDS = (
     "candidate_id",
+    "primary_direction",
     "hypothesis",
     "change_plan",
     "change_tags",
     "expected_effects",
-    "closest_failed_cluster",
     "novelty_proof",
     "core_factors",
 )
@@ -1621,11 +1613,11 @@ def _build_field_pattern(*field_names: str) -> re.Pattern[str]:
 
 MODEL_RESPONSE_FIELD_PATTERN = _build_field_pattern(
     "candidate_id",
+    "primary_direction",
     "hypothesis",
     "change_plan",
     "change_tags",
     "expected_effects",
-    "closest_failed_cluster",
     "novelty_proof",
     "core_factors",
 )
@@ -1637,6 +1629,7 @@ REVIEWER_RESPONSE_FIELD_PATTERN = _build_field_pattern(
     "must_change",
     "why_not_new",
 )
+UNKNOWN_RESPONSE_FIELD_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*\s*:\s*.+$", re.IGNORECASE)
 EDIT_COMPLETION_TOKEN = "EDIT_DONE"
 NO_EDIT_ERROR_MESSAGE = "candidate missing actual changed regions"
 
@@ -1664,6 +1657,9 @@ def _response_field_lines(raw_text: str, *, field_pattern: re.Pattern[str] = MOD
             field_lines.setdefault(current_field, [])
             if value:
                 field_lines[current_field].append(value)
+            continue
+        if UNKNOWN_RESPONSE_FIELD_PATTERN.match(stripped):
+            current_field = ""
             continue
         if not current_field:
             continue
@@ -1705,6 +1701,27 @@ def _parse_change_tags(lines: list[str]) -> tuple[str, ...]:
         if tag not in deduped:
             deduped.append(tag)
     return tuple(deduped[:6])
+
+
+def _normalize_primary_direction(value: str) -> str:
+    cleaned = " ".join(str(value or "").split())
+    if not cleaned:
+        raise StrategySourceError("primary_direction is empty")
+    parts = [part.strip() for part in cleaned.split("|", 1)]
+    if len(parts) != 2:
+        raise StrategySourceError("primary_direction must use `domain | label` format")
+    domain, label = parts
+    domain = domain.lower()
+    if domain not in PRIMARY_DIRECTION_DOMAINS:
+        raise StrategySourceError(
+            "primary_direction domain must be one of: "
+            + ", ".join(sorted(PRIMARY_DIRECTION_DOMAINS))
+        )
+    if not label:
+        raise StrategySourceError("primary_direction label is empty")
+    if "|" in label:
+        raise StrategySourceError("primary_direction only allows one `domain | label` layer")
+    return f"{domain} | {label}"
 
 
 def _parse_expected_effects(lines: list[str]) -> tuple[str, ...]:
@@ -1759,11 +1776,11 @@ def _parse_model_candidate_payload(raw_text: str) -> dict[str, Any]:
             "__raw_text__": text,
             "__format_error__": "missing_field_contract",
             "candidate_id": "",
+            "primary_direction": "",
             "hypothesis": "",
             "change_plan": "",
             "change_tags": [],
             "expected_effects": [],
-            "closest_failed_cluster": "",
             "novelty_proof": "",
             "core_factors": [],
         }
@@ -1771,11 +1788,11 @@ def _parse_model_candidate_payload(raw_text: str) -> dict[str, Any]:
     return {
         "__raw_text__": text,
         "candidate_id": _collapse_field_text(field_lines.get("candidate_id", [])),
+        "primary_direction": _collapse_field_text(field_lines.get("primary_direction", [])),
         "hypothesis": _collapse_field_text(field_lines.get("hypothesis", [])),
         "change_plan": _collapse_field_text(field_lines.get("change_plan", [])),
         "change_tags": list(_parse_change_tags(field_lines.get("change_tags", []))),
         "expected_effects": list(_parse_expected_effects(field_lines.get("expected_effects", []))),
-        "closest_failed_cluster": _collapse_field_text(field_lines.get("closest_failed_cluster", [])),
         "novelty_proof": _collapse_field_text(field_lines.get("novelty_proof", [])),
         "core_factors": [
             {
@@ -1823,10 +1840,13 @@ def _round_brief_missing_fields(payload: dict[str, Any]) -> tuple[str, ...]:
         return PLANNER_BRIEF_REQUIRED_FIELDS
 
     hypothesis = str(payload.get("hypothesis", "")).strip()
+    primary_direction = str(payload.get("primary_direction", "")).strip()
     change_plan = str(payload.get("change_plan", "")).strip()
     novelty_proof = str(payload.get("novelty_proof", "")).strip()
     change_tags = tuple(str(item).strip() for item in payload.get("change_tags", []) if str(item).strip())
 
+    if not primary_direction:
+        missing.append("primary_direction")
     if not hypothesis:
         missing.append("hypothesis")
     if not change_plan:
@@ -1840,12 +1860,12 @@ def _round_brief_missing_fields(payload: dict[str, Any]) -> tuple[str, ...]:
 
 def _validate_round_brief_payload(payload: dict[str, Any]) -> None:
     missing_fields = _round_brief_missing_fields(payload)
-    if not missing_fields:
-        return
-    raise StrategySourceError(
-        "planner round brief missing required fields: "
-        + ", ".join(missing_fields)
-    )
+    if missing_fields:
+        raise StrategySourceError(
+            "planner round brief missing required fields: "
+            + ", ".join(missing_fields)
+        )
+    _normalize_primary_direction(str(payload.get("primary_direction", "")).strip())
 
 
 def _reviewer_missing_fields(payload: dict[str, Any]) -> tuple[str, ...]:
@@ -1941,7 +1961,6 @@ def _actual_changed_regions(
     system_signature = build_system_edit_signature(
         base_source,
         strategy_code,
-        EDITABLE_REGIONS,
     )
     return tuple(sorted(str(item).strip() for item in system_signature["changed_regions"] if str(item).strip()))
 
@@ -2020,10 +2039,13 @@ def _no_edit_failure_candidate(
             if round_brief and round_brief.change_plan
             else "先直接修改 src/strategy_macd_aggressive.py；若文件 hash 不变，本轮不再承认任何说明文本。"
         ),
+        primary_direction=(
+            round_brief.primary_direction
+            if round_brief and round_brief.primary_direction
+            else "structure | no-edit 源码落地修复"
+        ),
         closest_failed_cluster=(
-            round_brief.closest_failed_cluster
-            if round_brief and round_brief.closest_failed_cluster
-            else "no_edit"
+            cluster_key_for_components("", change_tags) or "no_edit"
         ),
         novelty_proof=novelty_proof,
         change_tags=change_tags,
@@ -2057,21 +2079,19 @@ def _core_factors_from_payload(payload: dict[str, Any]) -> tuple[StrategyCoreFac
 def _round_brief_from_payload(payload: dict[str, Any]) -> StrategyRoundBrief:
     _validate_round_brief_payload(payload)
     change_tags = tuple(str(item).strip() for item in payload.get("change_tags", []) if str(item).strip())
+    primary_direction = _normalize_primary_direction(str(payload.get("primary_direction", "")).strip())
     hypothesis = str(payload.get("hypothesis", "")).strip()
     change_plan = str(payload.get("change_plan", "")).strip()
     novelty_proof = str(payload.get("novelty_proof", "")).strip()
-    closest_failed_cluster = str(payload.get("closest_failed_cluster", "")).strip()
     candidate_id = str(payload.get("candidate_id", "")).strip() or _auto_candidate_id(
         change_tags=change_tags,
         edited_regions=tuple(),
     )
-    if not closest_failed_cluster:
-        closest_failed_cluster = cluster_key_for_components("", change_tags) or "unknown_cluster"
     return StrategyRoundBrief(
         candidate_id=candidate_id,
+        primary_direction=primary_direction,
         hypothesis=hypothesis,
         change_plan=change_plan,
-        closest_failed_cluster=closest_failed_cluster,
         novelty_proof=novelty_proof,
         change_tags=change_tags,
         expected_effects=tuple(str(item).strip() for item in payload.get("expected_effects", []) if str(item).strip()),
@@ -2082,9 +2102,9 @@ def _round_brief_from_payload(payload: dict[str, Any]) -> StrategyRoundBrief:
 def _round_brief_from_candidate(candidate: StrategyCandidate) -> StrategyRoundBrief:
     return StrategyRoundBrief(
         candidate_id=candidate.candidate_id,
+        primary_direction=candidate.primary_direction,
         hypothesis=candidate.hypothesis,
         change_plan=candidate.change_plan,
-        closest_failed_cluster=candidate.closest_failed_cluster,
         novelty_proof=candidate.novelty_proof,
         change_tags=candidate.change_tags,
         expected_effects=candidate.expected_effects,
@@ -2095,11 +2115,11 @@ def _round_brief_from_candidate(candidate: StrategyCandidate) -> StrategyRoundBr
 def _round_brief_task_summary(round_brief: StrategyRoundBrief) -> str:
     lines = [
         f"- candidate_id: {round_brief.candidate_id or '-'}",
+        f"- primary_direction: {round_brief.primary_direction or '-'}",
         f"- hypothesis: {round_brief.hypothesis or '-'}",
         f"- change_plan: {round_brief.change_plan or '-'}",
         f"- change_tags: {', '.join(round_brief.change_tags) or '-'}",
         f"- expected_effects: {'；'.join(round_brief.expected_effects) or '-'}",
-        f"- closest_failed_cluster: {round_brief.closest_failed_cluster or '-'}",
         f"- novelty_proof: {round_brief.novelty_proof or '-'}",
     ]
     return "\n".join(lines)
@@ -2118,11 +2138,11 @@ def _rebase_candidate_metadata_to_final_code(
     region_families = tuple(sorted(region_families_for_regions(candidate.edited_regions)))
     prompt = build_strategy_candidate_summary_prompt(
         candidate_id=candidate.candidate_id,
+        primary_direction=round_brief.primary_direction,
         hypothesis=round_brief.hypothesis,
         change_plan=round_brief.change_plan,
         change_tags=round_brief.change_tags,
         expected_effects=round_brief.expected_effects,
-        closest_failed_cluster=round_brief.closest_failed_cluster,
         novelty_proof=round_brief.novelty_proof,
         edited_regions=candidate.edited_regions,
         region_families=region_families,
@@ -2151,7 +2171,8 @@ def _rebase_candidate_metadata_to_final_code(
         candidate_id=candidate.candidate_id,
         hypothesis=final_brief.hypothesis,
         change_plan=final_brief.change_plan,
-        closest_failed_cluster=final_brief.closest_failed_cluster,
+        primary_direction=final_brief.primary_direction,
+        closest_failed_cluster=cluster_key_for_components("", final_brief.change_tags) or candidate.closest_failed_cluster,
         novelty_proof=final_brief.novelty_proof,
         change_tags=final_brief.change_tags,
         edited_regions=candidate.edited_regions,
@@ -2176,7 +2197,8 @@ def _candidate_stub_from_round_brief(
         candidate_id=round_brief.candidate_id or _auto_candidate_id(change_tags=round_brief.change_tags, edited_regions=tuple()),
         hypothesis=round_brief.hypothesis or "未提供 hypothesis，等待同轮修复。",
         change_plan=round_brief.change_plan or "未提供 change_plan，等待同轮修复。",
-        closest_failed_cluster=round_brief.closest_failed_cluster or "unknown_cluster",
+        primary_direction=round_brief.primary_direction or "structure | 源码校验修复",
+        closest_failed_cluster=cluster_key_for_components("", round_brief.change_tags) or "unknown_cluster",
         novelty_proof=round_brief.novelty_proof or "源码校验失败，等待同轮修复。",
         change_tags=round_brief.change_tags,
         edited_regions=tuple(),
@@ -2196,24 +2218,11 @@ def _candidate_from_round_brief(
     if not workspace_strategy_file.exists():
         raise StrategySourceError(f"workspace strategy file missing: {workspace_strategy_file}")
     strategy_code = normalize_strategy_source(load_strategy_source(workspace_strategy_file))
-    strategy_code, rebased_non_editable = repair_editable_region_drift(
-        base_source,
-        strategy_code,
-        EDITABLE_REGIONS,
-    )
-    strategy_code, restored_functions = repair_missing_required_functions(
-        base_source,
-        strategy_code,
-        EDITABLE_REGIONS,
-    )
-    if rebased_non_editable or restored_functions:
-        write_strategy_source(workspace_strategy_file, strategy_code)
     validate_strategy_source(
         strategy_code,
         base_source=base_source,
         factor_change_mode=factor_change_mode,
     )
-    validate_editable_region_boundaries(base_source, strategy_code, EDITABLE_REGIONS)
     actual_changed_regions = _actual_changed_regions(
         base_source=base_source,
         strategy_code=strategy_code,
@@ -2229,7 +2238,8 @@ def _candidate_from_round_brief(
         candidate_id=candidate_id,
         hypothesis=round_brief.hypothesis or "未提供 hypothesis；本轮以真实源码 diff 为准。",
         change_plan=round_brief.change_plan or "未提供 change_plan；本轮以真实源码 diff 为准。",
-        closest_failed_cluster=round_brief.closest_failed_cluster or "unknown_cluster",
+        primary_direction=round_brief.primary_direction or "structure | 源码差异回写",
+        closest_failed_cluster=cluster_key_for_components("", change_tags) or "unknown_cluster",
         novelty_proof=round_brief.novelty_proof or "未提供 novelty_proof；系统将以真实源码 diff 判定本轮改动。",
         change_tags=change_tags,
         edited_regions=actual_changed_regions,
@@ -2239,8 +2249,6 @@ def _candidate_from_round_brief(
     )
     if not candidate.edited_regions:
         raise StrategySourceError("candidate missing actual changed regions")
-    if len(candidate.edited_regions) > len(EDITABLE_REGIONS):
-        raise StrategySourceError("candidate edited_regions exceeds editable region count")
     if len(set(candidate.edited_regions)) != len(candidate.edited_regions):
         raise StrategySourceError("candidate edited_regions contains duplicates")
     return candidate
@@ -2376,11 +2384,12 @@ def _candidate_from_invalid_round_brief_payload(
     base_source: str,
 ) -> StrategyCandidate:
     change_tags = tuple(str(item).strip() for item in payload.get("change_tags", []) if str(item).strip()) or ("invalid_brief",)
-    closest_failed_cluster = (
-        str(payload.get("closest_failed_cluster", "")).strip()
-        or cluster_key_for_components("", change_tags)
-        or "invalid_brief"
-    )
+    primary_direction_raw = str(payload.get("primary_direction", "")).strip()
+    try:
+        primary_direction = _normalize_primary_direction(primary_direction_raw)
+    except StrategySourceError:
+        primary_direction = "structure | 非法摘要修复"
+    closest_failed_cluster = cluster_key_for_components("", change_tags) or "invalid_brief"
     return StrategyCandidate(
         candidate_id=(
             str(payload.get("candidate_id", "")).strip()
@@ -2394,6 +2403,7 @@ def _candidate_from_invalid_round_brief_payload(
             str(payload.get("change_plan", "")).strip()
             or "重新按字段契约返回 hypothesis、change_plan、novelty_proof、change_tags。"
         ),
+        primary_direction=primary_direction,
         closest_failed_cluster=closest_failed_cluster,
         novelty_proof=(
             str(payload.get("novelty_proof", "")).strip()
@@ -2413,11 +2423,10 @@ def _invalid_round_brief_block_info(
     errors: list[str],
 ) -> dict[str, Any]:
     missing_fields = _round_brief_missing_fields(payload)
-    blocked_cluster = (
-        str(payload.get("closest_failed_cluster", "")).strip()
-        or cluster_key_for_components("", tuple(str(item).strip() for item in payload.get("change_tags", []) if str(item).strip()))
-        or "-"
-    )
+    blocked_cluster = cluster_key_for_components(
+        "",
+        tuple(str(item).strip() for item in payload.get("change_tags", []) if str(item).strip()),
+    ) or "-"
     raw_excerpt = _raw_response_excerpt(payload)
     error_text = errors[-1] if errors else "planner round brief invalid"
     feedback_lines = [
@@ -2426,7 +2435,7 @@ def _invalid_round_brief_block_info(
         f"- 缺失或无效字段: {', '.join(missing_fields) or '-'}",
         f"- 原始回复摘录: {raw_excerpt or '-'}",
         "- 你的任务不是写随笔，而是返回可执行的 round brief。",
-        "- 至少保证 `hypothesis`、`change_plan`、`novelty_proof`、`change_tags` 非空。",
+        "- 至少保证 `primary_direction`、`hypothesis`、`change_plan`、`novelty_proof`、`change_tags` 非空。",
         "- 继续只返回纯文本字段，不要 JSON，不要 markdown，不要解释。",
     ]
     return {
@@ -2563,6 +2572,7 @@ def _request_validated_reviewer_decision(
                         candidate_id=f"reviewer_invalid_{int(time.time())}",
                         hypothesis="reviewer 未按字段契约返回有效审稿结果。",
                         change_plan="重新按 reviewer 字段契约返回 verdict、reviewer_summary 与必要的打回信息。",
+                        primary_direction="structure | reviewer 摘要修复",
                         closest_failed_cluster="reviewer_invalid",
                         novelty_proof="reviewer 输出缺少核心字段，未形成可执行审稿结论。",
                         change_tags=("reviewer_invalid",),
@@ -2627,7 +2637,8 @@ def _reviewer_rejected_candidate(
         candidate_id=round_brief.candidate_id or f"reviewer_rejected_{int(time.time())}",
         hypothesis=round_brief.hypothesis or "reviewer 判定当前 draft brief 不值得继续。",
         change_plan=round_brief.change_plan or "根据 reviewer 打回信息重写 round brief。",
-        closest_failed_cluster=round_brief.closest_failed_cluster or "reviewer_rejected",
+        primary_direction=round_brief.primary_direction or "structure | reviewer 打回",
+        closest_failed_cluster=cluster_key_for_components("", round_brief.change_tags) or "reviewer_rejected",
         novelty_proof=round_brief.novelty_proof or "reviewer 已判定当前 draft 仍属旧失败近邻。",
         change_tags=round_brief.change_tags or ("reviewer_rejected",),
         edited_regions=tuple(),
@@ -2642,7 +2653,7 @@ def _reviewer_rejection_block_info(
     round_brief: StrategyRoundBrief,
     decision: StrategyReviewerDecision,
 ) -> dict[str, Any]:
-    blocked_cluster = round_brief.closest_failed_cluster or "reviewer_rejected"
+    blocked_cluster = cluster_key_for_components("", round_brief.change_tags) or "reviewer_rejected"
     blocked_reason = decision.reviewer_summary or "reviewer 判定当前 draft 不值得继续"
     feedback_lines = [
         "reviewer 已打回当前 planner draft brief；本轮没有进入 edit_worker。",
@@ -2810,7 +2821,6 @@ def _build_model_round_brief(
         factor_mode_status_text="",
         iteration_lane=iteration_lane,
         iteration_lane_status_text=iteration_lane_reason,
-        current_complexity_headroom_text=format_strategy_complexity_headroom(base_source),
         session_mode=session_mode,
         operator_focus_text=_load_operator_focus_text(),
         operator_focus_path="config/research_v2_operator_focus.md",
@@ -2862,13 +2872,12 @@ def _run_edit_worker(
 ) -> str:
     prompt = build_strategy_edit_worker_prompt(
         candidate_id=round_brief.candidate_id,
+        primary_direction=round_brief.primary_direction,
         hypothesis=round_brief.hypothesis,
         change_plan=round_brief.change_plan,
         change_tags=round_brief.change_tags,
         expected_effects=round_brief.expected_effects,
-        closest_failed_cluster=round_brief.closest_failed_cluster,
         novelty_proof=round_brief.novelty_proof,
-        current_complexity_headroom_text=format_strategy_complexity_headroom(base_source),
         iteration_lane=iteration_lane,
         iteration_lane_status_text=iteration_lane_reason,
     )
@@ -2925,12 +2934,12 @@ def _repair_model_candidate_source(
 ) -> str:
     prompt = build_strategy_runtime_repair_prompt(
         candidate_id=failed_candidate.candidate_id,
+        primary_direction=failed_candidate.primary_direction,
         hypothesis=failed_candidate.hypothesis,
         change_plan=failed_candidate.change_plan,
         change_tags=failed_candidate.change_tags,
         edited_regions=failed_candidate.edited_regions,
         expected_effects=failed_candidate.expected_effects,
-        closest_failed_cluster=failed_candidate.closest_failed_cluster,
         novelty_proof=failed_candidate.novelty_proof,
         error_message=error_message,
         repair_attempt=repair_attempt,
@@ -2964,12 +2973,12 @@ def _regenerate_model_round_brief(
 ) -> StrategyRoundBrief:
     prompt = build_strategy_exploration_repair_prompt(
         candidate_id=failed_candidate.candidate_id,
+        primary_direction=failed_candidate.primary_direction,
         hypothesis=failed_candidate.hypothesis,
         change_plan=failed_candidate.change_plan,
         change_tags=failed_candidate.change_tags,
         edited_regions=failed_candidate.edited_regions,
         expected_effects=failed_candidate.expected_effects,
-        closest_failed_cluster=failed_candidate.closest_failed_cluster,
         novelty_proof=failed_candidate.novelty_proof,
         block_kind=str(block_info.get("block_kind", "")).strip() or "same_cluster",
         blocked_cluster=str(block_info.get("blocked_cluster", "")).strip() or "-",
@@ -3499,7 +3508,6 @@ def _build_journal_entry(
     candidate_signature = exploration_signature_for_candidate(
         candidate,
         base_source=base_source,
-        editable_regions=EDITABLE_REGIONS,
     )
     actual_changed_regions = sorted(candidate_signature["changed_regions"])
     actual_region_families = sorted(candidate_signature["region_families"])
@@ -3525,12 +3533,44 @@ def _build_journal_entry(
         or outcome == "early_rejected"
         or runtime_failure_stage == "full_eval"
     )
+    direction_domain = (
+        candidate.primary_direction.split("|", 1)[0].strip().lower()
+        if "|" in candidate.primary_direction
+        else (candidate_signature.get("target_family") or "structure")
+    )
+    if outcome == "behavioral_noop" or stop_stage == "behavioral_noop":
+        direction_failure_layer = "behavioral_noop"
+    elif outcome == "runtime_failed":
+        direction_failure_layer = runtime_failure_stage or "runtime"
+    elif outcome == "early_rejected" or stop_stage == "early_reject":
+        direction_failure_layer = "early_reject"
+    elif outcome == "duplicate_skipped" and stop_stage == "duplicate_history":
+        direction_failure_layer = "duplicate_history"
+    elif outcome == "duplicate_skipped" and stop_stage == "duplicate_result_basin":
+        direction_failure_layer = "result_basin"
+    else:
+        direction_failure_layer = (actual_ordinary_region_families[0] if actual_ordinary_region_families else stop_stage or outcome or "unknown")
+    direction_shadow_key = "|".join(
+        [
+            str(direction_domain or "structure").strip() or "structure",
+            direction_failure_layer,
+            ",".join(actual_ordinary_region_families[:3] or actual_param_families[:2]) or "none",
+        ]
+    )
+    promotion_delta = promotion_score - base_promotion if promotion_score is not None else None
+    direction_exception_win = outcome == "accepted" or (
+        promotion_delta is not None and promotion_delta > 0.01
+    )
     entry = {
         "iteration": iteration_id,
         "timestamp": datetime.now(UTC).isoformat(),
         "candidate_id": candidate.candidate_id,
         "outcome": outcome,
         "stop_stage": stop_stage,
+        "primary_direction": candidate.primary_direction,
+        "declared_primary_direction": candidate.primary_direction,
+        "direction_shadow_key": direction_shadow_key,
+        "direction_exception_win": direction_exception_win,
         "hypothesis": candidate.hypothesis,
         "change_plan": candidate.change_plan,
         "closest_failed_cluster": candidate.closest_failed_cluster,
@@ -3547,14 +3587,10 @@ def _build_journal_entry(
             for factor in candidate.core_factors
         ],
         "cluster_key": str(candidate_signature.get("cluster_key", "")).strip()
-        or cluster_key_for_components(
-            candidate.closest_failed_cluster,
-            candidate.change_tags,
-        ),
+        or cluster_key_for_components("", candidate.change_tags),
         "quality_score": quality_score,
         "promotion_score": promotion_score,
-        "promotion_delta": promotion_score - base_promotion if promotion_score is not None else None,
-        "factor_change_mode": factor_change_mode,
+        "promotion_delta": promotion_delta,
         "gate_reason": resolved_gate_reason,
         "decision_reason": resolved_gate_reason,
         "eval_gate_reason": eval_gate_reason,
@@ -3601,13 +3637,6 @@ def _build_journal_entry(
         "score_regime": SCORE_REGIME,
         "reference_code_hash": source_hash(base_source),
         "reference_role": _reference_role(),
-        "factor_change_reason": str((factor_mode_context or {}).get("reason", "")).strip(),
-        "factor_change_guidance_level": str((factor_mode_context or {}).get("guidance_level", "normal")).strip()
-        or "normal",
-        "factor_change_trailing_stalls": int((factor_mode_context or {}).get("trailing_stalls", 0) or 0),
-        "factor_change_stage_factor_admission_rounds": int(
-            (factor_mode_context or {}).get("factor_admission_rounds", 0) or 0
-        ),
     }
     entry["result_basin_key"] = result_basin_key_for_entry(entry)
     if extra_fields:
@@ -3952,9 +3981,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         return "evaluation_only"
 
     journal_entries = load_journal_entries(RUNTIME.paths.journal_file)
-    factor_mode_context = _resolve_iteration_factor_change_state(journal_entries)
-    current_factor_change_mode = "default"
-    factor_change_reason = ""
+    factor_mode_context: dict[str, Any] = {}
+    current_factor_change_mode = ""
     iteration_lane_state = _resolve_iteration_lane_state(
         journal_entries,
         factor_mode_context=factor_mode_context,
@@ -4177,7 +4205,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             candidate,
             failure_wiki_index,
             base_source=best_source,
-            editable_regions=EDITABLE_REGIONS,
         )
         if block_info is None:
             block_info = evaluate_candidate_exploration_guard(
@@ -4187,7 +4214,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 score_regime=SCORE_REGIME,
                 current_iteration=iteration_id,
                 base_source=best_source,
-                editable_regions=EDITABLE_REGIONS,
                 include_current_round_locks=True,
             )
         if block_info is not None:
