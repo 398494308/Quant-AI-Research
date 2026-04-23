@@ -140,8 +140,6 @@ def _memory_archive_paths(memory_root: Path) -> dict[str, Path]:
         "duplicate_watchlist_md": memory_root / "wiki/duplicate_watchlist.md",
         "direction_board_md": direction_board_md,
         "direction_board_json": direction_board_json,
-        "current_reference_denylist_md": direction_board_md,
-        "current_reference_denylist_json": direction_board_json,
     }
 
 
@@ -660,24 +658,6 @@ def format_direction_board_markdown(payload: dict[str, Any], *, limit: int = CUR
         lines.append(f"- 使用建议: {item.get('hint', '-')}")
         lines.append("")
     return "\n".join(lines).rstrip()
-
-
-def build_current_reference_denylist_payload(
-    entries: list[dict[str, Any]],
-    *,
-    score_regime: str = "",
-    active_reference_code_hash: str = "",
-) -> dict[str, Any]:
-    return build_direction_board_payload(
-        entries,
-        score_regime=score_regime,
-        active_reference_code_hash=active_reference_code_hash,
-    )
-
-
-def format_current_reference_denylist_markdown(payload: dict[str, Any], *, limit: int = CURRENT_REFERENCE_DENYLIST_LIMIT) -> str:
-    return format_direction_board_markdown(payload, limit=limit)
-
 
 def _normalize_cluster_name(raw: Any) -> str:
     text = str(raw or "").strip().lower()
@@ -2999,8 +2979,6 @@ def _write_prompt_memory_snapshots(
         "duplicate_watchlist_md",
         "direction_board_md",
         "direction_board_json",
-        "current_reference_denylist_md",
-        "current_reference_denylist_json",
     ):
         paths[key].parent.mkdir(parents=True, exist_ok=True)
     paths["current_stage"].write_text(

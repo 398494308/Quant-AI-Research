@@ -66,9 +66,12 @@ from research_v2.notifications import build_discord_summary_message, load_discor
 from research_v2.prompting import (
     build_strategy_agents_instructions,
     build_strategy_candidate_summary_prompt,
+    build_strategy_edit_worker_system_prompt,
     build_strategy_edit_worker_prompt,
     build_strategy_exploration_repair_prompt,
     build_strategy_no_edit_repair_prompt,
+    build_strategy_planner_system_prompt,
+    build_strategy_repair_worker_system_prompt,
     build_strategy_round_brief_repair_prompt,
     build_strategy_reviewer_prompt,
     build_strategy_reviewer_repair_prompt,
@@ -77,8 +80,6 @@ from research_v2.prompting import (
     build_strategy_research_prompt,
     build_strategy_summary_worker_system_prompt,
     build_strategy_runtime_repair_prompt,
-    build_strategy_system_prompt,
-    build_strategy_worker_system_prompt,
 )
 from research_v2.strategy_code import (
     REQUIRED_FUNCTIONS,
@@ -281,7 +282,7 @@ def _reference_role() -> str:
     return "champion" if champion_report is not None else "baseline"
 
 
-def _session_scope_payload(*, factor_change_mode: str = "", iteration_lane: str = "research") -> dict[str, Any]:
+def _session_scope_payload() -> dict[str, Any]:
     reference_code_hash = source_hash(best_source) if best_source else ""
     return {
         "score_regime": SCORE_REGIME,
@@ -333,28 +334,18 @@ def _clear_research_session_state(*, remove_workspace: bool = False, reason: str
 
 def _session_state_matches_current_stage(
     state: dict[str, Any] | None,
-    *,
-    factor_change_mode: str = "",
-    iteration_lane: str = "research",
 ) -> bool:
     if not isinstance(state, dict) or not state:
         return False
-    scope = _session_scope_payload(
-        factor_change_mode=factor_change_mode,
-        iteration_lane=iteration_lane,
-    )
+    scope = _session_scope_payload()
     if not scope["reference_code_hash"]:
         return False
     return all(str(state.get(key, "")).strip() == str(scope.get(key, "")).strip() for key in scope)
 
 
-def _active_research_session_id(*, factor_change_mode: str = "", iteration_lane: str = "research") -> str:
+def _active_research_session_id() -> str:
     state = _load_research_session_state()
-    if not _session_state_matches_current_stage(
-        state,
-        factor_change_mode=factor_change_mode,
-        iteration_lane=iteration_lane,
-    ):
+    if not _session_state_matches_current_stage(state):
         return ""
     return str(state.get("session_id", "")).strip()
 
@@ -363,18 +354,13 @@ def _store_research_session_metadata(
     *,
     session_id: str,
     workspace_root: Path,
-    factor_change_mode: str = "",
-    iteration_lane: str = "research",
 ) -> None:
     if not session_id:
         return
     previous = _load_research_session_state()
     now = datetime.now(UTC).isoformat()
     payload = {
-        **_session_scope_payload(
-            factor_change_mode=factor_change_mode,
-            iteration_lane=iteration_lane,
-        ),
+        **_session_scope_payload(),
         "session_id": session_id,
         "workspace_root": str(workspace_root),
         "created_at": str(previous.get("created_at", "")).strip() or now,
@@ -386,18 +372,12 @@ def _store_research_session_metadata(
 def _align_research_session_scope(
     *,
     force_reset: bool = False,
-    factor_change_mode: str = "",
-    iteration_lane: str = "research",
 ) -> None:
     state = _load_research_session_state()
     if force_reset:
         _clear_research_session_state(remove_workspace=True, reason="reference scope changed by explicit reset")
         return
-    if state and not _session_state_matches_current_stage(
-        state,
-        factor_change_mode=factor_change_mode,
-        iteration_lane=iteration_lane,
-    ):
+    if state and not _session_state_matches_current_stage(state):
         _clear_research_session_state(remove_workspace=True, reason="reference scope changed")
 
 
@@ -455,7 +435,6 @@ def _ensure_workspace_link(link_path: Path, target_path: Path) -> None:
 def _prepare_agent_workspace(
     *,
     base_source: str,
-    factor_change_mode: str,
     reset_strategy: bool,
 ) -> Path:
     _refresh_prompt_memory_snapshots()
@@ -470,7 +449,7 @@ def _prepare_agent_workspace(
 
     agents_path = workspace_root / "AGENTS.md"
     agents_path.write_text(
-        build_strategy_agents_instructions(factor_change_mode=factor_change_mode),
+        build_strategy_agents_instructions(),
     )
 
     _ensure_workspace_link(workspace_root / "src/backtest_macd_aggressive.py", RUNTIME.paths.backtest_file)
@@ -660,24 +639,6 @@ def _complexity_level_rank(level: str) -> int:
         "hard_cap": 3,
     }.get(str(level or "normal").strip(), 0)
 
-
-def _resolve_iteration_lane_state(
-    journal_entries: list[dict[str, Any]],
-    *,
-    factor_mode_context: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    pressure = build_strategy_complexity_pressure(best_source) if best_source else {}
-    return {
-        "lane": "research",
-        "reason": "",
-        "complexity_pressure": pressure,
-    }
-
-
-def _planner_session_policy_for_iteration_lane(iteration_lane: str) -> tuple[str, bool]:
-    return "planner", True
-
-
 def _current_stage_journal_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     scoped = [
         entry for entry in entries
@@ -724,22 +685,6 @@ def _current_stage_journal_entries(entries: list[dict[str, Any]]) -> list[dict[s
         entry for entry in scoped
         if int(entry.get("iteration", 0) or 0) >= reference_stage_iteration
     ]
-
-
-def _resolve_iteration_factor_change_state(journal_entries: list[dict[str, Any]]) -> dict[str, Any]:
-    _ = journal_entries
-    return {
-        "mode": "",
-        "guidance_level": "manual",
-        "trailing_stalls": 0,
-        "reason": "factor_change_mode 已移除；研究器不再自动切换模式。",
-    }
-
-
-def _resolve_iteration_factor_change_mode(journal_entries: list[dict[str, Any]]) -> tuple[str, str]:
-    _ = journal_entries
-    return "", "factor_change_mode 已移除；研究器不再自动切换模式。"
-
 
 def _load_saved_reference_state() -> dict[str, Any]:
     if not RUNTIME.paths.best_state_file.exists():
@@ -2131,7 +2076,6 @@ def _rebase_candidate_metadata_to_final_code(
     round_brief: StrategyRoundBrief,
     base_source: str,
     workspace_root: Path,
-    factor_change_mode: str,
     context_label: str,
 ) -> StrategyCandidate:
     diff_summary = tuple(build_diff_summary(base_source, candidate.strategy_code, limit=18))
@@ -2152,13 +2096,9 @@ def _rebase_candidate_metadata_to_final_code(
         final_brief = _request_validated_round_brief(
             base_source=base_source,
             prompt=prompt,
-            system_prompt=build_strategy_summary_worker_system_prompt(
-                factor_change_mode=factor_change_mode,
-            ),
+            system_prompt=build_strategy_summary_worker_system_prompt(),
             phase="model_summary_worker",
             workspace_root=workspace_root,
-            factor_change_mode=factor_change_mode,
-            iteration_lane="research",
             retry_phase="model_summary_brief_repair",
             session_kind="summary_worker",
             use_persistent_session=False,
@@ -2213,7 +2153,6 @@ def _candidate_from_round_brief(
     *,
     workspace_strategy_file: Path,
     base_source: str,
-    factor_change_mode: str = "default",
 ) -> StrategyCandidate:
     if not workspace_strategy_file.exists():
         raise StrategySourceError(f"workspace strategy file missing: {workspace_strategy_file}")
@@ -2221,7 +2160,6 @@ def _candidate_from_round_brief(
     validate_strategy_source(
         strategy_code,
         base_source=base_source,
-        factor_change_mode=factor_change_mode,
     )
     actual_changed_regions = _actual_changed_regions(
         base_source=base_source,
@@ -2259,13 +2197,11 @@ def _candidate_from_payload(
     *,
     workspace_strategy_file: Path,
     base_source: str,
-    factor_change_mode: str = "default",
 ) -> StrategyCandidate:
     return _candidate_from_round_brief(
         _round_brief_from_payload(payload),
         workspace_strategy_file=workspace_strategy_file,
         base_source=base_source,
-        factor_change_mode=factor_change_mode,
     )
 
 
@@ -2278,17 +2214,8 @@ def _run_model_text_request(
     repair_attempt: int | None = None,
     session_kind: str = "planner",
     use_persistent_session: bool = True,
-    session_factor_change_mode: str = "",
-    session_iteration_lane: str = "research",
 ) -> str:
-    session_id = (
-        _active_research_session_id(
-            factor_change_mode=session_factor_change_mode,
-            iteration_lane=session_iteration_lane,
-        )
-        if use_persistent_session
-        else ""
-    )
+    session_id = _active_research_session_id() if use_persistent_session else ""
 
     def _invoke(active_session_id: str | None, metadata: dict[str, Any]) -> str:
         with _temporary_cwd(workspace_root):
@@ -2326,8 +2253,6 @@ def _run_model_text_request(
         _store_research_session_metadata(
             session_id=resolved_session_id,
             workspace_root=workspace_root,
-            factor_change_mode=session_factor_change_mode,
-            iteration_lane=session_iteration_lane,
         )
     elapsed_seconds = round(max(0.0, time.monotonic() - started_at), 3)
     _append_model_call_telemetry(
@@ -2361,8 +2286,6 @@ def _run_model_candidate_request(
     repair_attempt: int | None = None,
     session_kind: str = "planner",
     use_persistent_session: bool = True,
-    session_factor_change_mode: str = "",
-    session_iteration_lane: str = "research",
 ) -> dict[str, Any]:
     raw_text = _run_model_text_request(
         prompt=prompt,
@@ -2372,8 +2295,6 @@ def _run_model_candidate_request(
         repair_attempt=repair_attempt,
         session_kind=session_kind,
         use_persistent_session=use_persistent_session,
-        session_factor_change_mode=session_factor_change_mode,
-        session_iteration_lane=session_iteration_lane,
     )
     return _parse_model_candidate_payload(raw_text)
 
@@ -2456,8 +2377,6 @@ def _request_validated_round_brief(
     system_prompt: str,
     phase: str,
     workspace_root: Path,
-    factor_change_mode: str,
-    iteration_lane: str,
     retry_phase: str,
     session_kind: str = "planner",
     use_persistent_session: bool = True,
@@ -2469,8 +2388,6 @@ def _request_validated_round_brief(
         workspace_root=workspace_root,
         session_kind=session_kind,
         use_persistent_session=use_persistent_session,
-        session_factor_change_mode=factor_change_mode,
-        session_iteration_lane=iteration_lane,
     )
     errors: list[str] = []
     current_payload = payload
@@ -2519,8 +2436,6 @@ def _request_validated_round_brief(
                 repair_attempt=retry_attempt,
                 session_kind=session_kind,
                 use_persistent_session=use_persistent_session,
-                session_factor_change_mode=factor_change_mode,
-                session_iteration_lane=iteration_lane,
             )
 
     raise StrategySourceError("planner round brief validation loop exhausted")
@@ -2682,9 +2597,6 @@ def _review_and_revise_round_brief(
     evaluation_summary: str,
     journal_summary: str,
     workspace_root: Path,
-    factor_change_mode: str,
-    iteration_lane: str,
-    iteration_lane_reason: str,
     planner_session_kind: str,
     use_persistent_planner_session: bool,
     reviewer_phase: str,
@@ -2753,13 +2665,9 @@ def _review_and_revise_round_brief(
         current_brief = _request_validated_round_brief(
             base_source=base_source,
             prompt=revise_prompt,
-            system_prompt=build_strategy_system_prompt(
-                factor_change_mode=factor_change_mode,
-            ),
+            system_prompt=build_strategy_planner_system_prompt(),
             phase=planner_revise_phase,
             workspace_root=workspace_root,
-            factor_change_mode=factor_change_mode,
-            iteration_lane=iteration_lane,
             retry_phase=planner_revise_retry_phase,
             session_kind=planner_session_kind,
             use_persistent_session=use_persistent_planner_session,
@@ -2773,9 +2681,6 @@ def _build_model_round_brief(
     journal_entries: list[dict[str, Any]],
     *,
     workspace_root: Path,
-    factor_change_mode: str,
-    iteration_lane: str,
-    iteration_lane_reason: str,
     planner_session_kind: str = "planner",
     use_persistent_planner_session: bool = True,
 ) -> StrategyRoundBrief:
@@ -2801,12 +2706,7 @@ def _build_model_round_brief(
     )
 
     session_mode = (
-        "resume"
-        if _active_research_session_id(
-            factor_change_mode=factor_change_mode,
-            iteration_lane=iteration_lane,
-        )
-        else "bootstrap"
+        "resume" if _active_research_session_id() else "bootstrap"
     )
     prompt = build_strategy_research_prompt(
         evaluation_summary=report.prompt_summary_text,
@@ -2817,10 +2717,6 @@ def _build_model_round_brief(
         current_base_role=_reference_role(),
         score_regime=SCORE_REGIME,
         promotion_min_delta=RUNTIME.promotion_min_delta,
-        factor_change_mode=factor_change_mode,
-        factor_mode_status_text="",
-        iteration_lane=iteration_lane,
-        iteration_lane_status_text=iteration_lane_reason,
         session_mode=session_mode,
         operator_focus_text=_load_operator_focus_text(),
         operator_focus_path="config/research_v2_operator_focus.md",
@@ -2829,13 +2725,9 @@ def _build_model_round_brief(
     round_brief = _request_validated_round_brief(
         base_source=base_source,
         prompt=prompt,
-        system_prompt=build_strategy_system_prompt(
-            factor_change_mode=factor_change_mode,
-        ),
+        system_prompt=build_strategy_planner_system_prompt(),
         phase="model_planner",
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
-        iteration_lane=iteration_lane,
         retry_phase="model_planner_brief_repair",
         session_kind=planner_session_kind,
         use_persistent_session=use_persistent_planner_session,
@@ -2846,9 +2738,6 @@ def _build_model_round_brief(
         evaluation_summary=report.prompt_summary_text,
         journal_summary=journal_summary,
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
-        iteration_lane=iteration_lane,
-        iteration_lane_reason=iteration_lane_reason,
         planner_session_kind=planner_session_kind,
         use_persistent_planner_session=use_persistent_planner_session,
         reviewer_phase="model_reviewer",
@@ -2864,9 +2753,6 @@ def _run_edit_worker(
     base_source: str,
     round_brief: StrategyRoundBrief,
     workspace_root: Path,
-    factor_change_mode: str,
-    iteration_lane: str,
-    iteration_lane_reason: str,
     phase: str,
     repair_attempt: int | None = None,
 ) -> str:
@@ -2878,15 +2764,10 @@ def _run_edit_worker(
         change_tags=round_brief.change_tags,
         expected_effects=round_brief.expected_effects,
         novelty_proof=round_brief.novelty_proof,
-        iteration_lane=iteration_lane,
-        iteration_lane_status_text=iteration_lane_reason,
     )
     return _run_model_text_request(
         prompt=prompt,
-        system_prompt=build_strategy_worker_system_prompt(
-            factor_change_mode=factor_change_mode,
-            worker_kind="edit_worker",
-        ),
+        system_prompt=build_strategy_edit_worker_system_prompt(),
         phase=phase,
         workspace_root=workspace_root,
         repair_attempt=repair_attempt,
@@ -2901,7 +2782,6 @@ def _repair_no_edit_model_response(
     error_message: str,
     no_edit_attempt: int,
     workspace_root: Path,
-    factor_change_mode: str,
     last_response_text: str,
 ) -> str:
     prompt = build_strategy_no_edit_repair_prompt(
@@ -2912,10 +2792,7 @@ def _repair_no_edit_model_response(
     )
     return _run_model_text_request(
         prompt=prompt,
-        system_prompt=build_strategy_worker_system_prompt(
-            factor_change_mode=factor_change_mode,
-            worker_kind="repair_worker",
-        ),
+        system_prompt=build_strategy_repair_worker_system_prompt(),
         phase="model_no_edit_repair",
         workspace_root=workspace_root,
         repair_attempt=no_edit_attempt,
@@ -2930,7 +2807,6 @@ def _repair_model_candidate_source(
     error_message: str,
     repair_attempt: int,
     workspace_root: Path,
-    factor_change_mode: str,
 ) -> str:
     prompt = build_strategy_runtime_repair_prompt(
         candidate_id=failed_candidate.candidate_id,
@@ -2946,10 +2822,7 @@ def _repair_model_candidate_source(
     )
     return _run_model_text_request(
         prompt=prompt,
-        system_prompt=build_strategy_worker_system_prompt(
-            factor_change_mode=factor_change_mode,
-            worker_kind="repair_worker",
-        ),
+        system_prompt=build_strategy_repair_worker_system_prompt(),
         phase="model_repair",
         workspace_root=workspace_root,
         repair_attempt=repair_attempt,
@@ -2965,9 +2838,6 @@ def _regenerate_model_round_brief(
     block_info: dict[str, Any],
     regeneration_attempt: int,
     workspace_root: Path,
-    factor_change_mode: str,
-    iteration_lane: str,
-    iteration_lane_reason: str,
     planner_session_kind: str = "planner",
     use_persistent_planner_session: bool = True,
 ) -> StrategyRoundBrief:
@@ -2990,13 +2860,9 @@ def _regenerate_model_round_brief(
     round_brief = _request_validated_round_brief(
         base_source=base_source,
         prompt=prompt,
-        system_prompt=build_strategy_system_prompt(
-            factor_change_mode=factor_change_mode,
-        ),
+        system_prompt=build_strategy_planner_system_prompt(),
         phase="model_regenerate",
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
-        iteration_lane=iteration_lane,
         retry_phase="model_regenerate_brief_repair",
         session_kind=planner_session_kind,
         use_persistent_session=use_persistent_planner_session,
@@ -3025,9 +2891,6 @@ def _regenerate_model_round_brief(
         evaluation_summary=best_report.prompt_summary_text,
         journal_summary=journal_summary,
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
-        iteration_lane=iteration_lane,
-        iteration_lane_reason=iteration_lane_reason,
         planner_session_kind=planner_session_kind,
         use_persistent_planner_session=use_persistent_planner_session,
         reviewer_phase="model_regenerate_reviewer",
@@ -3043,7 +2906,6 @@ def _candidate_from_round_brief_with_validation_repair(
     round_brief: StrategyRoundBrief,
     base_source: str,
     workspace_root: Path,
-    factor_change_mode: str,
     context_label: str,
 ) -> StrategyCandidate:
     workspace_strategy_file = workspace_root / MODEL_WORKSPACE_STRATEGY_PATH
@@ -3052,14 +2914,12 @@ def _candidate_from_round_brief_with_validation_repair(
             round_brief,
             workspace_strategy_file=workspace_strategy_file,
             base_source=base_source,
-            factor_change_mode=factor_change_mode,
         )
         return _rebase_candidate_metadata_to_final_code(
             candidate=candidate,
             round_brief=round_brief,
             base_source=base_source,
             workspace_root=workspace_root,
-            factor_change_mode=factor_change_mode,
             context_label=context_label,
         )
     except StrategySourceError as exc:
@@ -3087,7 +2947,6 @@ def _candidate_from_round_brief_with_validation_repair(
                 error_message="\n".join(errors[-3:]),
                 repair_attempt=attempt,
                 workspace_root=workspace_root,
-                factor_change_mode=factor_change_mode,
             )
             failed_candidate = _candidate_stub_from_round_brief(
                 _round_brief_from_candidate(failed_candidate),
@@ -3099,14 +2958,12 @@ def _candidate_from_round_brief_with_validation_repair(
                     round_brief,
                     workspace_strategy_file=workspace_strategy_file,
                     base_source=base_source,
-                    factor_change_mode=factor_change_mode,
                 )
                 return _rebase_candidate_metadata_to_final_code(
                     candidate=candidate,
                     round_brief=round_brief,
                     base_source=base_source,
                     workspace_root=workspace_root,
-                    factor_change_mode=factor_change_mode,
                     context_label=context_label,
                 )
             except StrategySourceError as repair_exc:
@@ -3123,9 +2980,6 @@ def _build_model_candidate(
     journal_entries: list[dict[str, Any]],
     *,
     workspace_root: Path,
-    factor_change_mode: str,
-    iteration_lane: str,
-    iteration_lane_reason: str,
     planner_session_kind: str = "planner",
     use_persistent_planner_session: bool = True,
 ) -> StrategyCandidate:
@@ -3134,9 +2988,6 @@ def _build_model_candidate(
         base_source,
         journal_entries,
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
-        iteration_lane=iteration_lane,
-        iteration_lane_reason=iteration_lane_reason,
         planner_session_kind=planner_session_kind,
         use_persistent_planner_session=use_persistent_planner_session,
     )
@@ -3144,9 +2995,6 @@ def _build_model_candidate(
         base_source=base_source,
         round_brief=round_brief,
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
-        iteration_lane=iteration_lane,
-        iteration_lane_reason=iteration_lane_reason,
         phase="model_edit_worker",
     )
     no_edit_errors: list[str] = []
@@ -3184,7 +3032,6 @@ def _build_model_candidate(
                 error_message="\n".join(no_edit_errors[-3:]),
                 no_edit_attempt=attempt,
                 workspace_root=workspace_root,
-                factor_change_mode=factor_change_mode,
                 last_response_text=last_response_text,
             )
             try:
@@ -3215,7 +3062,6 @@ def _build_model_candidate(
         round_brief=round_brief,
         base_source=base_source,
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
         context_label="初始候选",
     )
 
@@ -3227,9 +3073,6 @@ def _regenerate_model_candidate(
     block_info: dict[str, Any],
     regeneration_attempt: int,
     workspace_root: Path,
-    factor_change_mode: str,
-    iteration_lane: str,
-    iteration_lane_reason: str,
     planner_session_kind: str = "planner",
     use_persistent_planner_session: bool = True,
 ) -> StrategyCandidate:
@@ -3249,9 +3092,6 @@ def _regenerate_model_candidate(
         block_info=block_info,
         regeneration_attempt=regeneration_attempt,
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
-        iteration_lane=iteration_lane,
-        iteration_lane_reason=iteration_lane_reason,
         planner_session_kind=planner_session_kind,
         use_persistent_planner_session=use_persistent_planner_session,
     )
@@ -3259,9 +3099,6 @@ def _regenerate_model_candidate(
         base_source=base_source,
         round_brief=round_brief,
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
-        iteration_lane=iteration_lane,
-        iteration_lane_reason=iteration_lane_reason,
         phase="model_regenerate_edit_worker",
         repair_attempt=regeneration_attempt,
     )
@@ -3269,7 +3106,6 @@ def _regenerate_model_candidate(
         round_brief=round_brief,
         base_source=base_source,
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
         context_label="候选重生",
     )
 
@@ -3281,20 +3117,17 @@ def _repair_model_candidate(
     error_message: str,
     repair_attempt: int,
     workspace_root: Path,
-    factor_change_mode: str,
 ) -> StrategyCandidate:
     _repair_model_candidate_source(
         failed_candidate=failed_candidate,
         error_message=error_message,
         repair_attempt=repair_attempt,
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
     )
     return _candidate_from_round_brief_with_validation_repair(
         round_brief=_round_brief_from_candidate(failed_candidate),
         base_source=base_source,
         workspace_root=workspace_root,
-        factor_change_mode=factor_change_mode,
         context_label="运行修复",
     )
 
@@ -3304,9 +3137,6 @@ def build_strategy_candidate(
     journal_entries: list[dict[str, Any]],
     *,
     workspace_root: Path,
-    factor_change_mode: str,
-    iteration_lane: str,
-    iteration_lane_reason: str,
     planner_session_kind: str = "planner",
     use_persistent_planner_session: bool = True,
 ) -> StrategyCandidate:
@@ -3315,9 +3145,6 @@ def build_strategy_candidate(
             base_source,
             journal_entries,
             workspace_root=workspace_root,
-            factor_change_mode=factor_change_mode,
-            iteration_lane=iteration_lane,
-            iteration_lane_reason=iteration_lane_reason,
             planner_session_kind=planner_session_kind,
             use_persistent_planner_session=use_persistent_planner_session,
         )
@@ -3407,10 +3234,7 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
                 f"promotion={best_report.metrics['promotion_score']:.2f}, "
                 f"gate={best_report.gate_reason}"
             )
-            _align_research_session_scope(
-                force_reset=False,
-                iteration_lane="research",
-            )
+            _align_research_session_scope(force_reset=False)
             write_heartbeat(
                 "initialized",
                 message="loaded saved reference",
@@ -3455,10 +3279,7 @@ def initialize_best_state(force_rebuild: bool = False) -> None:
         f"promotion={best_report.metrics['promotion_score']:.2f}, "
         f"gate={best_report.gate_reason}"
     )
-    _align_research_session_scope(
-        force_reset=force_rebuild,
-        iteration_lane="research",
-    )
+    _align_research_session_scope(force_reset=force_rebuild)
     write_heartbeat(
         "initialized",
         message="reference ready",
@@ -3488,8 +3309,6 @@ def _build_journal_entry(
     candidate: StrategyCandidate,
     base_source: str,
     candidate_report: EvaluationReport | None,
-    factor_change_mode: str,
-    factor_mode_context: dict[str, Any] | None = None,
     outcome: str,
     stop_stage: str,
     gate_reason: str | None = None,
@@ -3673,8 +3492,6 @@ def _record_duplicate_skip(
     iteration_id: int,
     candidate: StrategyCandidate,
     base_source: str,
-    factor_change_mode: str,
-    factor_mode_context: dict[str, Any] | None = None,
     stop_stage: str,
     gate_reason: str,
     note: str,
@@ -3685,8 +3502,6 @@ def _record_duplicate_skip(
             candidate=candidate,
             base_source=base_source,
             candidate_report=None,
-            factor_change_mode=factor_change_mode,
-            factor_mode_context=factor_mode_context,
             outcome="duplicate_skipped",
             stop_stage=stop_stage,
             gate_reason=gate_reason,
@@ -3702,8 +3517,6 @@ def _record_generation_invalid(
     iteration_id: int,
     candidate: StrategyCandidate,
     base_source: str,
-    factor_change_mode: str,
-    factor_mode_context: dict[str, Any] | None = None,
     block_info: dict[str, Any],
     note: str,
 ) -> None:
@@ -3713,8 +3526,6 @@ def _record_generation_invalid(
             candidate=candidate,
             base_source=base_source,
             candidate_report=None,
-            factor_change_mode=factor_change_mode,
-            factor_mode_context=factor_mode_context,
             outcome="generation_invalid",
             stop_stage=str(block_info.get("stop_stage", "blocked_invalid_generation")),
             gate_reason=str(block_info.get("blocked_reason", "")).strip() or "候选未产生真实代码改动",
@@ -3737,8 +3548,6 @@ def _record_exploration_block(
     iteration_id: int,
     candidate: StrategyCandidate,
     base_source: str,
-    factor_change_mode: str,
-    factor_mode_context: dict[str, Any] | None = None,
     block_info: dict[str, Any],
 ) -> None:
     _append_research_journal_entry(
@@ -3747,8 +3556,6 @@ def _record_exploration_block(
             candidate=candidate,
             base_source=base_source,
             candidate_report=None,
-            factor_change_mode=factor_change_mode,
-            factor_mode_context=factor_mode_context,
             outcome="exploration_blocked",
             stop_stage=str(block_info.get("stop_stage", "blocked_same_cluster")),
             gate_reason=str(block_info.get("blocked_reason", "")).strip() or "探索方向被系统拒收",
@@ -3780,8 +3587,6 @@ def _record_behavioral_noop(
     iteration_id: int,
     candidate: StrategyCandidate,
     base_source: str,
-    factor_change_mode: str,
-    factor_mode_context: dict[str, Any] | None = None,
     behavior_diff: dict[str, Any],
 ) -> None:
     _append_research_journal_entry(
@@ -3790,8 +3595,6 @@ def _record_behavioral_noop(
             candidate=candidate,
             base_source=base_source,
             candidate_report=None,
-            factor_change_mode=factor_change_mode,
-            factor_mode_context=factor_mode_context,
             outcome="behavioral_noop",
             stop_stage="behavioral_noop",
             gate_reason="smoke 行为指纹与当前主参考完全一致",
@@ -3810,8 +3613,6 @@ def _record_runtime_failure(
     iteration_id: int,
     candidate: StrategyCandidate,
     base_source: str,
-    factor_change_mode: str,
-    factor_mode_context: dict[str, Any] | None = None,
     errors: list[str],
     failure_stage: str,
     stop_stage: str,
@@ -3829,8 +3630,6 @@ def _record_runtime_failure(
             candidate=candidate,
             base_source=base_source,
             candidate_report=None,
-            factor_change_mode=factor_change_mode,
-            factor_mode_context=factor_mode_context,
             outcome="runtime_failed",
             stop_stage=stop_stage,
             gate_reason="运行失败",
@@ -3911,8 +3710,6 @@ def _candidate_with_repair(
     candidate: StrategyCandidate,
     *,
     workspace_root: Path,
-    factor_change_mode: str,
-    iteration_lane: str,
 ) -> tuple[StrategyCandidate, EvaluationReport]:
     current = candidate
     errors: list[str] = []
@@ -3954,7 +3751,6 @@ def _candidate_with_repair(
                 error_message="\n".join(errors[-3:]),
                 repair_attempt=attempt + 1,
                 workspace_root=workspace_root,
-                factor_change_mode=factor_change_mode,
             )
     raise CandidateRepairExhausted(current, errors)
 
@@ -3981,32 +3777,16 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         return "evaluation_only"
 
     journal_entries = load_journal_entries(RUNTIME.paths.journal_file)
-    factor_mode_context: dict[str, Any] = {}
-    current_factor_change_mode = ""
-    iteration_lane_state = _resolve_iteration_lane_state(
-        journal_entries,
-        factor_mode_context=factor_mode_context,
-    )
-    current_iteration_lane = str(iteration_lane_state.get("lane", "research")).strip() or "research"
-    iteration_lane_reason = str(iteration_lane_state.get("reason", "")).strip()
-    planner_session_kind, use_persistent_planner_session = _planner_session_policy_for_iteration_lane(
-        current_iteration_lane
-    )
-    log_info(f"第 {iteration_id} 轮任务类型: {current_iteration_lane or 'research'}")
+    planner_session_kind = "planner"
+    use_persistent_planner_session = True
     write_heartbeat(
         "iteration_preparing",
         message=f"iteration {iteration_id} preparing candidate",
-        iteration_lane=current_iteration_lane,
-        iteration_lane_reason=iteration_lane_reason,
     )
     if use_persistent_planner_session:
-        _align_research_session_scope(
-            force_reset=False,
-            iteration_lane=current_iteration_lane,
-        )
+        _align_research_session_scope(force_reset=False)
     workspace_root = _prepare_agent_workspace(
         base_source=best_source,
-        factor_change_mode=current_factor_change_mode,
         reset_strategy=True,
     )
 
@@ -4015,9 +3795,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             best_source,
             journal_entries,
             workspace_root=workspace_root,
-            factor_change_mode=current_factor_change_mode,
-            iteration_lane=current_iteration_lane,
-            iteration_lane_reason=iteration_lane_reason,
             planner_session_kind=planner_session_kind,
             use_persistent_planner_session=use_persistent_planner_session,
         )
@@ -4030,8 +3807,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 iteration_id=iteration_id,
                 candidate=exc.candidate,
                 base_source=best_source,
-                factor_change_mode=current_factor_change_mode,
-                factor_mode_context=factor_mode_context,
                 block_info=exc.block_info,
             )
             log_info(f"第 {iteration_id} 轮 reviewer 打回 planner brief: {exc}")
@@ -4047,8 +3822,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             iteration_id=iteration_id,
             candidate=exc.candidate,
             base_source=best_source,
-            factor_change_mode=current_factor_change_mode,
-            factor_mode_context=factor_mode_context,
             block_info=exc.block_info,
             note=(
                 "planner/reviewer 未按约定返回合法结果；系统已在同一轮内补正一次，"
@@ -4078,8 +3851,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             iteration_id=iteration_id,
             candidate=exc.candidate,
             base_source=best_source,
-            factor_change_mode=current_factor_change_mode,
-            factor_mode_context=factor_mode_context,
             errors=exc.errors,
             failure_stage=exc.failure_stage or "candidate_validation",
             stop_stage="candidate_validation",
@@ -4110,8 +3881,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                     iteration_id=iteration_id,
                     candidate=candidate,
                     base_source=best_source,
-                    factor_change_mode=current_factor_change_mode,
-                    factor_mode_context=factor_mode_context,
                     block_info=invalid_generation_block,
                     note=(
                         "候选未产出真实代码改动；该轮已按技术性空转记账，"
@@ -4145,9 +3914,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 block_info=invalid_generation_block,
                 regeneration_attempt=exploration_regeneration_attempt,
                 workspace_root=workspace_root,
-                factor_change_mode=current_factor_change_mode,
-                iteration_lane=current_iteration_lane,
-                iteration_lane_reason=iteration_lane_reason,
                 planner_session_kind=planner_session_kind,
                 use_persistent_planner_session=use_persistent_planner_session,
             )
@@ -4160,8 +3926,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 iteration_id=iteration_id,
                 candidate=candidate,
                 base_source=best_source,
-                factor_change_mode=current_factor_change_mode,
-                factor_mode_context=factor_mode_context,
                 stop_stage="duplicate_source",
                 gate_reason="候选源码与当前主参考完全相同",
                 note="模型未产生有效代码改动；本轮按重复探索记入研究历史。",
@@ -4174,8 +3938,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 iteration_id=iteration_id,
                 candidate=candidate,
                 base_source=best_source,
-                factor_change_mode=current_factor_change_mode,
-                factor_mode_context=factor_mode_context,
                 stop_stage="duplicate_history",
                 gate_reason="候选源码命中最近研究历史",
                 note="模型重复产出了最近已出现过的候选源码；本轮按重复探索记入研究历史。",
@@ -4190,8 +3952,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 iteration_id=iteration_id,
                 candidate=candidate,
                 base_source=best_source,
-                factor_change_mode=current_factor_change_mode,
-                factor_mode_context=factor_mode_context,
                 stop_stage="empty_diff",
                 gate_reason="候选没有产生有效 diff",
                 note="候选虽然通过了解析，但没有形成可验证的有效改动；本轮按重复探索记入研究历史。",
@@ -4221,8 +3981,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 iteration_id=iteration_id,
                 candidate=candidate,
                 base_source=best_source,
-                factor_change_mode=current_factor_change_mode,
-                factor_mode_context=factor_mode_context,
                 block_info=block_info,
             )
             log_info(
@@ -4255,9 +4013,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 block_info=block_info,
                 regeneration_attempt=exploration_regeneration_attempt,
                 workspace_root=workspace_root,
-                factor_change_mode=current_factor_change_mode,
-                iteration_lane=current_iteration_lane,
-                iteration_lane_reason=iteration_lane_reason,
                 planner_session_kind=planner_session_kind,
                 use_persistent_planner_session=use_persistent_planner_session,
             )
@@ -4270,8 +4025,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                         best_source,
                         candidate,
                         workspace_root=workspace_root,
-                        factor_change_mode=current_factor_change_mode,
-                        iteration_lane=current_iteration_lane,
                     )
                     break
                 except CandidateBehavioralNoop as exc:
@@ -4283,8 +4036,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                             iteration_id=iteration_id,
                             candidate=exc.candidate,
                             base_source=best_source,
-                            factor_change_mode=current_factor_change_mode,
-                            factor_mode_context=factor_mode_context,
                             behavior_diff=exc.behavior_diff,
                         )
                         log_info(
@@ -4323,9 +4074,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                         block_info=block_info,
                         regeneration_attempt=behavioral_noop_regeneration_attempt,
                         workspace_root=workspace_root,
-                        factor_change_mode=current_factor_change_mode,
-                        iteration_lane=current_iteration_lane,
-                        iteration_lane_reason=iteration_lane_reason,
                         planner_session_kind=planner_session_kind,
                         use_persistent_planner_session=use_persistent_planner_session,
                     )
@@ -4339,8 +4087,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                     candidate=candidate,
                     base_source=best_source,
                     candidate_report=None,
-                    factor_change_mode=current_factor_change_mode,
-                    factor_mode_context=factor_mode_context,
                     outcome="early_rejected",
                     stop_stage="early_reject",
                     gate_reason="前段趋势捕获过差",
@@ -4363,8 +4109,6 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 iteration_id=iteration_id,
                 candidate=exc.candidate,
                 base_source=best_source,
-                factor_change_mode=current_factor_change_mode,
-                factor_mode_context=factor_mode_context,
                 errors=exc.errors,
                 failure_stage=exc.failure_stage or "runtime_error",
                 stop_stage="runtime_error",
@@ -4398,16 +4142,12 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         candidate=candidate,
         base_source=best_source,
         candidate_report=candidate_report,
-        factor_change_mode=current_factor_change_mode,
-        factor_mode_context=factor_mode_context,
         outcome="accepted" if accepted else "rejected",
         stop_stage="full_eval",
         gate_reason=decision_reason if not accepted else None,
         note=entry_note,
         extra_fields={
             "reference_update_kind": "champion" if champion_accepted else "none",
-            "iteration_lane": current_iteration_lane,
-            "iteration_lane_reason": iteration_lane_reason,
         },
     )
     if accepted:

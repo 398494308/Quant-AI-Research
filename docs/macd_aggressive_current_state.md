@@ -27,7 +27,7 @@
 
 说明：
 
-- `state/research_macd_aggressive_v2_best.json` 里如果还带旧字段，例如 `working_base`，那是历史兼容残留；重启后会按新的单一 active reference 语义继续写。
+- `state/research_macd_aggressive_v2_best.json` 里如果还带旧字段，例如 `working_base`，那只是历史兼容读取入口；新状态写回只使用单一 active reference 语义。
 - 当前运行状态以 [state/research_macd_aggressive_v2_heartbeat.json](../state/research_macd_aggressive_v2_heartbeat.json) 为准。
 
 ## 数据与窗口
@@ -115,14 +115,16 @@
 当前 prompt 分层：
 
 1. 仓库级 [AGENTS.md](../AGENTS.md)
-2. workspace 局部 `AGENTS.md`
-3. planner runtime prompt
-4. `wiki/reviewer_summary_card.md`
-5. `wiki/direction_board.md`
-6. `wiki/latest_history_package.md`
-7. `wiki/failure_wiki.md`
-8. `wiki/duplicate_watchlist.md`
-9. worker prompt
+2. workspace 局部 `AGENTS.md`，只放共享长期规则
+3. planner system prompt
+4. reviewer system prompt
+5. edit / repair / summary 各自的 system prompt
+6. planner runtime prompt
+7. `wiki/reviewer_summary_card.md`
+8. `wiki/direction_board.md`
+9. `wiki/latest_history_package.md`
+10. `wiki/failure_wiki.md`
+11. `wiki/duplicate_watchlist.md`
 
 其中第 6 层现在只保留精简前台记忆：
 

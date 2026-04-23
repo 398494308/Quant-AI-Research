@@ -60,11 +60,14 @@ from research_v2.prompting import (
     build_candidate_response_format_instructions,
     build_reviewer_response_format_instructions,
     build_strategy_candidate_summary_prompt,
+    build_strategy_edit_worker_system_prompt,
     build_edit_completion_instructions,
     build_strategy_agents_instructions,
     build_strategy_edit_worker_prompt,
     build_strategy_exploration_repair_prompt,
     build_strategy_no_edit_repair_prompt,
+    build_strategy_planner_system_prompt,
+    build_strategy_repair_worker_system_prompt,
     build_strategy_round_brief_repair_prompt,
     build_strategy_reviewer_prompt,
     build_strategy_reviewer_repair_prompt,
@@ -72,8 +75,6 @@ from research_v2.prompting import (
     build_strategy_research_prompt,
     build_strategy_summary_worker_system_prompt,
     build_strategy_runtime_repair_prompt,
-    build_strategy_system_prompt,
-    build_strategy_worker_system_prompt,
 )
 from research_v2.strategy_code import (
     REQUIRED_FUNCTIONS,
@@ -1154,7 +1155,7 @@ def strategy(*args, **kwargs):
 
         validate_strategy_source(source)
 
-    def test_validate_strategy_source_rejects_new_param_key_even_with_legacy_default_mode_arg(self):
+    def test_validate_strategy_source_rejects_new_param_key(self):
         base_source = self._minimal_validation_source()
         source = base_source.replace(
             "PARAMS = {'intraday_adx_min': 10}",
@@ -1163,26 +1164,7 @@ def strategy(*args, **kwargs):
         )
 
         with self.assertRaisesRegex(StrategySourceError, "new PARAMS keys are not allowed"):
-            validate_strategy_source(
-                source,
-                base_source=base_source,
-                factor_change_mode="default",
-            )
-
-    def test_validate_strategy_source_rejects_new_param_key_even_with_legacy_factor_admission_arg(self):
-        base_source = self._minimal_validation_source()
-        source = base_source.replace(
-            "PARAMS = {'intraday_adx_min': 10}",
-            "PARAMS = {'intraday_adx_min': 10, 'new_factor_gate': 1.0}",
-            1,
-        )
-
-        with self.assertRaisesRegex(StrategySourceError, "new PARAMS keys are not allowed"):
-            validate_strategy_source(
-                source,
-                base_source=base_source,
-                factor_change_mode="factor_admission",
-            )
+            validate_strategy_source(source, base_source=base_source)
 
     def test_validate_strategy_source_keeps_default_mode_complexity_growth_as_warning_only(self):
         base_source = self._minimal_validation_source()
@@ -1191,11 +1173,7 @@ def strategy(*args, **kwargs):
         )
         source = self._minimal_validation_source({"strategy": expanded_body})
 
-        validate_strategy_source(
-            source,
-            base_source=base_source,
-            factor_change_mode="default",
-        )
+        validate_strategy_source(source, base_source=base_source)
         pressure = build_strategy_complexity_pressure(source, base_source=base_source)
 
         self.assertEqual(pressure["growth_level"], "warning_2")
@@ -1571,12 +1549,13 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("不要“堆屎”", prompt)
         self.assertIn("不要换个名字再写一份重复条件", prompt)
 
-    def test_build_strategy_system_prompt_mentions_agents_md_and_text_contract(self):
-        prompt = build_strategy_system_prompt()
+    def test_build_strategy_planner_system_prompt_mentions_agents_md_and_text_contract(self):
+        prompt = build_strategy_planner_system_prompt()
 
         self.assertIn("AGENTS.md", prompt)
         self.assertIn("纯文本候选摘要", prompt)
         self.assertIn("未读到文件", prompt)
+        self.assertIn("你只能产出 round brief", prompt)
 
     def test_build_candidate_response_format_instructions_mentions_system_derived_regions(self):
         prompt = build_candidate_response_format_instructions()
@@ -1629,23 +1608,6 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("只回复 `EDIT_DONE`", prompt)
         self.assertNotIn("当前基底复杂度余量", prompt)
 
-    def test_build_strategy_edit_worker_prompt_mentions_compaction_task_when_requested(self):
-        prompt = build_strategy_edit_worker_prompt(
-            candidate_id="candidate_1",
-            primary_direction="structure | merge veto",
-            hypothesis="压缩多头最终 veto",
-            change_plan="合并重复否决，不新增 path",
-            change_tags=("merge_veto",),
-            expected_effects=("回收复杂度余量",),
-            closest_failed_cluster="veto_cluster",
-            novelty_proof="本轮只做结构性压缩。",
-            iteration_lane="compaction",
-            iteration_lane_status_text="当前 working_base 已到 warning_2，先压缩再研究。",
-        )
-
-        self.assertIn("本轮任务类型：`compaction`", prompt)
-        self.assertIn("当前 working_base 已到 warning_2", prompt)
-
     def test_build_strategy_summary_worker_system_prompt_mentions_no_edit_summary_role(self):
         prompt = build_strategy_summary_worker_system_prompt()
 
@@ -1672,13 +1634,20 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("如果 worker / repair 实际落码偏离了原 brief", prompt)
         self.assertIn("不要输出 `edited_regions`", prompt)
 
-    def test_build_strategy_worker_system_prompt_mentions_short_lived_worker_role(self):
-        prompt = build_strategy_worker_system_prompt(worker_kind="repair_worker")
+    def test_build_strategy_edit_worker_system_prompt_mentions_short_lived_worker_role(self):
+        prompt = build_strategy_edit_worker_system_prompt()
+
+        self.assertIn("短生命周期 `edit_worker`", prompt)
+        self.assertIn("不要重新做全量历史研究", prompt)
+        self.assertIn("只根据当前提示里的 round brief", prompt)
+        self.assertIn("完成编辑后只回复 `EDIT_DONE`", prompt)
+
+    def test_build_strategy_repair_worker_system_prompt_mentions_repair_only_role(self):
+        prompt = build_strategy_repair_worker_system_prompt()
 
         self.assertIn("短生命周期 `repair_worker`", prompt)
-        self.assertIn("不要重新做全量历史研究", prompt)
-        self.assertIn("只根据当前提示里的 round brief 或 repair 指令", prompt)
-        self.assertIn("完成编辑后只回复 `EDIT_DONE`", prompt)
+        self.assertIn("修技术错误、校验错误或 no-edit 问题", prompt)
+        self.assertIn("不要重写研究方向", prompt)
 
     def test_build_strategy_reviewer_system_prompt_mentions_review_only_role(self):
         prompt = build_strategy_reviewer_system_prompt()
@@ -1740,6 +1709,13 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertNotIn("当前基底复杂度余量", runtime_prompt)
         self.assertIn("删旧、并旧、改旧", system_prompt)
 
+    def test_build_strategy_agents_instructions_keeps_role_boundaries_out_of_shared_layer(self):
+        prompt = build_strategy_agents_instructions()
+
+        self.assertIn("具体角色职责以各自 `system prompt` 为准", prompt)
+        self.assertNotIn("它只能 `PASS` 或 `REVISE`", prompt)
+        self.assertNotIn("完成编辑后只回复 `EDIT_DONE`", prompt)
+
     def test_build_strategy_research_prompt_can_include_current_complexity_headroom(self):
         headroom_text = "当前基底复杂度余量（剩余越小越容易再次撞复杂度）:\n- family `trend_quality_family`: lines 剩 8, bool_ops 剩 0, ifs 剩 3"
         prompt = build_strategy_research_prompt(
@@ -1752,21 +1728,16 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertNotIn("当前基底复杂度余量", prompt)
         self.assertNotIn("trend_quality_family", prompt)
 
-    def test_build_strategy_research_prompt_can_still_echo_iteration_lane_when_provided(self):
+    def test_build_strategy_research_prompt_uses_active_reference_label(self):
         prompt = build_strategy_research_prompt(
             evaluation_summary="诊断",
             journal_summary="记忆",
             previous_best_score=1.23,
             benchmark_label="champion",
-            current_base_role="working_base",
-            iteration_lane="compaction",
-            iteration_lane_status_text="当前基底复杂度 warning_2，允许只更新 working_base。",
+            current_base_role="baseline",
         )
 
-        self.assertIn("当前工作基底角色：`working_base`", prompt)
-        self.assertIn("本轮任务类型：`compaction`", prompt)
-        self.assertNotIn("working_base_compaction", prompt)
-        self.assertNotIn("满足则更新 working_base", prompt)
+        self.assertIn("当前 active reference 角色：`baseline`", prompt)
 
     def test_build_strategy_runtime_repair_prompt_mentions_complexity_shrink_rule(self):
         prompt = build_strategy_runtime_repair_prompt(
@@ -1864,7 +1835,7 @@ class JournalPromptFixesTest(unittest.TestCase):
             journal_summary="记忆",
             previous_best_score=1.23,
         )
-        agents_prompt = build_strategy_agents_instructions()
+        planner_prompt = build_strategy_planner_system_prompt()
         exploration_prompt = build_strategy_exploration_repair_prompt(
             candidate_id="candidate_1",
             primary_direction="long | ownership routing",
@@ -1882,7 +1853,7 @@ class JournalPromptFixesTest(unittest.TestCase):
             regeneration_attempt=1,
         )
 
-        for prompt in (runtime_prompt, agents_prompt, exploration_prompt):
+        for prompt in (runtime_prompt, planner_prompt, exploration_prompt):
             self.assertIn("no_edit", prompt)
             self.assertIn("未执行代码改动", prompt)
 
@@ -2116,7 +2087,6 @@ change_plan: 放宽 long_outer_context_ok
                 round_brief=round_brief,
                 base_source=base_source,
                 workspace_root=Path(temp_dir),
-                factor_change_mode="default",
                 context_label="测试候选",
             )
 
@@ -3180,7 +3150,7 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
             self.assertNotIn("factor_change_mode", payload)
             self.assertNotIn("iteration_lane", payload)
 
-    def test_active_research_session_id_ignores_factor_mode_scope_mismatch(self):
+    def test_active_research_session_id_returns_saved_session_when_scope_matches(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             temp_paths = replace(
@@ -3203,58 +3173,10 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
                 research_script._store_research_session_metadata(
                     session_id="session-123",
                     workspace_root=temp_root / "workspace",
-                    factor_change_mode="default",
                 )
-                active_session_id = research_script._active_research_session_id(
-                    factor_change_mode="factor_admission"
-                )
+                active_session_id = research_script._active_research_session_id()
 
             self.assertEqual(active_session_id, "session-123")
-
-    def test_active_research_session_id_ignores_iteration_lane_scope_mismatch(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_root = Path(temp_dir)
-            temp_paths = replace(
-                research_script.RUNTIME.paths,
-                session_state_file=temp_root / "state/session.json",
-            )
-            temp_runtime = replace(research_script.RUNTIME, paths=temp_paths)
-
-            with mock.patch.object(research_script, "RUNTIME", temp_runtime), mock.patch.object(
-                research_script, "best_source", "def strategy(*args, **kwargs):\n    return None\n"
-            ), mock.patch.object(
-                research_script, "best_report", object()
-            ), mock.patch.object(
-                research_script, "champion_report", None
-            ), mock.patch.object(
-                research_script, "reference_stage_started_at", "2026-04-21T00:00:00+00:00"
-            ), mock.patch.object(
-                research_script, "reference_stage_iteration", 7
-            ):
-                research_script._store_research_session_metadata(
-                    session_id="session-123",
-                    workspace_root=temp_root / "workspace",
-                    factor_change_mode="default",
-                    iteration_lane="research",
-                )
-                active_session_id = research_script._active_research_session_id(
-                    factor_change_mode="default",
-                    iteration_lane="compaction",
-                )
-
-            self.assertEqual(active_session_id, "session-123")
-
-    def test_planner_session_policy_is_always_single_persistent_planner(self):
-        session_kind, use_persistent = research_script._planner_session_policy_for_iteration_lane("compaction")
-
-        self.assertEqual(session_kind, "planner")
-        self.assertTrue(use_persistent)
-
-    def test_resolve_iteration_lane_state_always_returns_research(self):
-        state = research_script._resolve_iteration_lane_state([])
-
-        self.assertEqual(state["lane"], "research")
-        self.assertEqual(state["reason"], "")
 
     def test_journal_summary_limits_recent_rows_and_meta_lines_to_requested_limit(self):
         entries = []
@@ -3960,63 +3882,6 @@ class SmokeWindowSelectionTest(unittest.TestCase):
         selected = select_smoke_windows(windows, 5)
 
         self.assertEqual([window.label for window in selected], ["train1", "val1", "train9", "train14", "train26"])
-
-
-class ResearcherAdaptiveModeTest(unittest.TestCase):
-    def test_resolve_iteration_factor_change_mode_enters_reminder_band_after_five_stalls(self):
-        entries = [
-            {"iteration": 1, "outcome": "behavioral_noop", "score_regime": research_script.SCORE_REGIME},
-            {"iteration": 2, "outcome": "exploration_blocked", "score_regime": research_script.SCORE_REGIME},
-            {"iteration": 3, "outcome": "rejected", "promotion_delta": 0.0, "score_regime": research_script.SCORE_REGIME},
-            {"iteration": 4, "outcome": "duplicate_skipped", "promotion_delta": 0.0, "score_regime": research_script.SCORE_REGIME},
-            {"iteration": 5, "outcome": "runtime_failed", "decision_reason": "complexity budget exceeded", "score_regime": research_script.SCORE_REGIME},
-        ]
-
-        mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
-
-        self.assertEqual(mode, "")
-        self.assertIn("不再自动切换", reason)
-
-    def test_resolve_iteration_factor_change_state_stays_manual_after_many_stalls(self):
-        entries = [
-            {"iteration": idx + 1, "outcome": "behavioral_noop", "score_regime": research_script.SCORE_REGIME}
-            for idx in range(7)
-        ]
-
-        state = research_script._resolve_iteration_factor_change_state(entries)
-
-        self.assertEqual(state["mode"], "")
-        self.assertEqual(state["guidance_level"], "manual")
-        self.assertEqual(state["trailing_stalls"], 0)
-
-    def test_resolve_iteration_factor_change_mode_keeps_default_after_ten_stalls(self):
-        entries = [
-            {"iteration": idx + 1, "outcome": "behavioral_noop", "score_regime": research_script.SCORE_REGIME}
-            for idx in range(10)
-        ]
-
-        mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
-
-        self.assertEqual(mode, "")
-        self.assertIn("不再自动切换", reason)
-
-    def test_resolve_iteration_factor_change_mode_returns_base_mode_after_positive_delta(self):
-        entries = [
-            {"iteration": 1, "outcome": "behavioral_noop", "score_regime": research_script.SCORE_REGIME},
-            {
-                "iteration": 2,
-                "outcome": "accepted",
-                "promotion_delta": 0.03,
-                "factor_change_mode": "factor_admission",
-                "score_regime": research_script.SCORE_REGIME,
-            },
-            {"iteration": 3, "outcome": "behavioral_noop", "score_regime": research_script.SCORE_REGIME},
-        ]
-
-        mode, reason = research_script._resolve_iteration_factor_change_mode(entries)
-
-        self.assertEqual(mode, "")
-        self.assertIn("不再自动切换", reason)
 
     def test_consecutive_no_edit_runtime_failures_counts_trailing_no_edit_only(self):
         entries = [

@@ -46,7 +46,7 @@
    整份策略文件都允许修改，但要求改动克制、结构准确、添加有必要；系统只保留必要符号与源码形状护栏。
 5. 候选必须先形成真实源码 diff，再过 `smoke`，再跑完整 `train walk-forward + val`。
 6. `behavioral_noop`、空 diff、重复源码、重复结果盆地、非法 brief、reviewer 连续打回都会被挡下。
-7. complexity 诊断仍会进入 journal 和 wiki，但不会再自动改研究车道，也不会单独沉淀一条 `working_base`。
+7. complexity 诊断仍会进入 journal 和 wiki，但只作为人工监控指标；研究器不再自动切模式，也不会单独沉淀一条 `working_base`。
 
 ## Agent / Subagent 工作流
 

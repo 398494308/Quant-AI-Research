@@ -96,30 +96,13 @@ def _missing_memory_is_not_no_edit_rule() -> str:
 # ==================== Prompt 组装 ====================
 
 
-def build_strategy_agents_instructions(*, factor_change_mode: str = "default") -> str:
-    _ = factor_change_mode
+def build_strategy_agents_instructions() -> str:
     return f"""你是 BTC 永续合约激进趋势策略研究员。
 
 项目目标：
 - 用 OKX 数据研究一套高弹性趋势捕获策略；允许较大波动，但不能靠日期特判、路径硬编码或伪优化刷分。
 - `15m` 是唯一事实源，`1h + 4h` 只是由 `15m` 聚合的确认层；突破/跌破除了成交量，也要结合方向流量代理与成交活跃度。
 - 目标不是做平滑净值，而是更早跟上 BTC 的主要上涨/下跌，并在趋势失效时更快退出或反手。
-
-角色规则：
-- `planner` 使用持久 session，负责研究方向、失败原因记忆和本轮 draft round brief。
-- `reviewer` 是短生命周期审稿 worker，只负责判定 planner 的 draft brief 当前是否值得尝试；它只能 `PASS` 或 `REVISE`，不能替 planner 发明新方向。
-- `edit_worker` / `repair_worker` 是短生命周期 worker，只负责把已确定方向落到 `src/strategy_macd_aggressive.py`，或修技术错误；它们不需要重扫全量历史。
-
-持久 session 规则（只对 `planner` 生效）：
-- 这是一个跨多轮复用的研究 session。不要假设主进程会每轮重复灌完整历史；你需要主动利用本地只读记忆文件。
-- 每轮开始优先快速扫一遍 `wiki/reviewer_summary_card.md`；它记录上一轮 reviewer 为什么放行或打回。
-- 每轮开始优先快速扫一遍 `wiki/direction_board.md`；它记录当前 active reference 下最近方向热度，不是硬门，也不是全局黑名单。
-- 每轮开始优先快速扫一遍 `wiki/duplicate_watchlist.md`；它只列最近最容易重复提交的少量源码指纹。
-- 再读 `wiki/failure_wiki.md` 的概览；新 session 首轮优先再读 `wiki/latest_history_package.md` 的摘要段。
-- 先复盘，再方案：先判断最近结构化失败证据说明上一轮为什么错、错在交易路径哪一层，再决定本轮继续还是转向；不要一上来替当前方向辩护。
-- 形成单一因果假设后，必须回看一次 `wiki/failure_wiki.md`；若命中相同或高度相似的失败 cut，优先在本轮内改写假设，不要无意义重走旧方向。
-- `memory/raw/rounds/` 与 `memory/raw/full_history.jsonl` 保留未压缩原始历史；需要深挖时去看，但优先先读 wiki 摘要与失败聚合。
-- 若 `wiki/` 或 `memory/` 里的辅助记忆暂时不可用，这不是本轮 `no_edit` 的合法理由；此时应退化为直接读取并修改 `src/strategy_macd_aggressive.py`。
 
 工作区文件职责：
 - `src/strategy_macd_aggressive.py`：唯一允许修改的策略文件。
@@ -138,8 +121,8 @@ def build_strategy_agents_instructions(*, factor_change_mode: str = "default") -
 工作方式：
 - 先想再写，先看历史再下手。
 - 不要 hard code，不要堆屎。
-- `planner` 先出 draft brief，再交给 `reviewer` 审稿；若 reviewer 打回，本轮必须先吸收打回理由，再重写 draft。
-- 先阅读并直接修改 `src/strategy_macd_aggressive.py`，必要时再看回测实现或数据文件，不要靠猜测写策略。
+- 具体角色职责以各自 `system prompt` 为准，不要把别的角色的任务揽到自己身上。
+- 必要时先阅读 `src/strategy_macd_aggressive.py` 与相关只读证据，再行动；不要靠猜测写策略。
 - 最近结构化失败证据优先级高于 `weak side` 或 champion 缺陷提示；先复盘失败点，再决定是否继续同方向。
 - 每轮只验证一个可证伪假设；改动要能映射到真实交易路径变化，而不是只制造源码 diff。
 - `primary_direction` 只写本轮主动施力方向，不要求你先证明完整因果；真正的结果好坏以后验评估为准。
@@ -152,14 +135,6 @@ def build_strategy_agents_instructions(*, factor_change_mode: str = "default") -
 - 若现有脚本里已经有近似逻辑，不要换个名字再写一份重复条件；优先删旧、并旧、改旧，禁止把同一因果链在不同 helper / path / veto 里重复实现。
 - 明确允许结构性删减轮：`remove_dead_gate`、`merge_veto`、`widen_outer_context` 都是合法 change_tags；这类轮次的目标是减少死分支、提高 reachability。
 
-输出与协作规则：
-- `planner` 只返回纯文本字段摘要，不要 JSON，不要解释，不要 markdown，不要贴源码。
-- `reviewer` 只返回 `PASS/REVISE` 审稿卡；它只能判当前 draft 是否值得继续，不能改写方向本身。
-- `edit_worker` / `repair_worker` 完成编辑后只回复 `EDIT_DONE`。
-- 主进程会直接读取工作区里改好的 `src/strategy_macd_aggressive.py`。
-- 除 `candidate_id` 与 `change_tags` 外，其余说明字段必须使用简体中文。
-- 不允许把 `blocked` / `no_edit` / `no_change` / `sandbox_blocked` / “未执行代码改动” 这类占位说明当成合法提交结果。
-
 源码护栏：
 - `src/strategy_macd_aggressive.py` 整份文件都允许修改，但改动必须克制、结构必须准确、添加必须有必要。
 - 你不需要再自报 `edited_regions`；系统会根据真实 diff 自动归类 region / family，并据此做重复探索与结构诊断。
@@ -170,29 +145,27 @@ def build_strategy_agents_instructions(*, factor_change_mode: str = "default") -
 """
 
 
-def build_strategy_system_prompt(*, factor_change_mode: str = "default") -> str:
-    _ = factor_change_mode
+def build_strategy_planner_system_prompt() -> str:
     return f"""遵守当前工作区本地 `AGENTS.md`，它是本 session 的长期规则。
 
 你在一个持久研究 session 中工作；当前用户提示只补充本轮目标、诊断和失败反馈。
-如果你当前是 `planner`，默认先复盘最近结构化失败证据，再决定 round brief；不要先替当前方向辩护。
+你当前是 `planner`。
+- 先复盘最近结构化失败证据，再决定 round brief；不要先替当前方向辩护。
+- 你只能产出 round brief，不要直接编辑文件。
+- 除 `candidate_id` 与 `change_tags` 外，其余说明字段必须使用简体中文。
+- 不允许把 `blocked` / `no_edit` / `no_change` / `sandbox_blocked` / “未执行代码改动” 这类占位说明当成合法提交结果。
 {_text_only_output_contract()}
 {_single_strategy_file_scope_rule()}
 {_missing_memory_is_not_no_edit_rule()}
 """
 
 
-def build_strategy_worker_system_prompt(
-    *,
-    factor_change_mode: str = "default",
-    worker_kind: str = "edit_worker",
-) -> str:
-    _ = factor_change_mode
+def build_strategy_edit_worker_system_prompt() -> str:
     return f"""遵守当前工作区本地 `AGENTS.md`，它是当前工作区的长期规则。
 
-你当前是短生命周期 `{worker_kind}`，不是持久研究 planner。
+你当前是短生命周期 `edit_worker`，不是持久研究 planner。
 - 不要重新做全量历史研究，不要重新定义本轮方向。
-- 只根据当前提示里的 round brief 或 repair 指令，直接修改 `src/strategy_macd_aggressive.py`。
+- 只根据当前提示里的 round brief，直接修改 `src/strategy_macd_aggressive.py`。
 - {_single_strategy_file_scope_rule()}
 - 完成编辑后只回复 `EDIT_DONE`。
 - 禁止输出 JSON、markdown、解释、计划或源码。
@@ -200,8 +173,21 @@ def build_strategy_worker_system_prompt(
 """
 
 
-def build_strategy_summary_worker_system_prompt(*, factor_change_mode: str = "default") -> str:
-    _ = factor_change_mode
+def build_strategy_repair_worker_system_prompt() -> str:
+    return f"""遵守当前工作区本地 `AGENTS.md`，它是当前工作区的长期规则。
+
+你当前是短生命周期 `repair_worker`，不是持久研究 planner。
+- 不要重新做全量历史研究，不要重新定义本轮方向。
+- 只根据当前提示里的 repair 指令修技术错误、校验错误或 no-edit 问题，直接修改 `src/strategy_macd_aggressive.py`。
+- 不要重写研究方向，不要把 repair 变成新一轮探索。
+- {_single_strategy_file_scope_rule()}
+- 完成编辑后只回复 `EDIT_DONE`。
+- 禁止输出 JSON、markdown、解释、计划或源码。
+- {_missing_memory_is_not_no_edit_rule()}
+"""
+
+
+def build_strategy_summary_worker_system_prompt() -> str:
     return f"""遵守当前工作区本地 `AGENTS.md`，它是当前工作区的长期规则。
 
 你当前是短生命周期 `summary_worker`，不是持久研究 planner，也不是 edit worker。
@@ -212,8 +198,7 @@ def build_strategy_summary_worker_system_prompt(*, factor_change_mode: str = "de
 """
 
 
-def build_strategy_reviewer_system_prompt(*, factor_change_mode: str = "default") -> str:
-    _ = factor_change_mode
+def build_strategy_reviewer_system_prompt() -> str:
     return f"""遵守当前工作区本地 `AGENTS.md`，它是当前工作区的长期规则。
 
 你当前是短生命周期 `reviewer`，不是持久研究 planner，也不是 edit worker。
@@ -297,10 +282,6 @@ def build_strategy_research_prompt(
     current_base_role: str = "champion",
     score_regime: str = "trend_capture_v6",
     promotion_min_delta: float = 0.02,
-    factor_change_mode: str = "default",
-    factor_mode_status_text: str = "",
-    iteration_lane: str = "research",
-    iteration_lane_status_text: str = "",
     current_complexity_headroom_text: str = "",
     session_mode: str = "resume",
     operator_focus_text: str = "",
@@ -312,8 +293,6 @@ def build_strategy_research_prompt(
     failure_wiki_path: str = "wiki/failure_wiki.md",
     duplicate_watchlist_path: str = "wiki/duplicate_watchlist.md",
 ) -> str:
-    _ = factor_change_mode
-    _ = factor_mode_status_text
     _ = current_complexity_headroom_text
     side_bias_guidance = _side_bias_guidance(reference_metrics)
     side_bias_block = f"\n{side_bias_guidance}\n" if side_bias_guidance else ""
@@ -326,11 +305,6 @@ def build_strategy_research_prompt(
             f"- 文件: `{operator_focus_path}`\n"
             f"{operator_focus_text.strip()}\n"
         )
-    iteration_lane_block = (
-        f"本轮任务类型：`{iteration_lane}`\n- {iteration_lane_status_text.strip()}\n"
-        if iteration_lane_status_text.strip()
-        else ""
-    )
     bootstrap_excerpt = _bootstrap_journal_excerpt(journal_summary, max_lines=10, max_chars=900)
     bootstrap_block = ""
     if session_mode == "bootstrap":
@@ -358,7 +332,7 @@ def build_strategy_research_prompt(
 - 当前评分口径是 `{score_regime}`；只有在 `gate` 通过，且相对当前 {benchmark_label} 的有效 `promotion_delta > {promotion_min_delta:.2f}` 时，候选才有资格刷新当前 active reference。
 - `train` 看滚动窗口均值/中位数，`val` 看连续 holdout 的 `promotion_score`，`test` 只做只读观察，不参与晋升。
 
-当前工作基底角色：`{current_base_role}`
+当前 active reference 角色：`{current_base_role}`
 当前 {benchmark_label} 参考晋级分：{previous_best_score:.2f}
 {side_bias_block}
 {champion_focus_block}
@@ -379,7 +353,6 @@ def build_strategy_research_prompt(
 4. 再决定本轮继续还是转向；如果某个主方向已经高热，本轮至少要换失败层、关键规则链或真实触达路径，不要只换标签。
 5. 最后才提出一个单一因果假设，并明确它预计会新增、删除或迁移哪类真实交易。
 6. 形成假设后，必须回看一次 `{direction_board_path}`、`{duplicate_watchlist_path}` 与 `{failure_wiki_path}` 做自检；若你这次仍在同一高热热区横移，优先在本轮内改写假设再提交。
-{iteration_lane_block}
 
 {evaluation_summary}
 
@@ -487,17 +460,10 @@ def build_strategy_edit_worker_prompt(
     expected_effects: tuple[str, ...],
     novelty_proof: str,
     closest_failed_cluster: str = "",
-    iteration_lane: str = "research",
-    iteration_lane_status_text: str = "",
     current_complexity_headroom_text: str = "",
 ) -> str:
     _ = current_complexity_headroom_text
     _ = closest_failed_cluster
-    iteration_lane_block = (
-        f"\n本轮任务类型：`{iteration_lane}`\n- {iteration_lane_status_text.strip()}\n"
-        if iteration_lane_status_text.strip()
-        else "\n"
-    )
     return f"""你现在负责把已经确定的 round brief 直接落到代码。
 
 本轮 round brief：
@@ -518,7 +484,6 @@ def build_strategy_edit_worker_prompt(
 - 保持代码结构化，不要做无关重构、大面积格式化或复制已有因果链。
 - 只要完成真实落码并保存文件，就回复 `EDIT_DONE`。不要输出解释、计划、JSON、markdown 或源码。
 - 如果辅助记忆文件读不到，不是合法 no-edit 理由；直接以当前 `src/strategy_macd_aggressive.py` 为事实源落码。
-{iteration_lane_block}
 当前阶段唯一完成条件：
 {build_edit_completion_instructions()}
 """

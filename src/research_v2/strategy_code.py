@@ -223,7 +223,7 @@ def complexity_pressure_label(level: str) -> str:
     if normalized == "warning_2":
         return "warning_2（接近危险区，优先先压缩再新增）"
     if normalized == "hard_cap":
-        return "hard_cap（超出绝对复杂度帽，直接拒收）"
+        return "hard_cap（高压区，仅供人工监控，优先压缩）"
     return "normal（空间正常）"
 
 
@@ -911,13 +911,11 @@ def _validate_complexity_budget(
     *,
     tree: ast.Module,
     base_source: str | None,
-    factor_change_mode: str,
 ) -> None:
     # 复杂度只保留快照与人工诊断，不再作为自动拒收条件。
     _ = source
     _ = tree
     _ = base_source
-    _ = factor_change_mode
 
 
 def _undefined_function_reference_errors(source: str, tree: ast.Module) -> list[str]:
@@ -1072,9 +1070,7 @@ def validate_strategy_source(
     source: str,
     *,
     base_source: str | None = None,
-    factor_change_mode: str = "default",
 ) -> None:
-    _ = factor_change_mode
     normalized = normalize_strategy_source(source)
     missing_functions = missing_required_functions(normalized)
     if missing_functions:
@@ -1153,5 +1149,4 @@ def validate_strategy_source(
         normalized,
         tree=tree,
         base_source=base_source,
-        factor_change_mode="default",
     )
