@@ -71,6 +71,10 @@ from research_v2.prompting import (
     build_strategy_exploration_repair_prompt,
     build_strategy_no_edit_repair_prompt,
     build_strategy_round_brief_repair_prompt,
+    build_strategy_reviewer_prompt,
+    build_strategy_reviewer_repair_prompt,
+    build_strategy_reviewer_revise_prompt,
+    build_strategy_reviewer_system_prompt,
     build_strategy_research_prompt,
     build_strategy_summary_worker_system_prompt,
     build_strategy_runtime_repair_prompt,
@@ -111,6 +115,16 @@ SCORE_REGIME = "trend_capture_v6"
 MODEL_WORKSPACE_STRATEGY_PATH = Path("src/strategy_macd_aggressive.py")
 PLANNER_BRIEF_REQUIRED_FIELDS = ("hypothesis", "change_plan", "novelty_proof", "change_tags")
 MAX_PLANNER_BRIEF_REPAIR_ATTEMPTS = 1
+REVIEWER_REQUIRED_FIELDS = (
+    "verdict",
+    "reviewer_summary",
+    "rejection_type",
+    "matched_evidence",
+    "must_change",
+    "why_not_new",
+)
+MAX_REVIEWER_REPAIR_ATTEMPTS = 1
+MAX_REVIEWER_REVISE_ATTEMPTS = 2
 
 best_source = ""
 best_report: EvaluationReport | None = None
@@ -149,6 +163,30 @@ class PlannerBriefInvalid(Exception):
 
     def __str__(self) -> str:
         return self.errors[-1] if self.errors else "planner round brief invalid"
+
+
+@dataclass(frozen=True)
+class StrategyReviewerDecision:
+    verdict: str
+    reviewer_summary: str
+    rejection_type: str
+    matched_evidence: str
+    must_change: str
+    why_not_new: str
+
+    @property
+    def is_pass(self) -> bool:
+        return self.verdict == "PASS"
+
+
+@dataclass(frozen=True)
+class ReviewerRejected(Exception):
+    candidate: StrategyCandidate
+    block_info: dict[str, Any]
+    errors: tuple[str, ...]
+
+    def __str__(self) -> str:
+        return self.errors[-1] if self.errors else "reviewer rejected planner brief"
 
 
 # ==================== 日志与心跳 ====================
@@ -445,11 +483,16 @@ def _prepare_agent_workspace(
     if (REPO_ROOT / "data").exists():
         _ensure_workspace_link(workspace_root / "data", REPO_ROOT / "data")
     _ensure_workspace_link(workspace_root / "memory", RUNTIME.paths.memory_dir)
+    reviewer_summary_path = _reviewer_summary_card_path()
+    if not reviewer_summary_path.exists():
+        reviewer_summary_path.parent.mkdir(parents=True, exist_ok=True)
+        reviewer_summary_path.write_text("")
     memory_paths = {
         "history_package": RUNTIME.paths.memory_dir / "prompt/latest_history_package.md",
         "duplicate_watchlist": RUNTIME.paths.memory_dir / "wiki/duplicate_watchlist.md",
         "failure_wiki_md": RUNTIME.paths.memory_dir / "wiki/failure_wiki.md",
         "failure_wiki_json": RUNTIME.paths.memory_dir / "wiki/failure_wiki_index.json",
+        "reviewer_summary_card": RUNTIME.paths.memory_dir / "wiki/reviewer_summary_card.md",
         "last_rejected_candidate": RUNTIME.paths.memory_dir / "wiki/last_rejected_candidate.py",
         "last_rejected_snapshot": RUNTIME.paths.memory_dir / "wiki/last_rejected_snapshot.md",
     }
@@ -460,11 +503,62 @@ def _prepare_agent_workspace(
                 "duplicate_watchlist": workspace_root / "wiki/duplicate_watchlist.md",
                 "failure_wiki_md": workspace_root / "wiki/failure_wiki.md",
                 "failure_wiki_json": workspace_root / "wiki/failure_wiki_index.json",
+                "reviewer_summary_card": workspace_root / "wiki/reviewer_summary_card.md",
                 "last_rejected_candidate": workspace_root / "wiki/last_rejected_candidate.py",
                 "last_rejected_snapshot": workspace_root / "wiki/last_rejected_snapshot.md",
             }[key]
             _ensure_workspace_link(link_name, target_path)
     return workspace_root
+
+
+def _reviewer_summary_card_path(memory_root: Path | None = None) -> Path:
+    root = memory_root or RUNTIME.paths.memory_dir
+    return root / "wiki/reviewer_summary_card.md"
+
+
+def _load_reviewer_summary_text(memory_root: Path | None = None) -> str:
+    path = _reviewer_summary_card_path(memory_root)
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
+
+
+def _persist_reviewer_summary_card(
+    *,
+    memory_root: Path,
+    round_brief: StrategyRoundBrief,
+    decision: StrategyReviewerDecision,
+    iteration_id: int,
+    stage_label: str,
+) -> None:
+    path = _reviewer_summary_card_path(memory_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "# Reviewer Summary Card",
+                "",
+                "说明：",
+                "- 这张卡来自上一轮 reviewer 审稿，不是人工硬限制。",
+                "- planner 下一版开始前先看这里，再决定是否继续原方向。",
+                "- 若 `verdict=REVISE`，说明上一版 draft 当前不值得进入落码；必须先吸收打回理由，再重写 draft。",
+                "",
+                f"- iteration: {iteration_id}",
+                f"- stage_label: {stage_label}",
+                f"- candidate_id: {round_brief.candidate_id or '-'}",
+                f"- verdict: {decision.verdict}",
+                f"- reviewer_summary: {decision.reviewer_summary or '-'}",
+                f"- rejection_type: {decision.rejection_type or '-'}",
+                f"- matched_evidence: {decision.matched_evidence or '-'}",
+                f"- must_change: {decision.must_change or '-'}",
+                f"- why_not_new: {decision.why_not_new or '-'}",
+            ]
+        )
+        + "\n"
+    )
 
 
 def _workspace_strategy_path(workspace_root: Path) -> Path:
@@ -1513,9 +1607,28 @@ MODEL_RESPONSE_FIELDS = (
     "novelty_proof",
     "core_factors",
 )
-MODEL_RESPONSE_FIELD_PATTERN = re.compile(
-    r"^(candidate_id|hypothesis|change_plan|change_tags|expected_effects|closest_failed_cluster|novelty_proof|core_factors)\s*:\s*(.*)$",
-    re.IGNORECASE,
+def _build_field_pattern(*field_names: str) -> re.Pattern[str]:
+    joined = "|".join(re.escape(name) for name in field_names)
+    return re.compile(rf"^({joined})\s*:\s*(.*)$", re.IGNORECASE)
+
+
+MODEL_RESPONSE_FIELD_PATTERN = _build_field_pattern(
+    "candidate_id",
+    "hypothesis",
+    "change_plan",
+    "change_tags",
+    "expected_effects",
+    "closest_failed_cluster",
+    "novelty_proof",
+    "core_factors",
+)
+REVIEWER_RESPONSE_FIELD_PATTERN = _build_field_pattern(
+    "verdict",
+    "reviewer_summary",
+    "rejection_type",
+    "matched_evidence",
+    "must_change",
+    "why_not_new",
 )
 EDIT_COMPLETION_TOKEN = "EDIT_DONE"
 NO_EDIT_ERROR_MESSAGE = "candidate missing actual changed regions"
@@ -1530,14 +1643,14 @@ def _is_no_edit_error_message(message: str) -> bool:
     return NO_EDIT_ERROR_MESSAGE in str(message or "").strip().lower()
 
 
-def _response_field_lines(raw_text: str) -> dict[str, list[str]]:
+def _response_field_lines(raw_text: str, *, field_pattern: re.Pattern[str] = MODEL_RESPONSE_FIELD_PATTERN) -> dict[str, list[str]]:
     field_lines: dict[str, list[str]] = {}
     current_field = ""
     for raw_line in str(raw_text or "").splitlines():
         stripped = raw_line.strip()
         if not stripped:
             continue
-        match = MODEL_RESPONSE_FIELD_PATTERN.match(stripped)
+        match = field_pattern.match(stripped)
         if match:
             current_field = match.group(1).lower()
             value = match.group(2).strip()
@@ -1633,7 +1746,7 @@ def _parse_model_candidate_payload(raw_text: str) -> dict[str, Any]:
         normalized["__raw_text__"] = text
         return normalized
 
-    field_lines = _response_field_lines(text)
+    field_lines = _response_field_lines(text, field_pattern=MODEL_RESPONSE_FIELD_PATTERN)
     if not field_lines:
         return {
             "__raw_text__": text,
@@ -1668,6 +1781,35 @@ def _parse_model_candidate_payload(raw_text: str) -> dict[str, Any]:
     }
 
 
+def _parse_model_reviewer_payload(raw_text: str) -> dict[str, Any]:
+    text = str(raw_text or "").strip()
+    if not text:
+        raise StrategySourceError("reviewer response is empty")
+
+    field_lines = _response_field_lines(text, field_pattern=REVIEWER_RESPONSE_FIELD_PATTERN)
+    if not field_lines:
+        return {
+            "__raw_text__": text,
+            "__format_error__": "missing_reviewer_field_contract",
+            "verdict": "",
+            "reviewer_summary": "",
+            "rejection_type": "",
+            "matched_evidence": "",
+            "must_change": "",
+            "why_not_new": "",
+        }
+
+    return {
+        "__raw_text__": text,
+        "verdict": _collapse_field_text(field_lines.get("verdict", [])).upper(),
+        "reviewer_summary": _collapse_field_text(field_lines.get("reviewer_summary", [])),
+        "rejection_type": _collapse_field_text(field_lines.get("rejection_type", [])),
+        "matched_evidence": _collapse_field_text(field_lines.get("matched_evidence", [])),
+        "must_change": _collapse_field_text(field_lines.get("must_change", [])),
+        "why_not_new": _collapse_field_text(field_lines.get("why_not_new", [])),
+    }
+
+
 def _round_brief_missing_fields(payload: dict[str, Any]) -> tuple[str, ...]:
     missing: list[str] = []
     if str(payload.get("__format_error__", "")).strip() == "missing_field_contract":
@@ -1696,6 +1838,54 @@ def _validate_round_brief_payload(payload: dict[str, Any]) -> None:
     raise StrategySourceError(
         "planner round brief missing required fields: "
         + ", ".join(missing_fields)
+    )
+
+
+def _reviewer_missing_fields(payload: dict[str, Any]) -> tuple[str, ...]:
+    missing: list[str] = []
+    if str(payload.get("__format_error__", "")).strip() == "missing_reviewer_field_contract":
+        return REVIEWER_REQUIRED_FIELDS
+
+    verdict = str(payload.get("verdict", "")).strip().upper()
+    reviewer_summary = str(payload.get("reviewer_summary", "")).strip()
+    rejection_type = str(payload.get("rejection_type", "")).strip()
+    matched_evidence = str(payload.get("matched_evidence", "")).strip()
+    must_change = str(payload.get("must_change", "")).strip()
+    why_not_new = str(payload.get("why_not_new", "")).strip()
+
+    if verdict not in {"PASS", "REVISE"}:
+        missing.append("verdict")
+    if not reviewer_summary:
+        missing.append("reviewer_summary")
+    if not rejection_type:
+        missing.append("rejection_type")
+    if not matched_evidence:
+        missing.append("matched_evidence")
+    if not must_change:
+        missing.append("must_change")
+    if not why_not_new:
+        missing.append("why_not_new")
+    return tuple(missing)
+
+
+def _validate_reviewer_payload(payload: dict[str, Any]) -> None:
+    missing_fields = _reviewer_missing_fields(payload)
+    if missing_fields:
+        raise StrategySourceError(
+            "reviewer decision missing required fields: "
+            + ", ".join(missing_fields)
+        )
+
+
+def _reviewer_decision_from_payload(payload: dict[str, Any]) -> StrategyReviewerDecision:
+    _validate_reviewer_payload(payload)
+    return StrategyReviewerDecision(
+        verdict=str(payload.get("verdict", "")).strip().upper(),
+        reviewer_summary=str(payload.get("reviewer_summary", "")).strip(),
+        rejection_type=str(payload.get("rejection_type", "")).strip(),
+        matched_evidence=str(payload.get("matched_evidence", "")).strip(),
+        must_change=str(payload.get("must_change", "")).strip(),
+        why_not_new=str(payload.get("why_not_new", "")).strip(),
     )
 
 
@@ -2315,6 +2505,246 @@ def _request_validated_round_brief(
     raise StrategySourceError("planner round brief validation loop exhausted")
 
 
+def _run_model_reviewer_request(
+    *,
+    prompt: str,
+    system_prompt: str,
+    phase: str,
+    workspace_root: Path,
+    repair_attempt: int | None = None,
+) -> dict[str, Any]:
+    raw_text = _run_model_text_request(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        phase=phase,
+        workspace_root=workspace_root,
+        repair_attempt=repair_attempt,
+        session_kind="reviewer",
+        use_persistent_session=False,
+    )
+    return _parse_model_reviewer_payload(raw_text)
+
+
+def _request_validated_reviewer_decision(
+    *,
+    prompt: str,
+    workspace_root: Path,
+    phase: str,
+    retry_phase: str,
+) -> StrategyReviewerDecision:
+    payload = _run_model_reviewer_request(
+        prompt=prompt,
+        system_prompt=build_strategy_reviewer_system_prompt(),
+        phase=phase,
+        workspace_root=workspace_root,
+    )
+    errors: list[str] = []
+    current_payload = payload
+    for attempt in range(MAX_REVIEWER_REPAIR_ATTEMPTS + 1):
+        try:
+            return _reviewer_decision_from_payload(current_payload)
+        except StrategySourceError as exc:
+            errors.append(str(exc))
+            if attempt >= MAX_REVIEWER_REPAIR_ATTEMPTS:
+                raise ReviewerRejected(
+                    candidate=StrategyCandidate(
+                        candidate_id=f"reviewer_invalid_{int(time.time())}",
+                        hypothesis="reviewer 未按字段契约返回有效审稿结果。",
+                        change_plan="重新按 reviewer 字段契约返回 verdict、reviewer_summary 与必要的打回信息。",
+                        closest_failed_cluster="reviewer_invalid",
+                        novelty_proof="reviewer 输出缺少核心字段，未形成可执行审稿结论。",
+                        change_tags=("reviewer_invalid",),
+                        edited_regions=tuple(),
+                        expected_effects=tuple(),
+                        core_factors=tuple(),
+                        strategy_code=best_source,
+                    ),
+                    block_info={
+                        "block_kind": "reviewer_invalid",
+                        "stop_stage": "blocked_invalid_generation",
+                        "blocked_cluster": "reviewer_invalid",
+                        "blocked_reason": errors[-1],
+                        "current_locks": tuple(),
+                        "invalid_reasons": tuple(errors),
+                        "feedback_note": "\n".join(
+                            [
+                                "reviewer 输出无效，当前轮次没有拿到可执行审稿结论。",
+                                f"- 无效原因: {errors[-1]}",
+                                f"- 原始回复摘录: {_raw_response_excerpt(current_payload) or '-'}",
+                                "- reviewer 只能返回 PASS/REVISE 审稿卡，不要输出随笔、JSON 或 markdown。",
+                            ]
+                        ),
+                    },
+                    errors=tuple(errors),
+                ) from exc
+
+            retry_attempt = attempt + 1
+            log_info(
+                f"第 {iteration_counter} 轮 reviewer 结果非法，尝试同轮补正 "
+                f"{retry_attempt}/{MAX_REVIEWER_REPAIR_ATTEMPTS}: {errors[-1]}"
+            )
+            write_heartbeat(
+                "reviewer_repairing",
+                message=f"iteration {iteration_counter} repairing reviewer result",
+                repair_attempt=retry_attempt,
+                max_repair_attempts=MAX_REVIEWER_REPAIR_ATTEMPTS,
+                error=errors[-1],
+            )
+            repair_prompt = build_strategy_reviewer_repair_prompt(
+                retry_attempt=retry_attempt,
+                invalid_reason=errors[-1],
+                raw_response_excerpt=_raw_response_excerpt(current_payload),
+            )
+            current_payload = _run_model_reviewer_request(
+                prompt=repair_prompt,
+                system_prompt=build_strategy_reviewer_system_prompt(),
+                phase=retry_phase,
+                workspace_root=workspace_root,
+                repair_attempt=retry_attempt,
+            )
+
+    raise StrategySourceError("reviewer validation loop exhausted")
+
+
+def _reviewer_rejected_candidate(
+    *,
+    round_brief: StrategyRoundBrief,
+    base_source: str,
+) -> StrategyCandidate:
+    return StrategyCandidate(
+        candidate_id=round_brief.candidate_id or f"reviewer_rejected_{int(time.time())}",
+        hypothesis=round_brief.hypothesis or "reviewer 判定当前 draft brief 不值得继续。",
+        change_plan=round_brief.change_plan or "根据 reviewer 打回信息重写 round brief。",
+        closest_failed_cluster=round_brief.closest_failed_cluster or "reviewer_rejected",
+        novelty_proof=round_brief.novelty_proof or "reviewer 已判定当前 draft 仍属旧失败近邻。",
+        change_tags=round_brief.change_tags or ("reviewer_rejected",),
+        edited_regions=tuple(),
+        expected_effects=round_brief.expected_effects,
+        core_factors=round_brief.core_factors,
+        strategy_code=base_source,
+    )
+
+
+def _reviewer_rejection_block_info(
+    *,
+    round_brief: StrategyRoundBrief,
+    decision: StrategyReviewerDecision,
+) -> dict[str, Any]:
+    blocked_cluster = round_brief.closest_failed_cluster or "reviewer_rejected"
+    blocked_reason = decision.reviewer_summary or "reviewer 判定当前 draft 不值得继续"
+    feedback_lines = [
+        "reviewer 已打回当前 planner draft brief；本轮没有进入 edit_worker。",
+        f"- reviewer_summary: {decision.reviewer_summary or '-'}",
+        f"- rejection_type: {decision.rejection_type or '-'}",
+        f"- matched_evidence: {decision.matched_evidence or '-'}",
+        f"- must_change: {decision.must_change or '-'}",
+        f"- why_not_new: {decision.why_not_new or '-'}",
+        "- 下一版 planner draft 必须先吸收 reviewer 打回信息，再重写方向。",
+    ]
+    return {
+        "block_kind": "reviewer_rejected",
+        "stop_stage": "blocked_invalid_generation",
+        "blocked_cluster": blocked_cluster,
+        "blocked_reason": blocked_reason,
+        "current_locks": tuple(),
+        "invalid_reasons": (decision.rejection_type, decision.must_change),
+        "feedback_note": "\n".join(feedback_lines),
+    }
+
+
+def _review_and_revise_round_brief(
+    *,
+    round_brief: StrategyRoundBrief,
+    base_source: str,
+    evaluation_summary: str,
+    journal_summary: str,
+    workspace_root: Path,
+    factor_change_mode: str,
+    iteration_lane: str,
+    iteration_lane_reason: str,
+    planner_session_kind: str,
+    use_persistent_planner_session: bool,
+    reviewer_phase: str,
+    reviewer_retry_phase: str,
+    planner_revise_phase: str,
+    planner_revise_retry_phase: str,
+    stage_label: str,
+) -> StrategyRoundBrief:
+    current_brief = round_brief
+    for attempt in range(MAX_REVIEWER_REVISE_ATTEMPTS + 1):
+        reviewer_prompt = build_strategy_reviewer_prompt(
+            evaluation_summary=evaluation_summary,
+            journal_summary=journal_summary,
+            round_brief_text=_round_brief_task_summary(current_brief),
+        )
+        decision = _request_validated_reviewer_decision(
+            prompt=reviewer_prompt,
+            workspace_root=workspace_root,
+            phase=reviewer_phase,
+            retry_phase=reviewer_retry_phase,
+        )
+        _persist_reviewer_summary_card(
+            memory_root=RUNTIME.paths.memory_dir,
+            round_brief=current_brief,
+            decision=decision,
+            iteration_id=iteration_counter,
+            stage_label=stage_label,
+        )
+        if decision.is_pass:
+            return current_brief
+
+        if attempt >= MAX_REVIEWER_REVISE_ATTEMPTS:
+            raise ReviewerRejected(
+                candidate=_reviewer_rejected_candidate(
+                    round_brief=current_brief,
+                    base_source=base_source,
+                ),
+                block_info=_reviewer_rejection_block_info(
+                    round_brief=current_brief,
+                    decision=decision,
+                ),
+                errors=(decision.reviewer_summary, decision.must_change),
+            )
+
+        revise_attempt = attempt + 1
+        log_info(
+            f"第 {iteration_counter} 轮 reviewer 打回 planner draft，尝试同轮重写 "
+            f"{revise_attempt}/{MAX_REVIEWER_REVISE_ATTEMPTS}: {decision.reviewer_summary}"
+        )
+        write_heartbeat(
+            "reviewer_revising",
+            message=f"iteration {iteration_counter} planner revising after reviewer reject",
+            repair_attempt=revise_attempt,
+            max_repair_attempts=MAX_REVIEWER_REVISE_ATTEMPTS,
+            gate=decision.rejection_type,
+        )
+        revise_prompt = build_strategy_reviewer_revise_prompt(
+            round_brief_text=_round_brief_task_summary(current_brief),
+            reviewer_verdict=decision.verdict,
+            reviewer_summary=decision.reviewer_summary,
+            rejection_type=decision.rejection_type,
+            matched_evidence=decision.matched_evidence,
+            must_change=decision.must_change,
+            why_not_new=decision.why_not_new,
+        )
+        current_brief = _request_validated_round_brief(
+            base_source=base_source,
+            prompt=revise_prompt,
+            system_prompt=build_strategy_system_prompt(
+                factor_change_mode=factor_change_mode,
+            ),
+            phase=planner_revise_phase,
+            workspace_root=workspace_root,
+            factor_change_mode=factor_change_mode,
+            iteration_lane=iteration_lane,
+            retry_phase=planner_revise_retry_phase,
+            session_kind=planner_session_kind,
+            use_persistent_session=use_persistent_planner_session,
+        )
+
+    raise StrategySourceError("reviewer revise loop exhausted")
+
+
 def _build_model_round_brief(
     base_source: str,
     journal_entries: list[dict[str, Any]],
@@ -2332,6 +2762,18 @@ def _build_model_round_brief(
     benchmark_report = _reference_benchmark_report()
     if benchmark_report is None:
         raise StrategySourceError("reference benchmark is not initialized")
+    journal_summary = build_journal_prompt_summary(
+        journal_entries,
+        limit=RUNTIME.max_recent_journal_entries,
+        journal_path=RUNTIME.paths.journal_file,
+        current_score_regime=SCORE_REGIME,
+        current_iteration=iteration_counter,
+        active_stage_started_at=reference_stage_started_at,
+        active_stage_iteration=reference_stage_iteration,
+        reference_role=_reference_role(),
+        reference_metrics=benchmark_report.metrics,
+        memory_root=RUNTIME.paths.memory_dir,
+    )
 
     session_mode = (
         "resume"
@@ -2343,18 +2785,7 @@ def _build_model_round_brief(
     )
     prompt = build_strategy_research_prompt(
         evaluation_summary=report.prompt_summary_text,
-        journal_summary=build_journal_prompt_summary(
-            journal_entries,
-            limit=RUNTIME.max_recent_journal_entries,
-            journal_path=RUNTIME.paths.journal_file,
-            current_score_regime=SCORE_REGIME,
-            current_iteration=iteration_counter,
-            active_stage_started_at=reference_stage_started_at,
-            active_stage_iteration=reference_stage_iteration,
-            reference_role=_reference_role(),
-            reference_metrics=benchmark_report.metrics,
-            memory_root=RUNTIME.paths.memory_dir,
-        ),
+        journal_summary=journal_summary,
         previous_best_score=benchmark_report.metrics["promotion_score"],
         reference_metrics=benchmark_report.metrics,
         benchmark_label=_benchmark_role(),
@@ -2369,8 +2800,9 @@ def _build_model_round_brief(
         session_mode=session_mode,
         operator_focus_text=_load_operator_focus_text(),
         operator_focus_path="config/research_v2_operator_focus.md",
+        reviewer_summary_text=_load_reviewer_summary_text(),
     )
-    return _request_validated_round_brief(
+    round_brief = _request_validated_round_brief(
         base_source=base_source,
         prompt=prompt,
         system_prompt=build_strategy_system_prompt(
@@ -2383,6 +2815,23 @@ def _build_model_round_brief(
         retry_phase="model_planner_brief_repair",
         session_kind=planner_session_kind,
         use_persistent_session=use_persistent_planner_session,
+    )
+    return _review_and_revise_round_brief(
+        round_brief=round_brief,
+        base_source=base_source,
+        evaluation_summary=report.prompt_summary_text,
+        journal_summary=journal_summary,
+        workspace_root=workspace_root,
+        factor_change_mode=factor_change_mode,
+        iteration_lane=iteration_lane,
+        iteration_lane_reason=iteration_lane_reason,
+        planner_session_kind=planner_session_kind,
+        use_persistent_planner_session=use_persistent_planner_session,
+        reviewer_phase="model_reviewer",
+        reviewer_retry_phase="model_reviewer_repair",
+        planner_revise_phase="model_planner_reviewer_revise",
+        planner_revise_retry_phase="model_planner_reviewer_revise_brief_repair",
+        stage_label="planner_review",
     )
 
 
@@ -2515,7 +2964,7 @@ def _regenerate_model_round_brief(
         regeneration_attempt=regeneration_attempt,
         feedback_note=str(block_info.get("feedback_note", "")).strip(),
     )
-    return _request_validated_round_brief(
+    round_brief = _request_validated_round_brief(
         base_source=base_source,
         prompt=prompt,
         system_prompt=build_strategy_system_prompt(
@@ -2528,6 +2977,39 @@ def _regenerate_model_round_brief(
         retry_phase="model_regenerate_brief_repair",
         session_kind=planner_session_kind,
         use_persistent_session=use_persistent_planner_session,
+    )
+    benchmark_report = _reference_benchmark_report()
+    if benchmark_report is None or best_report is None:
+        raise StrategySourceError("reference benchmark is not initialized")
+    journal_entries = load_journal_entries(RUNTIME.paths.journal_file)
+    journal_summary = build_journal_prompt_summary(
+        journal_entries,
+        limit=RUNTIME.max_recent_journal_entries,
+        journal_path=RUNTIME.paths.journal_file,
+        current_score_regime=SCORE_REGIME,
+        current_iteration=iteration_counter,
+        active_stage_started_at=reference_stage_started_at,
+        active_stage_iteration=reference_stage_iteration,
+        reference_role=_reference_role(),
+        reference_metrics=benchmark_report.metrics,
+        memory_root=RUNTIME.paths.memory_dir,
+    )
+    return _review_and_revise_round_brief(
+        round_brief=round_brief,
+        base_source=base_source,
+        evaluation_summary=best_report.prompt_summary_text,
+        journal_summary=journal_summary,
+        workspace_root=workspace_root,
+        factor_change_mode=factor_change_mode,
+        iteration_lane=iteration_lane,
+        iteration_lane_reason=iteration_lane_reason,
+        planner_session_kind=planner_session_kind,
+        use_persistent_planner_session=use_persistent_planner_session,
+        reviewer_phase="model_regenerate_reviewer",
+        reviewer_retry_phase="model_regenerate_reviewer_repair",
+        planner_revise_phase="model_regenerate_reviewer_revise",
+        planner_revise_retry_phase="model_regenerate_reviewer_revise_brief_repair",
+        stage_label="regenerate_review",
     )
 
 
@@ -3493,9 +3975,28 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             planner_session_kind=planner_session_kind,
             use_persistent_planner_session=use_persistent_planner_session,
         )
-    except PlannerBriefInvalid as exc:
+    except (PlannerBriefInvalid, ReviewerRejected) as exc:
         write_strategy_source(RUNTIME.paths.strategy_file, best_source)
         reload_strategy_module()
+        block_kind = str(exc.block_info.get("block_kind", "")).strip()
+        if isinstance(exc, ReviewerRejected) and block_kind == "reviewer_rejected":
+            _record_exploration_block(
+                iteration_id=iteration_id,
+                candidate=exc.candidate,
+                base_source=best_source,
+                factor_change_mode=current_factor_change_mode,
+                factor_mode_context=factor_mode_context,
+                block_info=exc.block_info,
+            )
+            log_info(f"第 {iteration_id} 轮 reviewer 打回 planner brief: {exc}")
+            write_heartbeat(
+                "iteration_exploration_blocked",
+                message=f"iteration {iteration_id} reviewer rejected planner brief",
+                block_kind=block_kind,
+                blocked_cluster=str(exc.block_info.get('blocked_cluster', '')).strip(),
+            )
+            return "exploration_blocked"
+
         _record_generation_invalid(
             iteration_id=iteration_id,
             candidate=exc.candidate,
@@ -3504,15 +4005,22 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             factor_mode_context=factor_mode_context,
             block_info=exc.block_info,
             note=(
-                "planner 未按约定返回合法 round brief；系统已在同一 session 内补正一次，"
+                "planner/reviewer 未按约定返回合法结果；系统已在同一轮内补正一次，"
                 "仍未拿到可执行摘要，因此按 generation_invalid 记账。"
             ),
         )
-        log_info(f"第 {iteration_id} 轮 planner brief 作废: {exc}")
+        if isinstance(exc, ReviewerRejected):
+            log_info(f"第 {iteration_id} 轮 reviewer 结果作废: {exc}")
+        else:
+            log_info(f"第 {iteration_id} 轮 planner brief 作废: {exc}")
         write_heartbeat(
             "iteration_generation_invalid",
-            message=f"iteration {iteration_id} planner brief invalid",
-            block_kind=str(exc.block_info.get('block_kind', '')).strip(),
+            message=(
+                f"iteration {iteration_id} reviewer invalid"
+                if isinstance(exc, ReviewerRejected)
+                else f"iteration {iteration_id} planner brief invalid"
+            ),
+            block_kind=block_kind,
             blocked_cluster=str(exc.block_info.get('blocked_cluster', '')).strip(),
         )
         return "generation_invalid"

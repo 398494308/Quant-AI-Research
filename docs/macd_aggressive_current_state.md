@@ -89,13 +89,17 @@
 当前主结构是：
 
 1. `planner`
-   复用当前 stage 的持久 session，只负责 round brief
-2. `edit_worker`
+   复用当前 stage 的持久 session，只负责 draft round brief
+2. `reviewer`
+   每轮全新 short-lived 审稿 worker，只负责判定当前 draft brief 是 `PASS` 还是 `REVISE`
+3. `edit_worker`
    短生命周期 worker，只负责修改 [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)
-3. `repair_worker`
+4. `repair_worker`
    只在同轮修错时出现，不保留长历史
-4. 主进程
-   负责真实 diff 检查、smoke、完整评估、gate、journal、Discord、memory 和 stage/session 管理
+5. `summary_worker`
+   只根据最终真实 diff 回写最终候选元信息
+6. 主进程
+   负责 reviewer gating、真实 diff 检查、smoke、完整评估、gate、journal、Discord、memory 和 stage/session 管理
 
 当前不再存在这些自动行为：
 
@@ -110,26 +114,35 @@
 1. 仓库级 [AGENTS.md](../AGENTS.md)
 2. workspace 局部 `AGENTS.md`
 3. planner runtime prompt
-4. `wiki/latest_history_package.md`
-5. `wiki/failure_wiki.md`
-6. `wiki/duplicate_watchlist.md`
-7. worker prompt
+4. `wiki/reviewer_summary_card.md`
+5. `wiki/latest_history_package.md`
+6. `wiki/failure_wiki.md`
+7. `wiki/duplicate_watchlist.md`
+8. worker prompt
 
 当前 planner 的顺序约束：
 
+- 先看上一轮 `reviewer` 总结卡
 - 先看结构化失败反馈和当前诊断
 - 先复盘上一轮为什么失败、失败更像发生在哪一层交易路径
-- 先决定这轮继续同方向还是转向
+- 先决定这轮继续同方向还是转向，再写 draft brief
 - 最后才写 `hypothesis / change_plan / novelty_proof`
 - `novelty_proof` 现在用于先说明“上一版被什么证据否掉”，再说明“这轮为什么继续或转向”，最后才补“这次和旧 cut 的不同点”
+
+当前 reviewer 的职责：
+
+- reviewer 不负责提出新方向，只负责审稿
+- reviewer 只能输出 `PASS` 或 `REVISE`
+- 若 `REVISE`，必须指出当前 draft 仍落在哪个失败近邻，以及 planner 下一版至少要换哪一层
+- 未通过 reviewer 的 brief 不会进入 `edit_worker`
 
 当前 session 规则：
 
 - `planner` 在同一个 stage 内复用同一个 session
-- `edit_worker / repair_worker` 不复用 planner session
+- `reviewer / edit_worker / repair_worker / summary_worker` 都不复用 planner session
 - session scope 只绑定当前 active reference 的 `code_hash + stage`
 - 一旦手工重开 stage，或 champion 刷新，planner session 就会重置
-- 当前不新增额外 planner 子阶段；仍是一轮一个 brief，只是在 prompt 内把“先复盘，再方案”的顺序写得更明确
+- 当前同一轮允许出现 `planner -> reviewer -> planner 重写 -> reviewer` 的短链，但只有 planner 复用持久 session
 
 ## 复杂度与手工瘦身
 
@@ -168,6 +181,7 @@
 
 当前有效保护包括：
 
+- reviewer 审稿不通过时，本轮不会进入落码
 - 候选必须真的改出源码 diff
 - planner brief 缺关键字段会 fail fast
 - `smoke` 行为完全不变会记为 `behavioral_noop`
@@ -187,7 +201,7 @@
 - `state/research_macd_aggressive_v2_memory/raw/`
   全量未压缩历史
 - `state/research_macd_aggressive_v2_memory/wiki/`
-  当前 stage 的重复/失败摘要
+  当前 stage 的 reviewer 卡、重复/失败摘要
 - [logs/macd_aggressive_research_v2.log](../logs/macd_aggressive_research_v2.log)
   研究器主日志
 - [logs/macd_aggressive_research_v2_model_calls.jsonl](../logs/macd_aggressive_research_v2_model_calls.jsonl)

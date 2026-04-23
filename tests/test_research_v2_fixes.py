@@ -56,6 +56,7 @@ from research_v2.notifications import build_discord_summary_message
 from research_v2.prompting import (
     EDITABLE_REGIONS,
     build_candidate_response_format_instructions,
+    build_reviewer_response_format_instructions,
     build_strategy_candidate_summary_prompt,
     build_edit_completion_instructions,
     build_strategy_agents_instructions,
@@ -63,6 +64,9 @@ from research_v2.prompting import (
     build_strategy_exploration_repair_prompt,
     build_strategy_no_edit_repair_prompt,
     build_strategy_round_brief_repair_prompt,
+    build_strategy_reviewer_prompt,
+    build_strategy_reviewer_repair_prompt,
+    build_strategy_reviewer_system_prompt,
     build_strategy_research_prompt,
     build_strategy_summary_worker_system_prompt,
     build_strategy_runtime_repair_prompt,
@@ -1306,6 +1310,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("15m` 是唯一事实源", prompt)
         self.assertIn("方向流量代理", prompt)
         self.assertIn("config/research_v2_operator_focus.md", prompt)
+        self.assertIn("wiki/reviewer_summary_card.md", prompt)
         self.assertIn("wiki/duplicate_watchlist.md", prompt)
         self.assertIn("wiki/failure_wiki.md", prompt)
         self.assertIn("先想再写", prompt)
@@ -1322,6 +1327,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("promotion_delta > 0.02", prompt)
         self.assertIn("当前回合任务", prompt)
         self.assertIn("本轮阅读顺序（必须执行）", prompt)
+        self.assertIn("reviewer_summary_card.md", prompt)
         self.assertIn("duplicate_watchlist.md", prompt)
         self.assertIn("failure_wiki.md", prompt)
         self.assertIn("先复盘最近一条最强结构化失败证据", prompt)
@@ -1332,6 +1338,20 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("round brief", prompt)
         self.assertIn("change_plan", prompt)
         self.assertIn("novelty_proof", prompt)
+        self.assertIn("draft", prompt)
+
+    def test_build_strategy_runtime_prompt_can_include_reviewer_summary_card(self):
+        prompt = build_strategy_research_prompt(
+            evaluation_summary="诊断",
+            journal_summary="记忆",
+            previous_best_score=1.23,
+            reviewer_summary_text="# Reviewer Summary Card\n- verdict: REVISE\n- must_change: 换机制层",
+            reviewer_summary_path="wiki/reviewer_summary_card.md",
+        )
+
+        self.assertIn("上一轮 reviewer 总结卡", prompt)
+        self.assertIn("wiki/reviewer_summary_card.md", prompt)
+        self.assertIn("换机制层", prompt)
 
     def test_build_strategy_runtime_prompt_can_include_operator_focus(self):
         prompt = build_strategy_research_prompt(
@@ -1380,6 +1400,14 @@ class JournalPromptFixesTest(unittest.TestCase):
 
         self.assertIn("不要输出 `edited_regions`", prompt)
         self.assertIn("真实 diff", prompt)
+
+    def test_build_reviewer_response_format_instructions_mentions_pass_or_revise(self):
+        prompt = build_reviewer_response_format_instructions()
+
+        self.assertIn("verdict:", prompt)
+        self.assertIn("PASS", prompt)
+        self.assertIn("REVISE", prompt)
+        self.assertIn("不能替 planner 发明新方向", prompt)
 
     def test_build_edit_completion_instructions_mentions_hash_gate_and_edit_done(self):
         prompt = build_edit_completion_instructions()
@@ -1465,6 +1493,26 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("只根据当前提示里的 round brief 或 repair 指令", prompt)
         self.assertIn("完成编辑后只回复 `EDIT_DONE`", prompt)
 
+    def test_build_strategy_reviewer_system_prompt_mentions_review_only_role(self):
+        prompt = build_strategy_reviewer_system_prompt()
+
+        self.assertIn("短生命周期 `reviewer`", prompt)
+        self.assertIn("只能做两种结论：`PASS` 或 `REVISE`", prompt)
+        self.assertIn("不能替 planner 发明新方向", prompt)
+
+    def test_build_strategy_reviewer_prompt_mentions_evidence_and_boundaries(self):
+        prompt = build_strategy_reviewer_prompt(
+            evaluation_summary="当前主参考多头偏弱",
+            journal_summary="当前 stage 执行摘要\n- 当前过热近邻/慎入区: 簇=ownership_cluster",
+            round_brief_text="- candidate_id: c1\n- hypothesis: 继续修 routing",
+        )
+
+        self.assertIn("当前 draft round brief", prompt)
+        self.assertIn("高信号证据包", prompt)
+        self.assertIn("duplicate_watchlist.md", prompt)
+        self.assertIn("failure_wiki.md", prompt)
+        self.assertIn("不能替 planner 发明新方向", prompt)
+
     def test_build_strategy_round_brief_repair_prompt_mentions_required_fields(self):
         prompt = build_strategy_round_brief_repair_prompt(
             retry_attempt=1,
@@ -1478,6 +1526,18 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("change_tags", prompt)
         self.assertIn("不要输出随笔", prompt)
         self.assertIn("纯文本候选摘要", prompt)
+
+    def test_build_strategy_reviewer_repair_prompt_mentions_required_fields(self):
+        prompt = build_strategy_reviewer_repair_prompt(
+            retry_attempt=1,
+            invalid_reason="reviewer decision missing required fields: verdict, reviewer_summary",
+            raw_response_excerpt="我觉得这版还是不太好，建议换方向。",
+        )
+
+        self.assertIn("reviewer 审稿结果无效", prompt)
+        self.assertIn("PASS", prompt)
+        self.assertIn("REVISE", prompt)
+        self.assertIn("不要替 planner 生成新方向", prompt)
 
     def test_build_strategy_prompts_include_precise_complexity_budgets(self):
         system_prompt = build_strategy_agents_instructions()
@@ -4083,6 +4143,42 @@ class ReferenceStateFixesTest(unittest.TestCase):
             self.assertIn("failure_wiki_exact_cut", snapshot_md)
             self.assertIn("last_rejected_candidate.py", snapshot_md)
             self.assertIn("print('bad candidate')", snapshot_code)
+
+    def test_persist_reviewer_summary_card_writes_review_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_root = Path(temp_dir)
+            round_brief = research_script.StrategyRoundBrief(
+                candidate_id="candidate_review_1",
+                hypothesis="继续修 long routing",
+                change_plan="继续改 strategy 与 long_final_veto_clear",
+                closest_failed_cluster="ownership_cluster",
+                novelty_proof="最近几轮都卡在同一盆地",
+                change_tags=("long", "routing"),
+                expected_effects=("改善多头捕获",),
+                core_factors=(),
+            )
+            decision = research_script.StrategyReviewerDecision(
+                verdict="REVISE",
+                reviewer_summary="当前 draft 仍落在 ownership_cluster 的饱和近邻。",
+                rejection_type="saturated_same_basin",
+                matched_evidence="failure_wiki ownership_cluster + duplicate_watchlist",
+                must_change="至少换机制层或 changed_regions",
+                why_not_new="仍是 long_final_veto_clear,strategy 近邻",
+            )
+
+            research_script._persist_reviewer_summary_card(
+                memory_root=memory_root,
+                round_brief=round_brief,
+                decision=decision,
+                iteration_id=12,
+                stage_label="planner_review",
+            )
+
+            card_text = (memory_root / "wiki/reviewer_summary_card.md").read_text()
+            self.assertIn("candidate_review_1", card_text)
+            self.assertIn("REVISE", card_text)
+            self.assertIn("saturated_same_basin", card_text)
+            self.assertIn("至少换机制层或 changed_regions", card_text)
 
     def test_reference_manifest_uses_baseline_role_when_no_champion(self):
         report = EvaluationReport(
