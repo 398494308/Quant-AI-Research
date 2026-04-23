@@ -35,25 +35,6 @@
 - `test` 只在新 champion 时运行，不进入 prompt
 - 复杂度信息现在只做只读诊断，不再自动触发压缩任务，也不再自动切换 factor mode
 
-## 当前 Active Reference
-
-最新快照以 [state/research_macd_aggressive_v2_best.json](state/research_macd_aggressive_v2_best.json) 为准。
-
-当前关键指标：
-
-| 项目 | 数值 |
-| --- | --- |
-| gate | 通过 |
-| quality_score | 0.2607 |
-| promotion_score | 0.3634 |
-| train+val期间收益 | 16.60% |
-| val期间收益 | 13.18% |
-| val多/空捕获 | 0.37 / 0.51 |
-| Sharpe(train / val) | 0.37 / 0.48 |
-| train+val交易数量 | 262 |
-
-当前 `train / val` 的 funding 覆盖率仍是 `0%`。这不是研究器没接 funding，而是公开可得的 OKX 历史 funding 覆盖不到当前旧窗口；缺失区间按 `0 funding` 回测，并在评估里保留口径一致性。
-
 ## 研究器运行方式
 
 1. 运行时只维护一个 active reference。
