@@ -3298,6 +3298,7 @@ def build_journal_prompt_summary(
     entries: list[dict[str, Any]],
     limit: int = 6,
     journal_path: Path | None = None,
+    prompt_compact: bool = False,
     current_score_regime: str = "",
     current_iteration: int = 0,
     active_stage_started_at: str = "",
@@ -3364,7 +3365,8 @@ def build_journal_prompt_summary(
                     "它们已从 failure wiki / 方向风险 / 过热统计中隔离，不作为策略失败方向证据。"
                 )
             else:
-                display_entries = board_entries[-max(1, limit):]
+                display_limit = max(1, min(4, limit)) if prompt_compact else max(1, limit)
+                display_entries = board_entries[-display_limit:]
                 stage_start_index = max(0, int(stage_meta.get("stage_iteration", 0) or 0) - 1)
                 executive_lines = _stage_executive_summary_lines(
                     board_entries,
@@ -3391,16 +3393,6 @@ def build_journal_prompt_summary(
                     parts.extend(overheat_lines)
                     parts.append("")
 
-                overfit_lines = _overfit_risk_board(board_entries, limit=min(8, limit))
-                if overfit_lines:
-                    parts.extend(overfit_lines)
-                    parts.append("")
-
-                exploration_lines = _exploration_trigger_lines(board_entries, limit=min(8, limit))
-                if exploration_lines:
-                    parts.extend(exploration_lines)
-                    parts.append("")
-
                 accepted_count = sum(1 for entry in board_entries if entry.get("outcome") == "accepted")
                 rejected_count = sum(1 for entry in board_entries if entry.get("outcome") == "rejected")
                 duplicate_skipped_count = sum(1 for entry in board_entries if entry.get("outcome") == "duplicate_skipped")
@@ -3424,29 +3416,58 @@ def build_journal_prompt_summary(
                     f"提前淘汰 {early_rejected_count}，运行失败 {runtime_failed_count}，"
                     f"复杂度超标 {bloat_flag_count}，技术空转 {current_stage_technical_invalid_count}。"
                 )
-                parts.extend(
-                    _format_stage_operating_metrics(
-                        operating_metrics,
-                        stage_name=stage_name,
-                    )
-                )
-                if len(display_entries) < len(board_entries):
+                if prompt_compact:
+                    weak_side = str(operating_metrics.get("weak_side", "")).strip() or "-"
                     parts.append(
-                        f"以下表格与元信息仅展示最近 {len(display_entries)} 条；完整当前 stage 已写入 memory 归档。"
+                        "当前 stage 运营摘记: "
+                        f"accept={_score_value(operating_metrics.get('accept_rate')):.0%} | "
+                        f"noop={_score_value(operating_metrics.get('behavioral_noop_rate')):.0%} | "
+                        f"explore_block={_score_value(operating_metrics.get('exploration_blocked_rate')):.0%} | "
+                        f"smoke->full={_score_value(operating_metrics.get('smoke_to_full_eval_rate')):.0%} | "
+                        f"弱侧={weak_side}"
                     )
+                else:
+                    overfit_lines = _overfit_risk_board(board_entries, limit=min(8, limit))
+                    if overfit_lines:
+                        parts.extend(overfit_lines)
+                        parts.append("")
+
+                    exploration_lines = _exploration_trigger_lines(board_entries, limit=min(8, limit))
+                    if exploration_lines:
+                        parts.extend(exploration_lines)
+                        parts.append("")
+
+                    parts.extend(
+                        _format_stage_operating_metrics(
+                            operating_metrics,
+                            stage_name=stage_name,
+                        )
+                    )
+                    if len(display_entries) < len(board_entries):
+                        parts.append(
+                            f"以下表格与元信息仅展示最近 {len(display_entries)} 条；完整当前 stage 已写入 memory 归档。"
+                        )
                 if current_stage_technical_invalid_count > 0:
                     parts.append(
                         f"- 本 stage 另有 {current_stage_technical_invalid_count} 条技术性空转已被隔离；"
                         "它们不会进入 failure wiki exact cut、方向风险表或过热统计。"
                     )
-                failure_tag_lines = _recent_failure_tag_lines(board_entries, limit=min(8, limit))
-                if failure_tag_lines:
-                    parts.append("当前 stage 高频失败标签:")
-                    parts.extend(failure_tag_lines)
-                parts.append(f"{stage_name} 核心指标表:")
-                parts.extend(_format_recent_rounds_table(display_entries, stage_start_index))
                 parts.append("")
-                parts.extend(_recent_round_meta_lines(display_entries, stage_start_index))
+                if prompt_compact:
+                    recent_meta_lines = _recent_round_meta_lines(display_entries, stage_start_index)
+                    if recent_meta_lines and str(recent_meta_lines[0]).startswith("最近轮次元信息"):
+                        recent_meta_lines = recent_meta_lines[1:]
+                    parts.append("最近轮次元信息（精简）:")
+                    parts.extend(recent_meta_lines)
+                else:
+                    failure_tag_lines = _recent_failure_tag_lines(board_entries, limit=min(8, limit))
+                    if failure_tag_lines:
+                        parts.append("当前 stage 高频失败标签:")
+                        parts.extend(failure_tag_lines)
+                    parts.append(f"{stage_name} 核心指标表:")
+                    parts.extend(_format_recent_rounds_table(display_entries, stage_start_index))
+                    parts.append("")
+                    parts.extend(_recent_round_meta_lines(display_entries, stage_start_index))
         else:
             parts.extend(_empty_prompt_tables(stage_scope))
 
@@ -3456,18 +3477,19 @@ def build_journal_prompt_summary(
             for index, stage_entries in enumerate(past_stage_groups)
             if stage_entries
         ]
-        past_stage_lines = _format_past_stage_summary_lines(past_stage_summaries, limit=min(4, limit))
-        if past_stage_lines:
-            if parts:
-                parts.append("")
-            parts.extend(past_stage_lines)
-
         all_time_payload = _all_time_tables_payload(current_relevant_entries, limit=min(8, limit))
-        all_time_lines = _format_all_time_tables(all_time_payload)
-        if all_time_lines:
-            if parts:
-                parts.append("")
-            parts.extend(all_time_lines)
+        if not prompt_compact:
+            past_stage_lines = _format_past_stage_summary_lines(past_stage_summaries, limit=min(4, limit))
+            if past_stage_lines:
+                if parts:
+                    parts.append("")
+                parts.extend(past_stage_lines)
+
+            all_time_lines = _format_all_time_tables(all_time_payload)
+            if all_time_lines:
+                if parts:
+                    parts.append("")
+                parts.extend(all_time_lines)
     if current_entries and not past_stage_entries:
         past_stage_summaries = []
         all_time_payload = _all_time_tables_payload(current_relevant_entries, limit=min(8, limit))
@@ -3475,15 +3497,16 @@ def build_journal_prompt_summary(
         past_stage_summaries = []
         all_time_payload = {}
 
-    legacy_lines = _legacy_regime_reference_lines(
-        all_entries,
-        current_score_regime=active_score_regime,
-        limit=min(LEGACY_REFERENCE_REGIME_LIMIT, limit),
-    )
-    if legacy_lines:
-        if parts:
-            parts.append("")
-        parts.extend(legacy_lines)
+    if not prompt_compact:
+        legacy_lines = _legacy_regime_reference_lines(
+            all_entries,
+            current_score_regime=active_score_regime,
+            limit=min(LEGACY_REFERENCE_REGIME_LIMIT, limit),
+        )
+        if legacy_lines:
+            if parts:
+                parts.append("")
+            parts.extend(legacy_lines)
 
     summary_text = "\n".join(parts) if parts else "暂无研究历史。"
     if memory_root is not None:

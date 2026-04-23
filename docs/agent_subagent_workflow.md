@@ -180,6 +180,11 @@ flowchart TB
 4. `failure_wiki.md`
 5. `duplicate_watchlist.md`
 
+说明：
+
+- `latest_history_package.md` 现在只保留精简前台记忆，重点给 planner 看执行摘要、失败核、方向风险、过热簇和最近轮次元信息。
+- 全量历史表格仍写入 `memory/raw/*` 和对应 json 归档，但不再反复塞进主研究 prompt。
+
 ## 一句话总结
 
 当前研究器的核心工作流是：

@@ -384,6 +384,21 @@ def _rebuild_source_from_regions(
     return normalize_strategy_source("".join(parts))
 
 
+def repair_editable_region_drift(
+    base_source: str,
+    candidate_source: str,
+    editable_regions: tuple[str, ...],
+) -> tuple[str, bool]:
+    normalized_candidate = normalize_strategy_source(candidate_source)
+    candidate_regions = _editable_region_source_map(normalized_candidate, editable_regions)
+    repaired_source = _rebuild_source_from_regions(
+        base_source,
+        candidate_regions,
+        editable_regions,
+    )
+    return repaired_source, source_hash(repaired_source) != source_hash(normalized_candidate)
+
+
 def changed_editable_regions(
     base_source: str,
     candidate_source: str,

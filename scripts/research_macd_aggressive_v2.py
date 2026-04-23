@@ -93,6 +93,7 @@ from research_v2.strategy_code import (
     format_strategy_complexity_headroom,
     load_strategy_source,
     normalize_strategy_source,
+    repair_editable_region_drift,
     repair_missing_required_functions,
     source_hash,
     validate_editable_region_boundaries,
@@ -414,6 +415,7 @@ def _refresh_prompt_memory_snapshots() -> str:
         journal_entries,
         limit=RUNTIME.max_recent_journal_entries,
         journal_path=RUNTIME.paths.journal_file,
+        prompt_compact=True,
         current_score_regime=SCORE_REGIME,
         current_iteration=iteration_counter or (
             max((int(entry.get("iteration", 0) or 0) for entry in journal_entries), default=0) + 1
@@ -2194,12 +2196,17 @@ def _candidate_from_round_brief(
     if not workspace_strategy_file.exists():
         raise StrategySourceError(f"workspace strategy file missing: {workspace_strategy_file}")
     strategy_code = normalize_strategy_source(load_strategy_source(workspace_strategy_file))
+    strategy_code, rebased_non_editable = repair_editable_region_drift(
+        base_source,
+        strategy_code,
+        EDITABLE_REGIONS,
+    )
     strategy_code, restored_functions = repair_missing_required_functions(
         base_source,
         strategy_code,
         EDITABLE_REGIONS,
     )
-    if restored_functions:
+    if rebased_non_editable or restored_functions:
         write_strategy_source(workspace_strategy_file, strategy_code)
     validate_strategy_source(
         strategy_code,
@@ -2771,6 +2778,7 @@ def _build_model_round_brief(
         journal_entries,
         limit=RUNTIME.max_recent_journal_entries,
         journal_path=RUNTIME.paths.journal_file,
+        prompt_compact=True,
         current_score_regime=SCORE_REGIME,
         current_iteration=iteration_counter,
         active_stage_started_at=reference_stage_started_at,
@@ -2992,6 +3000,7 @@ def _regenerate_model_round_brief(
         journal_entries,
         limit=RUNTIME.max_recent_journal_entries,
         journal_path=RUNTIME.paths.journal_file,
+        prompt_compact=True,
         current_score_regime=SCORE_REGIME,
         current_iteration=iteration_counter,
         active_stage_started_at=reference_stage_started_at,

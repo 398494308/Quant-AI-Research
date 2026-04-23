@@ -43,6 +43,7 @@
    它会优先读 `reviewer_summary_card` 和 `current_reference_denylist`，避免在当前 champion 下重复踩已经被证伪的调法模式。
 3. `reviewer` 是每轮全新的短生命周期审稿 worker。它只审 planner 的 draft brief，结论只有 `PASS` 或 `REVISE`；若打回，planner 必须先吸收 reviewer 打回信息，再重写 brief。
 4. `edit_worker / repair_worker` 是短生命周期 worker，只负责把 reviewer 放行后的方向落到 [src/strategy_macd_aggressive.py](src/strategy_macd_aggressive.py)。
+   主进程会把非可编辑区域自动回灌到当前 base，只保留可编辑区域里的真实改动。
 5. 候选必须先形成真实源码 diff，再过 `smoke`，再跑完整 `train walk-forward + val`。
 6. `behavioral_noop`、空 diff、重复源码、重复结果盆地、非法 brief、reviewer 连续打回都会被挡下。
 7. complexity 诊断仍会进入 journal、wiki 和 prompt，但不会再自动改研究车道，也不会单独沉淀一条 `working_base`。
@@ -86,6 +87,7 @@ flowchart TB
 - `repair_worker` 只在同轮技术修错时出现，不参与研究方向判断。
 - `summary_worker` 只根据最终真实 diff 回写候选摘要，避免“原 brief”和“最终代码”错位。
 - `current_reference_denylist` 只约束“当前 active reference 下已被反复证伪的调法模式”，不是全局因子黑名单，也不是运行时硬门。
+- `latest_history_package` 现在只保留给模型最有用的前台记忆：执行摘要、失败核、方向风险、过热簇和最近轮次元信息，不再把整套表格反复塞进主上下文。
 - 策略对外执行仍只保留粗粒度主标签，但回测、评估和 freqtrade `enter_tag` 会同步记录路径标签，便于诊断到底是哪条入场路径在拖分。
 - 如果本轮刷新了 `champion`，主进程会更新 active reference，并开启新的 stage / planner session。
 - 如果本轮没有刷新 `champion`，主进程会把结果写回 `journal / wiki / reviewer_summary_card / current_reference_denylist`，然后直接开始下一轮。

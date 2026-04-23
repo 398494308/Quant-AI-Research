@@ -124,16 +124,30 @@
 8. `wiki/duplicate_watchlist.md`
 9. worker prompt
 
+其中第 6 层现在只保留精简前台记忆：
+
+- 当前 stage 执行摘要
+- 失败核聚合
+- 方向风险/过热簇
+- 最近轮次元信息
+
+不再把全量表格反复塞进 planner 主上下文。
+
 当前 planner 的顺序约束：
 
 - 先看上一轮 `reviewer` 总结卡
 - 再看 `current_reference_denylist`，确认当前 champion 下哪些调法已经被反复证伪
-- 再看路径级诊断，确认当前到底是 `long_impulse / long_retest / long_reaccel / long_relay` 还是 `short_impulse / short_retest / short_reaccel` 在拖分
-- 先看结构化失败反馈和当前诊断
+- 再看结构化失败反馈和当前诊断，确认当前到底是 `long_impulse / long_retest / long_reaccel / long_relay` 还是 `short_impulse / short_retest / short_reaccel` 在拖分
 - 先复盘上一轮为什么失败、失败更像发生在哪一层交易路径
 - 先决定这轮继续同方向还是转向，再写 draft brief
 - 最后才写 `hypothesis / change_plan / novelty_proof`
 - `novelty_proof` 现在用于先说明“上一版被什么证据否掉”，再说明“这轮为什么继续或转向”，最后才补“这次和旧 cut 的不同点”
+
+当前 edit_worker 约束：
+
+- worker 仍然只改 [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)
+- 主进程会把非可编辑区域自动回灌到当前 base
+- 真正会进入 diff / smoke / full eval 的，只是可编辑区域里的最终落地改动
 
 当前 reviewer 的职责：
 

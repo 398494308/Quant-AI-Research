@@ -85,6 +85,7 @@ from research_v2.strategy_code import (
     build_strategy_complexity_delta,
     build_system_edit_signature,
     format_strategy_complexity_headroom,
+    repair_editable_region_drift,
     repair_missing_required_functions,
     validate_editable_region_boundaries,
     validate_strategy_source,
@@ -1371,6 +1372,83 @@ def strategy(*args, **kwargs):
         self.assertIn("PARAMS = {'intraday_adx_min': 12}", repaired_source)
         self.assertIn("def strategy(*args, **kwargs):\n    return None", repaired_source)
 
+    def test_repair_editable_region_drift_keeps_editable_changes_and_reverts_other_regions(self):
+        base_source = """
+# PARAMS_START
+PARAMS = {'intraday_adx_min': 10}
+# PARAMS_END
+
+ENTRY_SIGNAL_ALIASES = {}
+ENTRY_PATH_TAGS = {}
+
+def helper():
+    return 1
+
+def _sideways_release_flags(*args, **kwargs):
+    return {}
+
+def _is_sideways_regime(*args, **kwargs):
+    return False
+
+def _flow_signal_metrics(*args, **kwargs):
+    return {'bias': 0.0}
+
+def _flow_confirmation_ok(*args, **kwargs):
+    return True
+
+def _flow_entry_ok(*args, **kwargs):
+    return True
+
+def _trend_quality_long(*args, **kwargs):
+    return True
+
+def _trend_quality_short(*args, **kwargs):
+    return True
+
+def _trend_quality_ok(*args, **kwargs):
+    return True
+
+def _trend_followthrough_long(*args, **kwargs):
+    return True
+
+def _trend_followthrough_short(*args, **kwargs):
+    return True
+
+def _trend_followthrough_ok(*args, **kwargs):
+    return True
+
+def _long_entry_signal(*args, **kwargs):
+    return False
+
+def _short_entry_signal(*args, **kwargs):
+    return False
+
+def normalize_entry_signal(signal, fallback_side=''):
+    return ''
+
+def strategy_decision(data, idx, positions, market_state):
+    return None
+
+def strategy(*args, **kwargs):
+    return helper()
+"""
+        candidate_source = (
+            base_source
+            .replace("return 1", "return 2", 1)
+            .replace("return helper()", "return None", 1)
+        )
+
+        repaired_source, repaired = repair_editable_region_drift(
+            base_source,
+            candidate_source,
+            EDITABLE_REGIONS,
+        )
+
+        self.assertTrue(repaired)
+        self.assertIn("def helper():\n    return 1", repaired_source)
+        self.assertIn("def strategy(*args, **kwargs):\n    return None", repaired_source)
+        validate_editable_region_boundaries(base_source, repaired_source, EDITABLE_REGIONS)
+
 
 class JournalPromptFixesTest(unittest.TestCase):
     def _minimal_strategy_source(self):
@@ -1546,6 +1624,7 @@ class JournalPromptFixesTest(unittest.TestCase):
 
         self.assertIn("round brief", prompt)
         self.assertIn("只修改 `src/strategy_macd_aggressive.py`", prompt)
+        self.assertIn("主进程会自动按当前 base 回灌", prompt)
         self.assertIn("只回复 `EDIT_DONE`", prompt)
         self.assertIn("复杂度诊断（只读）", prompt)
 
@@ -2633,6 +2712,38 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
         self.assertIn("方向风险表", summary)
         self.assertIn("ownership_cluster", summary)
         self.assertIn("EXHAUSTED", summary)
+
+    def test_journal_summary_can_emit_compact_prompt_package(self):
+        entries = []
+        for idx in range(3):
+            entries.append(
+                {
+                    "iteration": idx + 1,
+                    "candidate_id": f"candidate_compact_{idx}",
+                    "outcome": "rejected",
+                    "stop_stage": "full_eval",
+                    "promotion_score": 0.11,
+                    "quality_score": 0.09,
+                    "promotion_delta": 0.0,
+                    "gate_reason": "相对当前champion晋级分提升不足(-0.03 <= 0.02)",
+                    "decision_reason": "相对当前champion晋级分提升不足(-0.03 <= 0.02)",
+                    "change_tags": ["long_flow_prune", "nonstrong_long"],
+                    "edited_regions": ["_flow_confirmation_ok"],
+                    "hypothesis": "压缩多头 flow admission",
+                    "score_regime": "trend_capture_v1",
+                    "target_family": "long",
+                    "system_ordinary_region_families": ["flow"],
+                }
+            )
+
+        summary = build_journal_prompt_summary(entries, limit=8, prompt_compact=True)
+
+        self.assertIn("当前 stage 执行摘要", summary)
+        self.assertIn("方向风险表", summary)
+        self.assertIn("最近轮次元信息（精简）", summary)
+        self.assertNotIn("当前 stage 核心指标表", summary)
+        self.assertNotIn("全局方向统计", summary)
+        self.assertNotIn("过拟合风险表", summary)
 
     def test_journal_summary_aggregates_repeated_failure_nucleus(self):
         entries = []
