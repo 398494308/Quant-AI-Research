@@ -10,6 +10,16 @@
 - [backups/strategy_macd_aggressive_v2_best.py](../backups/strategy_macd_aggressive_v2_best.py)
 - [state/research_macd_aggressive_v2_best.json](../state/research_macd_aggressive_v2_best.json)
 
+历史 `champion` 快照现在会额外保存在：
+
+- `backups/champion_history/<timestamp>_i<iteration>_<candidate_id>_<codehash>/`
+
+每个快照目录至少会带：
+
+- `strategy_macd_aggressive.py`
+- `metadata.json`
+- 若当轮图表生成成功，还会带 `selection.png` 与 `validation.png`
+
 当前关键指标：
 
 | 项目 | 数值 |

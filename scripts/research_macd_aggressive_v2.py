@@ -1198,6 +1198,79 @@ def _write_chart_copy(source: Path, target: Path) -> None:
     shutil.copy2(source, target)
 
 
+def _champion_history_dir() -> Path:
+    path = RUNTIME.paths.best_strategy_file.parent / "champion_history"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _champion_snapshot_stamp(timestamp_text: str) -> str:
+    try:
+        dt = datetime.fromisoformat(str(timestamp_text).replace("Z", "+00:00")).astimezone(UTC)
+    except Exception:
+        dt = datetime.now(UTC)
+    return dt.strftime("%Y%m%dT%H%M%SZ")
+
+
+def _safe_snapshot_slug(text: str, default: str = "champion") -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", str(text or "").strip()).strip("_").lower()
+    return (slug or default)[:48]
+
+
+def _archive_champion_snapshot(
+    *,
+    iteration_id: int,
+    accepted_at: str,
+    candidate: StrategyCandidate,
+    source: str,
+    report: EvaluationReport,
+    shadow_test_metrics: dict[str, float] | None = None,
+    chart_paths: PerformanceChartPaths | None = None,
+) -> Path:
+    code_hash = source_hash(source)
+    snapshot_dir = _champion_history_dir() / (
+        f"{_champion_snapshot_stamp(accepted_at)}"
+        f"_i{iteration_id:04d}"
+        f"_{_safe_snapshot_slug(candidate.candidate_id, default='candidate')}"
+        f"_{code_hash[:12]}"
+    )
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    strategy_path = snapshot_dir / "strategy_macd_aggressive.py"
+    metadata_path = snapshot_dir / "metadata.json"
+    write_strategy_source(strategy_path, source)
+
+    validation_chart_name = ""
+    selection_chart_name = ""
+    if chart_paths is not None and chart_paths.validation_chart is not None and chart_paths.validation_chart.exists():
+        validation_chart_name = "validation.png"
+        _write_chart_copy(chart_paths.validation_chart, snapshot_dir / validation_chart_name)
+    if chart_paths is not None and chart_paths.selection_chart is not None and chart_paths.selection_chart.exists():
+        selection_chart_name = "selection.png"
+        _write_chart_copy(chart_paths.selection_chart, snapshot_dir / selection_chart_name)
+
+    metadata = {
+        "iteration": iteration_id,
+        "accepted_at": accepted_at,
+        "candidate_id": candidate.candidate_id,
+        "primary_direction": candidate.primary_direction,
+        "hypothesis": candidate.hypothesis,
+        "change_plan": candidate.change_plan,
+        "change_tags": list(candidate.change_tags),
+        "edited_regions": list(candidate.edited_regions),
+        "code_hash": code_hash,
+        "quality_score": float(report.metrics.get("quality_score", 0.0)),
+        "promotion_score": float(report.metrics.get("promotion_score", 0.0)),
+        "gate_reason": report.gate_reason,
+        "validation_chart": validation_chart_name,
+        "selection_chart": selection_chart_name,
+        "shadow_test_metrics": dict(shadow_test_metrics or {}),
+    }
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2))
+    log_info(f"champion快照已归档: {snapshot_dir}")
+    return snapshot_dir
+
+
 def _build_chart_note(message: str) -> str:
     return (
         f"{message}\n"
@@ -4464,6 +4537,19 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         except Exception as exc:
             log_info(f"新 champion 图表生成失败: {exc}")
             logging.exception("新 champion 图表生成失败(iteration=%s)", iteration_id)
+        try:
+            _archive_champion_snapshot(
+                iteration_id=iteration_id,
+                accepted_at=reference_stage_started_at,
+                candidate=candidate,
+                source=best_source,
+                report=best_report,
+                shadow_test_metrics=shadow_test_metrics,
+                chart_paths=chart_paths,
+            )
+        except Exception as exc:
+            log_info(f"新 champion 快照归档失败: {exc}")
+            logging.exception("新 champion 快照归档失败(iteration=%s)", iteration_id)
         discord_message = build_discord_summary_message(
             title=f"🚀 研究器 v2 新 champion #{iteration_id}",
             report=best_report,

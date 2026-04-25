@@ -15,6 +15,16 @@
 - 实盘外壳说明：[real-money-test/README.md](real-money-test/README.md)
 - DeepSeek planner 实验说明：[docs/deepseek_planner_experiment.md](docs/deepseek_planner_experiment.md)
 
+每次出现新的 `champion` 时，研究器现在还会额外归档一份独立快照到：
+
+- `backups/champion_history/<timestamp>_i<iteration>_<candidate_id>_<codehash>/`
+
+目录内默认包含：
+
+- `strategy_macd_aggressive.py`
+- `metadata.json`
+- 若当轮图表生成成功，还会带上 `selection.png` 与 `validation.png`
+
 ## 数据与评分
 
 - 数据源：`OKX`
