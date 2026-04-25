@@ -61,6 +61,61 @@ PARAMS = {
 # PARAMS_END
 
 
+# EXIT_PARAMS_START
+EXIT_PARAMS = {
+    "break_even_activation_pct": 40.0,
+    "break_even_buffer_pct": 0.35,
+    "breakout_break_even_activation_pct": 60.0,
+    "breakout_max_hold_bars": 384,
+    "breakout_stop_atr_mult": 2.3,
+    "breakout_tp1_close_fraction": 0.16,
+    "breakout_tp1_pnl_pct": 80.0,
+    "breakout_trailing_activation_pct": 122.7,
+    "breakout_trailing_giveback_pct": 46.6,
+    "dynamic_hold_adx_strong_threshold": 26.0,
+    "dynamic_hold_adx_threshold": 16.0,
+    "dynamic_hold_extension_bars": 96,
+    "dynamic_hold_max_bars": 384,
+    "entry_delay_minutes": 1,
+    "execution_use_1m": 1,
+    "funding_fee_enabled": 1,
+    "leverage": 20,
+    "max_concurrent_positions": 4,
+    "max_hold_bars": 288,
+    "okx_maker_fee_rate": 0.0002,
+    "okx_taker_fee_rate": 0.0005,
+    "position_fraction": 0.17,
+    "position_size_max": 30000,
+    "position_size_min": 5000,
+    "pyramid_adx_min": 19.0,
+    "pyramid_enabled": 1,
+    "pyramid_max_times": 2,
+    "pyramid_size_ratio": 0.28,
+    "pyramid_trigger_pnl": 22.9,
+    "regime_close_below_hourly_fast": 0,
+    "regime_exit_confirm_bars": 1,
+    "regime_exit_enabled": 1,
+    "regime_hist_floor": -110.0,
+    "regime_price_confirm_buffer_pct": 0.015,
+    "short_breakdown_break_even_activation_pct": 25.7,
+    "short_breakdown_max_hold_bars": 96,
+    "short_breakdown_stop_atr_mult": 2.1,
+    "short_breakdown_tp1_close_fraction": 0.22,
+    "short_breakdown_tp1_pnl_pct": 31.4,
+    "short_breakdown_trailing_activation_pct": 40.0,
+    "short_breakdown_trailing_giveback_pct": 12.9,
+    "slippage_pct": 0.0003,
+    "stop_atr_mult": 3.1,
+    "stop_max_loss_pct": 75.7,
+    "tp1_close_fraction": 0.04,
+    "tp1_pnl_pct": 65.7,
+    "trading_fee_enabled": 1,
+    "trailing_activation_pct": 124.3,
+    "trailing_giveback_pct": 40.0,
+}
+# EXIT_PARAMS_END
+
+
 ENTRY_SIGNAL_ALIASES = {
     "long_breakout": "long_pullback",
     "long_pullback": "long_pullback",
@@ -1164,6 +1219,62 @@ def _trend_followthrough_long(market_state, trigger_price, current_close):
     return confirms >= 4
 
 
+def _trend_followthrough_exit_long(market_state, trigger_price, current_close):
+    hourly = market_state["hourly"]
+    fourh = market_state["four_hour"]
+    metrics = _directional_trend_metrics(market_state, "long")
+    atr_ratio = metrics["atr_ratio"]
+    breakout_distance_pct = (current_close - trigger_price) / max(trigger_price, 1e-9)
+    hourly_fast_extension = (current_close - hourly["ema_fast"]) / max(current_close, 1e-9)
+    hourly_anchor_extension = (current_close - hourly["ema_anchor"]) / max(current_close, 1e-9)
+
+    confirms = 0
+    if metrics["intraday_spread"] >= atr_ratio * 0.18:
+        confirms += 1
+    if metrics["hourly_spread"] >= max(SIDEWAYS_MIN_HOURLY_SPREAD_PCT * 0.88, atr_ratio * 0.50):
+        confirms += 1
+    if metrics["fourh_spread"] >= max(SIDEWAYS_MIN_FOURH_SPREAD_PCT * 0.44, atr_ratio * 0.42):
+        confirms += 1
+    if metrics["hourly_slope"] >= atr_ratio * 0.014:
+        confirms += 1
+    if breakout_distance_pct >= -atr_ratio * 0.04:
+        confirms += 1
+
+    reversal_pressure = (
+        market_state["histogram"] <= 0.0
+        and market_state["macd_line"] <= market_state["signal_line"]
+        and hourly["close"] <= hourly["ema_fast"] * (1.0 + atr_ratio * 0.10)
+        and hourly["ema_fast"] <= hourly["ema_anchor"] * (1.0 + atr_ratio * 0.05)
+        and (
+            breakout_distance_pct <= atr_ratio * 0.04
+            or hourly_fast_extension <= atr_ratio * 0.06
+            or metrics["hourly_slope"] <= 0.0
+        )
+    )
+    support_lost = (
+        current_close <= hourly["ema_fast"] * (1.0 + atr_ratio * 0.04)
+        and (
+            hourly_fast_extension <= atr_ratio * 0.03
+            or hourly_anchor_extension <= atr_ratio * 0.10
+            or breakout_distance_pct <= 0.0
+        )
+        and metrics["hourly_slope"] <= atr_ratio * 0.010
+        and metrics["intraday_spread"] <= atr_ratio * 0.24
+    )
+    deeper_reversal = (
+        breakout_distance_pct <= -atr_ratio * 0.02
+        and hourly_fast_extension <= atr_ratio * 0.02
+        and (
+            metrics["hourly_slope"] <= 0.0
+            or metrics["fourh_slope"] <= atr_ratio * 0.010
+            or market_state["histogram"] <= -0.01
+        )
+    )
+    if reversal_pressure or support_lost or deeper_reversal:
+        return False
+    return confirms >= 3
+
+
 def _trend_followthrough_short(market_state, trigger_price, current_close):
     hourly = market_state["hourly"]
     fourh = market_state["four_hour"]
@@ -1203,6 +1314,14 @@ def _trend_followthrough_ok(market_state, side, trigger_price, current_close):
     if side == "long":
         return _trend_followthrough_long(market_state, trigger_price, current_close)
     return _trend_followthrough_short(market_state, trigger_price, current_close)
+
+
+def _active_long_exit_followthrough_ok(positions, market_state, current_close):
+    if not positions:
+        return True
+    lead_position = positions[0]
+    trigger_price = float(lead_position.get("entry_price", current_close))
+    return _trend_followthrough_exit_long(market_state, trigger_price, current_close)
 
 
 def long_outer_context_ok(context, market_state, params):
@@ -1710,7 +1829,11 @@ def strategy_decision(data, idx, positions, market_state):
 
     if positions and _position_side(positions[0]) == "long":
         forced_short_path = _short_entry_path_key(context, market_state, p, require_breakdown_gate=False)
-        if forced_short_path:
+        if forced_short_path and not _active_long_exit_followthrough_ok(
+            positions,
+            market_state,
+            context["current"]["close"],
+        ):
             return {
                 "entry_signal": "short_breakdown",
                 "entry_side": "short",
@@ -1808,7 +1931,11 @@ def strategy(data, idx, positions, market_state):
 
     if positions and _position_side(positions[0]) == "long":
         forced_short_signal = _short_entry_signal(data, idx, positions, market_state)
-        if forced_short_signal:
+        if forced_short_signal and not _active_long_exit_followthrough_ok(
+            positions,
+            market_state,
+            context["current"]["close"],
+        ):
             return forced_short_signal
 
     if long_outer_context_ok(context, market_state, p):

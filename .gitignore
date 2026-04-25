@@ -5,6 +5,7 @@ logs/*.log
 logs/*.out
 logs/*model_calls.jsonl
 backups/*.py
+backups/champion_history/
 backups/research_macd_aggressive_v2_resets/
 backups/research_macd_aggressive_v2_stage_resets/
 state/*.json

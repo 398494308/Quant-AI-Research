@@ -140,6 +140,10 @@ def _minimal_required_strategy_source(*, trend_quality_bool_ops: int = 0) -> str
         "PARAMS = {'breakout_volume_ratio_min': 1.0}",
         "# PARAMS_END",
         "",
+        "# EXIT_PARAMS_START",
+        "EXIT_PARAMS = {'leverage': 20, 'position_fraction': 0.17, 'position_size_min': 5000, 'position_size_max': 30000, 'max_concurrent_positions': 4, 'pyramid_enabled': 1, 'pyramid_max_times': 2, 'pyramid_size_ratio': 0.28, 'tp1_pnl_pct': 65.7}",
+        "# EXIT_PARAMS_END",
+        "",
         "ENTRY_SIGNAL_ALIASES = {}",
         "ENTRY_PATH_TAGS = {}",
         "",
@@ -821,6 +825,10 @@ class StrategyValidationFixesTest(unittest.TestCase):
             "PARAMS = {'intraday_adx_min': 10}",
             "# PARAMS_END",
             "",
+            "# EXIT_PARAMS_START",
+            "EXIT_PARAMS = {'leverage': 20, 'position_fraction': 0.17, 'position_size_min': 5000, 'position_size_max': 30000, 'max_concurrent_positions': 4, 'pyramid_enabled': 1, 'pyramid_max_times': 2, 'pyramid_size_ratio': 0.28, 'tp1_pnl_pct': 65.7}",
+            "# EXIT_PARAMS_END",
+            "",
             "ENTRY_SIGNAL_ALIASES = {}",
             "ENTRY_PATH_TAGS = {}",
             "",
@@ -1189,6 +1197,19 @@ def strategy(*args, **kwargs):
         )
 
         with self.assertRaisesRegex(StrategySourceError, "new PARAMS keys are not allowed"):
+            validate_strategy_source(source, base_source=base_source)
+
+    def test_validate_strategy_source_allows_exit_param_change(self):
+        base_source = self._minimal_validation_source()
+        source = base_source.replace("'tp1_pnl_pct': 65.7", "'tp1_pnl_pct': 70.0")
+
+        validate_strategy_source(source, base_source=base_source)
+
+    def test_validate_strategy_source_rejects_fixed_exit_param_change(self):
+        base_source = self._minimal_validation_source()
+        source = base_source.replace("'leverage': 20", "'leverage': 21")
+
+        with self.assertRaisesRegex(StrategySourceError, "fixed EXIT_PARAMS key leverage"):
             validate_strategy_source(source, base_source=base_source)
 
     def test_validate_strategy_source_keeps_default_mode_complexity_growth_as_warning_only(self):
@@ -4754,7 +4775,7 @@ class ResearchRuntimeOptimizationsTest(unittest.TestCase):
                 return_value={"path": "fixture.csv", "exists": True, "mtime_ns": 1, "size": 1},
             ):
                 with mock.patch.object(research_script.strategy_module, "PARAMS", {"alpha": 1}):
-                    with mock.patch.object(research_script.backtest_module, "EXIT_PARAMS", {"beta": 2}):
+                    with mock.patch.object(research_script.strategy_module, "EXIT_PARAMS", {"beta": 2}):
                         with mock.patch.object(
                             research_script.backtest_module,
                             "prepare_backtest_context",
@@ -4777,7 +4798,7 @@ class ResearchRuntimeOptimizationsTest(unittest.TestCase):
                 "_file_cache_signature",
                 return_value={"path": "fixture.csv", "exists": True, "mtime_ns": 1, "size": 1},
             ):
-                with mock.patch.object(research_script.backtest_module, "EXIT_PARAMS", {"beta": 2}):
+                with mock.patch.object(research_script.strategy_module, "EXIT_PARAMS", {"beta": 2}):
                     with mock.patch.object(
                         research_script.backtest_module,
                         "prepare_backtest_context",

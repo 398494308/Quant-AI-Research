@@ -72,6 +72,7 @@ flowchart TB
 
 - 只接收 reviewer 放行后的 brief。
 - 它不做研究方向判断，只负责把 brief 落到 `src/strategy_macd_aggressive.py`。
+- 策略文件内的 `PARAMS` 和非固定 `EXIT_PARAMS` 都属于可落码范围；固定杠杆和仓位风险参数不能改。
 - 它是短生命周期 worker，不继承 planner 的长历史。
 - 它只额外接收当前 gate、最弱维度和 val 多/空捕获/命中率的紧凑诊断，用来辅助落码幅度判断。
 

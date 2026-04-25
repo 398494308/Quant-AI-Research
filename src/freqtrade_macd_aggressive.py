@@ -53,7 +53,7 @@ import strategy_macd_aggressive as core_strategy
 
 
 P = core_strategy.PARAMS
-E = backtest_module.EXIT_PARAMS
+E = getattr(core_strategy, "EXIT_PARAMS", backtest_module.EXIT_PARAMS)
 
 
 def _normalize_core_signal(raw_signal, fallback_side="") -> str:

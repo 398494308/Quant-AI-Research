@@ -83,7 +83,8 @@
 
 - `edit_worker` 只在 `reviewer=PASS` 后出现，负责把放行后的方向落到 [src/strategy_macd_aggressive.py](src/strategy_macd_aggressive.py)
 - `repair_worker` 只在同轮技术修错时出现，不参与研究方向判断
-- 整份策略文件都允许修改，但要求改动克制、结构准确、添加有必要；系统只保留必要符号和源码形状护栏
+- 整份策略文件都允许修改，但要求改动克制、结构准确、添加有必要；策略文件现在同时承载 `PARAMS` 和 `EXIT_PARAMS`
+- `EXIT_PARAMS` 中止盈、止损、保本、追踪、持仓时间、趋势失效退出和加仓触发允许被 AI 调整；杠杆、仓位比例、单仓上下限、并发数和加仓规模固定
 
 ### Eval / Summary
 

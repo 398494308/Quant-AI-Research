@@ -23,6 +23,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 import backtest_macd_aggressive as backtest_module
+import strategy_macd_aggressive as strategy_module
 
 
 def _runtime_dir(mode: str) -> Path:
@@ -149,7 +150,7 @@ def build_runtime_config(
     runtime_config["position_adjustment_enable"] = True
     runtime_config["max_entry_position_adjustment"] = max(
         0,
-        int(backtest_module.EXIT_PARAMS.get("pyramid_max_times", 0)),
+        int(getattr(strategy_module, "EXIT_PARAMS", backtest_module.EXIT_PARAMS).get("pyramid_max_times", 0)),
     )
 
     order_types = runtime_config.get("order_types", {})

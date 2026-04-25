@@ -47,8 +47,19 @@ class StrategyCandidate:
 
 
 PARAM_BLOCK_PATTERN = re.compile(r"# PARAMS_START\s*\nPARAMS = (.*?)\n# PARAMS_END", re.DOTALL)
+EXIT_PARAM_BLOCK_PATTERN = re.compile(r"# EXIT_PARAMS_START\s*\nEXIT_PARAMS = (.*?)\n# EXIT_PARAMS_END", re.DOTALL)
 DEFAULT_MODE_MAX_NEW_TOP_LEVEL_CONSTANTS = 2
 DEFAULT_MODE_MAX_NEW_TOP_LEVEL_HELPERS = 2
+FIXED_EXIT_PARAM_VALUES: dict[str, object] = {
+    "leverage": 20,
+    "position_fraction": 0.17,
+    "position_size_min": 5000,
+    "position_size_max": 30000,
+    "max_concurrent_positions": 4,
+    "pyramid_enabled": 1,
+    "pyramid_max_times": 2,
+    "pyramid_size_ratio": 0.28,
+}
 
 # 参数硬性范围：防止参数漂移到无意义的区域
 # 格式: key -> (最小值, 最大值)
@@ -268,6 +279,19 @@ def extract_params(source: str) -> dict[str, object]:
     return params
 
 
+def extract_exit_params(source: str) -> dict[str, object]:
+    match = EXIT_PARAM_BLOCK_PATTERN.search(source)
+    if match is None:
+        raise StrategySourceError("missing EXIT_PARAMS block markers")
+    try:
+        params = ast.literal_eval(match.group(1))
+    except Exception as exc:
+        raise StrategySourceError(f"failed to parse EXIT_PARAMS block: {exc}") from exc
+    if not isinstance(params, dict):
+        raise StrategySourceError("EXIT_PARAMS block is not a dict")
+    return params
+
+
 def build_diff_summary(old_source: str, new_source: str, limit: int = 24) -> list[str]:
     import difflib
 
@@ -377,6 +401,9 @@ def _required_top_level_source_map(source: str) -> dict[str, str]:
     match = PARAM_BLOCK_PATTERN.search(normalized)
     if match is not None:
         sections["PARAMS"] = normalize_strategy_source(match.group(0))
+    exit_match = EXIT_PARAM_BLOCK_PATTERN.search(normalized)
+    if exit_match is not None:
+        sections["EXIT_PARAMS"] = normalize_strategy_source(exit_match.group(0))
 
     for node in tree.body:
         start, end = _node_source_span(normalized, node, line_offsets=line_offsets)
@@ -447,7 +474,8 @@ def repair_missing_required_functions(
     candidate_tree = ast.parse(normalized_candidate)
     missing_constants = tuple(sorted(REQUIRED_TOP_LEVEL_CONSTANT_SET - _top_level_constant_names(candidate_tree)))
     missing_param_block = PARAM_BLOCK_PATTERN.search(normalized_candidate) is None
-    if not missing and not missing_constants and not missing_param_block:
+    missing_exit_param_block = EXIT_PARAM_BLOCK_PATTERN.search(normalized_candidate) is None
+    if not missing and not missing_constants and not missing_param_block and not missing_exit_param_block:
         return normalized_candidate, ()
 
     if not editable_regions:
@@ -462,6 +490,10 @@ def repair_missing_required_functions(
             param_block = base_sections.get("PARAMS", "").rstrip()
             if param_block:
                 body = f"{param_block}\n\n{body}" if body else param_block
+        if missing_exit_param_block:
+            exit_param_block = base_sections.get("EXIT_PARAMS", "").rstrip()
+            if exit_param_block:
+                body = f"{exit_param_block}\n\n{body}" if body else exit_param_block
         if tail_sections:
             body = f"{body}\n\n" if body else ""
             body += "\n\n".join(tail_sections)
@@ -488,6 +520,22 @@ def _function_node_map(source: str, region_names: tuple[str, ...]) -> dict[str, 
 def _param_keys_changed(base_source: str, candidate_source: str) -> tuple[str, ...]:
     base_params = extract_params(base_source)
     candidate_params = extract_params(candidate_source)
+    keys = sorted(set(base_params) | set(candidate_params))
+    changed = [
+        key
+        for key in keys
+        if base_params.get(key) != candidate_params.get(key)
+    ]
+    return tuple(changed)
+
+
+def _exit_param_keys_changed(base_source: str, candidate_source: str) -> tuple[str, ...]:
+    if EXIT_PARAM_BLOCK_PATTERN.search(normalize_strategy_source(base_source)) is None:
+        return ()
+    if EXIT_PARAM_BLOCK_PATTERN.search(normalize_strategy_source(candidate_source)) is None:
+        return tuple(sorted(extract_exit_params(base_source)))
+    base_params = extract_exit_params(base_source)
+    candidate_params = extract_exit_params(candidate_source)
     keys = sorted(set(base_params) | set(candidate_params))
     changed = [
         key
@@ -614,6 +662,9 @@ def _tracked_region_source_map(source: str) -> dict[str, str]:
     match = PARAM_BLOCK_PATTERN.search(normalized)
     if match is not None:
         regions["PARAMS"] = match.group(0)
+    exit_match = EXIT_PARAM_BLOCK_PATTERN.search(normalized)
+    if exit_match is not None:
+        regions["EXIT_PARAMS"] = exit_match.group(0)
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -628,7 +679,7 @@ def _tracked_region_source_map(source: str) -> dict[str, str]:
                 target_names.extend(_iter_target_names(target))
         else:
             target_names.extend(_iter_target_names(node.target))
-        constant_names = [name for name in target_names if name.isupper() and name != "PARAMS"]
+        constant_names = [name for name in target_names if name.isupper() and name not in {"PARAMS", "EXIT_PARAMS"}]
         if not constant_names:
             continue
         start, end = _node_source_span(normalized, node, line_offsets=line_offsets)
@@ -1005,8 +1056,14 @@ def build_system_edit_signature(
     _ = editable_regions
     changed_regions = changed_editable_regions(base_source, candidate_source, tuple())
     changed_param_keys = _param_keys_changed(base_source, candidate_source)
+    changed_exit_param_keys = _exit_param_keys_changed(base_source, candidate_source)
     param_families = tuple(
-        sorted({param_family_for_key(key) for key in changed_param_keys})
+        sorted(
+            {
+                *(param_family_for_key(key) for key in changed_param_keys),
+                *(f"exit_{param_family_for_key(key)}" for key in changed_exit_param_keys),
+            }
+        )
     )
 
     function_names = tuple(
@@ -1038,6 +1095,7 @@ def build_system_edit_signature(
     signature_payload = {
         "changed_regions": list(changed_regions),
         "changed_param_keys": list(changed_param_keys),
+        "changed_exit_param_keys": list(changed_exit_param_keys),
         "param_families": list(param_families),
         "changed_literals": sorted(changed_literals),
         "helper_calls": sorted(helper_calls),
@@ -1045,6 +1103,7 @@ def build_system_edit_signature(
     return {
         "changed_regions": changed_regions,
         "changed_param_keys": changed_param_keys,
+        "changed_exit_param_keys": changed_exit_param_keys,
         "param_families": param_families,
         "changed_literals": tuple(sorted(changed_literals)),
         "helper_calls": tuple(sorted(helper_calls)),
@@ -1139,6 +1198,24 @@ def validate_strategy_source(
             raise StrategySourceError(f"invalid parameter relation: {left_key}={left_value} > {right_key}={right_value}")
         if operator == "<" and left_value >= right_value:
             raise StrategySourceError(f"invalid parameter relation: {left_key}={left_value} >= {right_key}={right_value}")
+
+    base_has_exit_params = bool(base_source and EXIT_PARAM_BLOCK_PATTERN.search(normalize_strategy_source(base_source)))
+    source_has_exit_params = EXIT_PARAM_BLOCK_PATTERN.search(normalized) is not None
+    if base_has_exit_params and not source_has_exit_params:
+        raise StrategySourceError("missing EXIT_PARAMS block markers")
+    if source_has_exit_params:
+        exit_params = extract_exit_params(normalized)
+        missing_fixed_exit_keys = sorted(set(FIXED_EXIT_PARAM_VALUES) - set(exit_params))
+        if missing_fixed_exit_keys:
+            raise StrategySourceError("missing fixed EXIT_PARAMS keys: " + ", ".join(missing_fixed_exit_keys))
+        for key, expected_value in FIXED_EXIT_PARAM_VALUES.items():
+            actual_value = exit_params.get(key)
+            if isinstance(expected_value, float):
+                if not isinstance(actual_value, (int, float)) or isinstance(actual_value, bool) or abs(float(actual_value) - expected_value) > 1e-12:
+                    raise StrategySourceError(f"fixed EXIT_PARAMS key {key} must remain {expected_value}")
+                continue
+            if actual_value != expected_value:
+                raise StrategySourceError(f"fixed EXIT_PARAMS key {key} must remain {expected_value}")
 
     _validate_source_shape_policy(
         normalized,

@@ -9,7 +9,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 SRC_DIR = REPO_ROOT / "src"
 sys.path.insert(0, str(SRC_DIR))
 
-from backtest_macd_aggressive import EXIT_PARAMS, backtest_macd_aggressive
+from backtest_macd_aggressive import EXIT_PARAMS as BACKTEST_EXIT_PARAMS, backtest_macd_aggressive
 from market_data_catalog import default_market_data_paths
 import strategy_macd_aggressive as aggressive_strategy
 
@@ -20,7 +20,7 @@ HOURLY_FILE = str(DATA_PATHS.hourly_1h)
 
 def run_variant(strategy_delta=None, exit_delta=None):
     strategy_params = copy.deepcopy(aggressive_strategy.PARAMS)
-    exit_params = copy.deepcopy(EXIT_PARAMS)
+    exit_params = copy.deepcopy(getattr(aggressive_strategy, "EXIT_PARAMS", BACKTEST_EXIT_PARAMS))
     if strategy_delta:
         strategy_params.update(strategy_delta)
     if exit_delta:
@@ -57,8 +57,8 @@ def print_strategy_sweep(title, key, values):
 
 
 def main():
-    print_exit_sweep("杠杆敏感性", "leverage", [14, 16, 18, 20])
-    print_exit_sweep("突破首止盈敏感性", "breakout_tp1_pnl_pct", [16.0, 18.0, 20.0, 24.0])
+    print_exit_sweep("杠杆敏感性", "leverage", [16, 18, 20, 22])
+    print_exit_sweep("突破首止盈敏感性", "breakout_tp1_pnl_pct", [70.0, 80.0, 90.0, 100.0])
     print_exit_sweep("突破ATR止损敏感性", "breakout_stop_atr_mult", [2.2, 2.6, 2.8, 3.2])
     print_exit_sweep("并发仓位敏感性", "max_concurrent_positions", [2, 3, 4, 5])
     print_strategy_sweep("突破小时级趋势扩张敏感性", "breakout_hourly_spread_min", [0.003, 0.0045, 0.006, 0.008])

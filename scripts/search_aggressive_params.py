@@ -74,7 +74,7 @@ def evaluate(strategy_params, exit_params):
 
 def search():
     base_strategy = deepcopy(strategy_module.PARAMS)
-    base_exit = deepcopy(backtest_module.EXIT_PARAMS)
+    base_exit = deepcopy(getattr(strategy_module, "EXIT_PARAMS", backtest_module.EXIT_PARAMS))
     best = []
 
     breakout_space = product(

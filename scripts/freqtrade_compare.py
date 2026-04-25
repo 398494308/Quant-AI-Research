@@ -58,7 +58,7 @@ def run_custom_engine():
         start_date=START_DATE,
         end_date=END_DATE,
         strategy_params=strat_module.PARAMS,
-        exit_params=bt_engine.EXIT_PARAMS,
+        exit_params=getattr(strat_module, "EXIT_PARAMS", bt_engine.EXIT_PARAMS),
     )
     return result
 

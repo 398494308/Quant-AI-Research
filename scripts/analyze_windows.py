@@ -35,7 +35,7 @@ def run_detailed_backtest(start_date, end_date, label):
         start_date=start_date,
         end_date=end_date,
         strategy_params=strat.PARAMS,
-        exit_params=bt.EXIT_PARAMS,
+        exit_params=getattr(strat, "EXIT_PARAMS", bt.EXIT_PARAMS),
     )
     return result
 
@@ -49,7 +49,7 @@ def analyze_window(start_date, end_date, label):
     if not intraday_data or not hourly_all:
         raise ValueError(f"missing data for window {start_date}~{end_date}")
 
-    exit_p = dict(bt.EXIT_PARAMS)
+    exit_p = dict(getattr(strat, "EXIT_PARAMS", bt.EXIT_PARAMS))
     leverage = float(exit_p["leverage"])
     position_fraction = float(exit_p["position_fraction"])
     intraday_interval_ms = bt._infer_interval_ms(intraday_all, 15)

@@ -140,6 +140,10 @@ iteration_counter = 0
 reference_stage_started_at = ""
 reference_stage_iteration = 0
 research_session_state: dict[str, Any] = {}
+
+
+def active_exit_params() -> dict[str, Any]:
+    return dict(getattr(strategy_module, "EXIT_PARAMS", backtest_module.EXIT_PARAMS))
 prepared_backtest_context_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
 cached_base_behavior_key = ""
 cached_base_behavior_profile: list[dict[str, Any]] | None = None
@@ -1012,7 +1016,7 @@ def _prepared_backtest_context_cache_key(
 
 
 def _prepare_backtest_context() -> dict[str, Any]:
-    exit_params = dict(backtest_module.EXIT_PARAMS)
+    exit_params = active_exit_params()
     cache_key = _prepared_backtest_context_cache_key(
         strategy_module.PARAMS,
         exit_params=exit_params,
@@ -1096,7 +1100,7 @@ def _run_base_backtests(
             start_date=window.start_date,
             end_date=window.end_date,
             strategy_params=strategy_module.PARAMS,
-            exit_params=backtest_module.EXIT_PARAMS,
+            exit_params=active_exit_params(),
             include_diagnostics=include_diagnostics,
             prepared_context=runtime_context,
         )
@@ -1114,7 +1118,7 @@ def _run_base_backtests(
                     start_date=eval_start_date or window.start_date,
                     end_date=window.end_date,
                     strategy_params=strategy_module.PARAMS,
-                    exit_params=backtest_module.EXIT_PARAMS,
+                    exit_params=active_exit_params(),
                     include_diagnostics=True,
                     prepared_context=runtime_context,
                 )
@@ -1153,7 +1157,7 @@ def _run_selection_period_backtest(
         start_date=start_date,
         end_date=end_date,
         strategy_params=strategy_module.PARAMS,
-        exit_params=backtest_module.EXIT_PARAMS,
+        exit_params=active_exit_params(),
         include_diagnostics=include_diagnostics,
         prepared_context=prepared_context,
     )
@@ -1181,7 +1185,7 @@ def _run_hidden_test_backtest(
         start_date=test_window.start_date,
         end_date=test_window.end_date,
         strategy_params=strategy_module.PARAMS,
-        exit_params=backtest_module.EXIT_PARAMS,
+        exit_params=active_exit_params(),
         include_diagnostics=include_diagnostics,
         prepared_context=prepared_context,
     )
@@ -1307,7 +1311,7 @@ def _generate_new_champion_charts(
         start_date=validation_window.start_date,
         end_date=validation_window.end_date,
         strategy_params=strategy_module.PARAMS,
-        exit_params=backtest_module.EXIT_PARAMS,
+        exit_params=active_exit_params(),
         include_diagnostics=True,
         prepared_context=prepared_context,
     )
