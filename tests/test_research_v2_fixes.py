@@ -5090,3 +5090,53 @@ class ChartRenderingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ExitRangeScanUnitTest(unittest.TestCase):
+    def test_parse_exit_range_scan_payload_accepts_text_contract(self):
+        from research_v2.exit_range_scan import parse_exit_range_scan_payload
+
+        spec = parse_exit_range_scan_payload(
+            "trailing_activation_pct | 18,21,24 | scan nearby exit threshold",
+            max_values=3,
+        )
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.param, "trailing_activation_pct")
+        self.assertEqual(spec.values, (18, 21, 24))
+
+    def test_replace_exit_param_value_only_updates_target_key(self):
+        from research_v2.exit_range_scan import replace_exit_param_value
+
+        source = """
+# PARAMS_START
+PARAMS = {}
+# PARAMS_END
+# EXIT_PARAMS_START
+EXIT_PARAMS = {
+    "trailing_activation_pct": 20.0,
+    "pyramid_adx_min": 19.0,
+}
+# EXIT_PARAMS_END
+"""
+        updated = replace_exit_param_value(source, "trailing_activation_pct", 21)
+        self.assertIn('"trailing_activation_pct": 21', updated)
+        self.assertIn('"pyramid_adx_min": 19.0', updated)
+
+    def test_infer_exit_range_scan_spec_from_changed_exit_param(self):
+        from research_v2.exit_range_scan import infer_exit_range_scan_spec
+
+        base = """
+# PARAMS_START
+PARAMS = {}
+# PARAMS_END
+# EXIT_PARAMS_START
+EXIT_PARAMS = {
+    "trailing_activation_pct": 20.0,
+    "pyramid_adx_min": 19.0,
+}
+# EXIT_PARAMS_END
+"""
+        candidate = base.replace('"trailing_activation_pct": 20.0', '"trailing_activation_pct": 24.0')
+        spec = infer_exit_range_scan_spec(base, candidate, None, max_values=3)
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.param, "trailing_activation_pct")
+        self.assertIn(24.0, spec.values)

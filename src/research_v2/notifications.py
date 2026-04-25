@@ -299,4 +299,28 @@ def build_discord_summary_message(
         "```",
         f"门禁：{_single_line(report.gate_reason, limit=280)}",
     ]
+    scan_result = getattr(candidate, "exit_range_scan_result", None) if candidate is not None else None
+    if isinstance(scan_result, dict) and scan_result.get("enabled"):
+        scan_rows = [
+            ("参数", str(scan_result.get("param", "-"))),
+            ("扫描值", " / ".join(str(item) for item in scan_result.get("values", [])[:5]) or "-"),
+            ("最佳值", str(scan_result.get("selected_value", "-"))),
+        ]
+        summaries = scan_result.get("summary", [])
+        if isinstance(summaries, list):
+            best_value = scan_result.get("selected_value")
+            best_row = next((item for item in summaries if isinstance(item, dict) and item.get("value") == best_value), None)
+            if isinstance(best_row, dict):
+                scan_rows.append((
+                    "预筛收益/回撤/手续费",
+                    f"{float(best_row.get('mean_return', 0.0)):.2f}% / "
+                    f"{float(best_row.get('max_drawdown', 0.0)):.2f}% / "
+                    f"{float(best_row.get('mean_fee_drag', 0.0)):.2f}%",
+                ))
+        parts.extend([
+            "Exit Range Scan：",
+            "```text",
+            _render_markdown_table(scan_rows),
+            "```",
+        ])
     return "\n".join(parts)

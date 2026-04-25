@@ -85,11 +85,13 @@
 - `repair_worker` 只在同轮技术修错时出现，不参与研究方向判断
 - 整份策略文件都允许修改，但要求改动克制、结构准确、添加有必要；策略文件现在同时承载 `PARAMS` 和 `EXIT_PARAMS`
 - `EXIT_PARAMS` 中止盈、止损、保本、追踪、持仓时间、趋势失效退出和加仓触发允许被 AI 调整；杠杆、仓位比例、单仓上下限、并发数和加仓规模固定
+- planner 可以为单个连续型 `EXIT_PARAMS` 给 `exit_range_scan`，主进程只做轻量预筛，不做多参数网格搜索
 
 ### Eval / Summary
 
 - 候选必须先形成真实源码 diff
 - 再过 `smoke`
+- 如果本轮触达单个连续型 `EXIT_PARAMS`，主进程会先做最多 3 点轻量 range scan，只用少量窗口预筛并只保留最佳值
 - 再跑完整 `train walk-forward + val`
 - 若刷新 `champion`，只在这时额外跑 `test`
 - `summary_worker` 只根据最终真实 diff 回写候选摘要，避免“原 brief”和“最终代码”错位

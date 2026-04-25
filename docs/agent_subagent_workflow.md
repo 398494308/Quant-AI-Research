@@ -108,6 +108,7 @@ flowchart TB
   - 控制顺序
   - 做真实 diff 检查
   - 跑 `smoke`
+  - 对合法的单参数 `EXIT_PARAMS` 做轻量 range scan 预筛
   - 跑完整评估
   - 执行 `gate`
   - 写 `journal / wiki / heartbeat / reviewer_summary_card / direction_board`

@@ -41,6 +41,8 @@ class StrategyCandidate:
     core_factors: tuple[StrategyCoreFactor, ...]
     strategy_code: str
     primary_direction: str = ""
+    exit_range_scan: dict[str, object] | None = None
+    exit_range_scan_result: dict[str, object] | None = None
 
 
 # ==================== 源码基础操作 ====================

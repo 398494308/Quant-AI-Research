@@ -44,6 +44,11 @@ from deepseek_planner_client import (
 )
 from research_v2.config import ResearchRuntimeConfig, load_research_runtime_config
 from research_v2.charting import PerformanceChartPaths, charts_available, render_performance_chart
+from research_v2.exit_range_scan import (
+    infer_exit_range_scan_spec,
+    replace_exit_param_value,
+    run_exit_range_scan,
+)
 from research_v2.evaluation import (
     EvaluationReport,
     partial_eval_gate_snapshot,
@@ -165,6 +170,7 @@ class StrategyRoundBrief:
     change_tags: tuple[str, ...]
     expected_effects: tuple[str, ...]
     core_factors: tuple[StrategyCoreFactor, ...]
+    exit_range_scan: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -1770,6 +1776,7 @@ MODEL_RESPONSE_FIELDS = (
     "expected_effects",
     "novelty_proof",
     "core_factors",
+    "exit_range_scan",
 )
 def _build_field_pattern(*field_names: str) -> re.Pattern[str]:
     joined = "|".join(re.escape(name) for name in field_names)
@@ -1785,6 +1792,7 @@ MODEL_RESPONSE_FIELD_PATTERN = _build_field_pattern(
     "expected_effects",
     "novelty_proof",
     "core_factors",
+    "exit_range_scan",
 )
 REVIEWER_RESPONSE_FIELD_PATTERN = _build_field_pattern(
     "verdict",
@@ -1948,6 +1956,7 @@ def _parse_model_candidate_payload(raw_text: str) -> dict[str, Any]:
             "expected_effects": [],
             "novelty_proof": "",
             "core_factors": [],
+            "exit_range_scan": None,
         }
 
     return {
@@ -1967,6 +1976,7 @@ def _parse_model_candidate_payload(raw_text: str) -> dict[str, Any]:
             }
             for factor in _parse_core_factors_field(field_lines.get("core_factors", []))
         ],
+        "exit_range_scan": _collapse_field_text(field_lines.get("exit_range_scan", [])),
     }
 
 
@@ -2218,6 +2228,7 @@ def _no_edit_failure_candidate(
         expected_effects=expected_effects,
         core_factors=round_brief.core_factors if round_brief else tuple(),
         strategy_code=strategy_code,
+        exit_range_scan=round_brief.exit_range_scan if round_brief else None,
     )
 
 
@@ -2261,6 +2272,7 @@ def _round_brief_from_payload(payload: dict[str, Any]) -> StrategyRoundBrief:
         change_tags=change_tags,
         expected_effects=tuple(str(item).strip() for item in payload.get("expected_effects", []) if str(item).strip()),
         core_factors=_core_factors_from_payload(payload),
+        exit_range_scan=payload.get("exit_range_scan") if isinstance(payload.get("exit_range_scan"), dict) else ({"raw": str(payload.get("exit_range_scan", "")).strip()} if str(payload.get("exit_range_scan", "")).strip() else None),
     )
 
 
@@ -2274,6 +2286,7 @@ def _round_brief_from_candidate(candidate: StrategyCandidate) -> StrategyRoundBr
         change_tags=candidate.change_tags,
         expected_effects=candidate.expected_effects,
         core_factors=candidate.core_factors,
+        exit_range_scan=candidate.exit_range_scan,
     )
 
 
@@ -2286,6 +2299,7 @@ def _round_brief_task_summary(round_brief: StrategyRoundBrief) -> str:
         f"- change_tags: {', '.join(round_brief.change_tags) or '-'}",
         f"- expected_effects: {'；'.join(round_brief.expected_effects) or '-'}",
         f"- novelty_proof: {round_brief.novelty_proof or '-'}",
+        f"- exit_range_scan: {round_brief.exit_range_scan or '-'}",
     ]
     return "\n".join(lines)
 
@@ -2339,6 +2353,8 @@ def _rebase_candidate_metadata_to_final_code(
         expected_effects=final_brief.expected_effects,
         core_factors=final_brief.core_factors,
         strategy_code=candidate.strategy_code,
+        exit_range_scan=candidate.exit_range_scan or final_brief.exit_range_scan,
+        exit_range_scan_result=candidate.exit_range_scan_result,
     )
 
 
@@ -2365,6 +2381,7 @@ def _candidate_stub_from_round_brief(
         expected_effects=round_brief.expected_effects,
         core_factors=round_brief.core_factors,
         strategy_code=strategy_code,
+        exit_range_scan=round_brief.exit_range_scan,
     )
 
 
@@ -2404,6 +2421,7 @@ def _candidate_from_round_brief(
         expected_effects=round_brief.expected_effects,
         core_factors=round_brief.core_factors,
         strategy_code=strategy_code,
+        exit_range_scan=round_brief.exit_range_scan,
     )
     if not candidate.edited_regions:
         raise StrategySourceError("candidate missing actual changed regions")
@@ -3056,6 +3074,7 @@ def _run_edit_worker(
         change_tags=round_brief.change_tags,
         expected_effects=round_brief.expected_effects,
         novelty_proof=round_brief.novelty_proof,
+        exit_range_scan=round_brief.exit_range_scan,
         evaluation_digest_text=_build_edit_worker_evaluation_digest(best_report),
     )
     return _run_model_text_request(
@@ -3707,6 +3726,8 @@ def _build_journal_entry(
             }
             for factor in candidate.core_factors
         ],
+        "exit_range_scan": candidate.exit_range_scan or {},
+        "exit_range_scan_result": candidate.exit_range_scan_result or {},
         "cluster_key": str(candidate_signature.get("cluster_key", "")).strip()
         or cluster_key_for_components("", candidate.change_tags),
         "quality_score": quality_score,
@@ -4012,6 +4033,95 @@ def _evaluate_candidate(candidate: StrategyCandidate) -> EvaluationReport:
         raise CandidateRuntimeFailure("full_eval", exc) from exc
 
 
+def _exit_range_scan_windows() -> list[Any]:
+    return select_smoke_windows(WINDOWS, max(0, RUNTIME.exit_range_scan_windows))
+
+
+def _format_exit_range_scan_log(result: dict[str, Any]) -> str:
+    rows = result.get("summary", []) if isinstance(result, dict) else []
+    compact = []
+    for row in rows[:5]:
+        compact.append(
+            f"{row.get('value')}=>ret={float(row.get('mean_return', 0.0)):.2f}%,"
+            f"dd={float(row.get('max_drawdown', 0.0)):.2f}%,"
+            f"fee={float(row.get('mean_fee_drag', 0.0)):.2f}%"
+        )
+    return "; ".join(compact)
+
+
+def _maybe_apply_exit_range_scan(candidate: StrategyCandidate, *, base_source: str) -> StrategyCandidate:
+    if not RUNTIME.exit_range_scan_enabled:
+        return candidate
+    spec = infer_exit_range_scan_spec(
+        base_source,
+        candidate.strategy_code,
+        candidate.exit_range_scan,
+        max_values=RUNTIME.exit_range_scan_max_values,
+    )
+    if spec is None:
+        return candidate
+
+    _activate_candidate(candidate)
+    scan_windows = _exit_range_scan_windows()
+    write_heartbeat(
+        "exit_range_scanning",
+        message=f"iteration {iteration_counter} exit range scan",
+        phase="exit_range_scan",
+        current_window=spec.param,
+        window_index=0,
+        window_count=len(scan_windows),
+    )
+    try:
+        outcome = run_exit_range_scan(
+            repo_root=REPO_ROOT,
+            spec=spec,
+            current_exit_params=active_exit_params(),
+            windows=scan_windows,
+            max_fee_drag_pct=RUNTIME.gates.max_fee_drag_pct,
+            max_fee_mult=RUNTIME.exit_range_scan_max_fee_mult,
+            workers=RUNTIME.exit_range_scan_workers,
+        )
+    except Exception as exc:
+        log_info(f"exit range scan 失败，保留原候选: {exc}")
+        logging.exception("exit range scan failed")
+        return replace(
+            candidate,
+            exit_range_scan_result={
+                "enabled": True,
+                "applied": False,
+                "param": spec.param,
+                "values": list(spec.values),
+                "skipped_reason": str(exc),
+            },
+        )
+
+    result_payload = outcome.to_dict()
+    log_info(
+        f"exit range scan: param={outcome.param}, values={list(outcome.values)}, "
+        f"selected={outcome.selected_value}, applied={outcome.applied}; "
+        f"{_format_exit_range_scan_log(result_payload)}"
+    )
+    if not outcome.applied or outcome.selected_value is None:
+        return replace(candidate, exit_range_scan_result=result_payload)
+
+    updated_source = replace_exit_param_value(candidate.strategy_code, outcome.param, outcome.selected_value)
+    validate_strategy_source(updated_source, base_source=base_source)
+    updated_regions = _actual_changed_regions(base_source=base_source, strategy_code=updated_source)
+    updated_tags = candidate.change_tags
+    if "exit_range_scan" not in updated_tags:
+        updated_tags = tuple([*updated_tags, "exit_range_scan"][:6])
+    updated = replace(
+        candidate,
+        strategy_code=updated_source,
+        edited_regions=updated_regions,
+        change_tags=updated_tags,
+        exit_range_scan_result=result_payload,
+    )
+    write_strategy_source(RUNTIME.paths.strategy_file, updated.strategy_code)
+    reload_strategy_module()
+    return updated
+
+
 def _candidate_with_repair(
     base_source: str,
     candidate: StrategyCandidate,
@@ -4027,6 +4137,7 @@ def _candidate_with_repair(
             behavior_diff = _behavior_diff_payload(base_behavior, candidate_behavior)
             if not behavior_diff["changed"]:
                 raise CandidateBehavioralNoop(current, behavior_diff)
+            current = _maybe_apply_exit_range_scan(current, base_source=base_source)
             report = _evaluate_candidate(current)
             return current, report
         except CandidateRuntimeFailure as exc:

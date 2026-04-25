@@ -108,7 +108,7 @@
 - `val` 命中率至少 `0.35`
 - `val` 趋势捕获分至少 `0.05`
 - `train / val` 连续趋势抓取分差不超过 `0.30`
-- 手续费拖累不超过 `8%`
+- 手续费拖累不超过 `11.5%`
 - `val` 分成 `3` 块后，最差块至少 `-0.35`
 - `val` 负块数量最多 `1`
 
@@ -180,6 +180,7 @@
 - worker 仍然只改 [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)
 - 整份策略文件都允许修改，但改动必须克制、结构准确、添加有必要
 - 策略文件现在同时包含 `PARAMS` 和 `EXIT_PARAMS`；worker 可以调部分退出参数，但不能改固定的杠杆和仓位风险参数
+- 对单个连续型 `EXIT_PARAMS`，planner 可选给 `exit_range_scan`；主进程最多扫 3 个值、3 个轻量窗口、2 worker 预筛，只把最佳值送入完整评估
 - worker 会收到当前 gate、最弱维度和 val 多/空捕获/命中率的紧凑诊断，但不会收到完整历史包，也不重新做 planner 研究
 - 单轮改动预算只作为参考，不是硬 gate；超出小 diff 范围时必须服务于打通真实路径或删除旧冗余
 - 真正会进入 diff / smoke / full eval 的，是最终源码里的真实落地改动

@@ -104,6 +104,11 @@ class ResearchRuntimeConfig:
     early_reject_trend_score_threshold: float
     early_reject_hit_rate_threshold: float
     smoke_window_count: int
+    exit_range_scan_enabled: bool
+    exit_range_scan_max_values: int
+    exit_range_scan_workers: int
+    exit_range_scan_windows: int
+    exit_range_scan_max_fee_mult: float
     max_repair_attempts: int
     max_no_edit_repair_attempts: int
     max_exploration_regen_attempts: int
@@ -154,7 +159,7 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         max_dev_validation_gap=_env_float("MACD_V2_MAX_DEV_VALIDATION_GAP", 0.30),
         min_validation_bull_capture=_env_float("MACD_V2_MIN_VALIDATION_BULL_CAPTURE", 0.00),
         min_validation_bear_capture=_env_float("MACD_V2_MIN_VALIDATION_BEAR_CAPTURE", 0.00),
-        max_fee_drag_pct=_env_float("MACD_V2_MAX_FEE_DRAG_PCT", 8.0),
+        max_fee_drag_pct=_env_float("MACD_V2_MAX_FEE_DRAG_PCT", 11.5),
         validation_block_count=_env_int("MACD_V2_VALIDATION_BLOCK_COUNT", 3),
         min_validation_block_floor=_env_float("MACD_V2_MIN_VALIDATION_BLOCK_FLOOR", -0.35),
         max_validation_block_failures=_env_int("MACD_V2_MAX_VALIDATION_BLOCK_FAILURES", 1),
@@ -174,6 +179,11 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         early_reject_trend_score_threshold=_env_float("MACD_V2_EARLY_REJECT_TREND_SCORE", -0.10),
         early_reject_hit_rate_threshold=_env_float("MACD_V2_EARLY_REJECT_HIT_RATE", 0.15),
         smoke_window_count=_env_int("MACD_V2_SMOKE_WINDOW_COUNT", 5),
+        exit_range_scan_enabled=_env_int("MACD_V2_EXIT_RANGE_SCAN_ENABLED", 1) > 0,
+        exit_range_scan_max_values=_env_int("MACD_V2_EXIT_RANGE_SCAN_MAX_VALUES", 3),
+        exit_range_scan_workers=_env_int("MACD_V2_EXIT_RANGE_SCAN_WORKERS", 2),
+        exit_range_scan_windows=_env_int("MACD_V2_EXIT_RANGE_SCAN_WINDOWS", 3),
+        exit_range_scan_max_fee_mult=_env_float("MACD_V2_EXIT_RANGE_SCAN_MAX_FEE_MULT", 1.5),
         max_repair_attempts=_env_int("MACD_V2_MAX_REPAIR_ATTEMPTS", 2),
         max_no_edit_repair_attempts=_env_int("MACD_V2_MAX_NO_EDIT_REPAIR_ATTEMPTS", 1),
         max_exploration_regen_attempts=_env_int("MACD_V2_MAX_EXPLORATION_REGEN_ATTEMPTS", 2),

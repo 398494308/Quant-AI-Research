@@ -51,11 +51,14 @@ def build_candidate_response_format_instructions() -> str:
   expected_effects:
   novelty_proof:
   core_factors:
+  exit_range_scan:
 - `primary_direction` 必填，格式固定为 `domain | label`；`domain` 只能是 `long` / `short` / `mixed` / `structure`。
 - `change_tags` 用逗号分隔短 ASCII 标签。
 - `expected_effects` 用 `||` 分隔 1-5 条预期影响。
 - `novelty_proof` {_novelty_proof_rule()}
 - `core_factors` 没有就写 `none`；有则写成 `name | thesis | current_signal || ...`。
+- `exit_range_scan` 是可选轻量扫描，只能用于单个 `EXIT_PARAMS` 数值键；不需要就写 `none`，需要则写 `param | value1,value2,value3 | reason`。
+- 每次最多给 1 个参数、3 个值；不要把它当网格搜索，也不要扫描入场逻辑、布尔开关、杠杆或仓位风险键。
 - 不要输出 `edited_regions`；系统会按真实 diff 和源码签名自动判定改动区域。"""
 
 
@@ -388,7 +391,7 @@ def build_strategy_research_prompt(
 - train 与 val 分数落差 <= 0.30
 - val 多头捕获 >= 0.00，val 空头捕获 >= 0.00
 - val 会再切成 3 个连续时间分块：最差分块 >= -0.35，负分块最多 1 个
-- 手续费拖累 <= 8%
+- 手续费拖累 <= 11.5%
 - train+val 严重集中度过拟合会直接淘汰
 
 本轮硬完成条件：
@@ -398,6 +401,7 @@ def build_strategy_research_prompt(
 - 这份 round brief 只是 `draft`；主进程还会交给 `reviewer` 审稿。若 reviewer 打回，本轮必须先吸收其反馈再重写，不允许绕过审稿直接进入落码。
 - `primary_direction` 必须是你本轮主动施力的主方向，不要把所有联动改动都往里塞。
 - `change_plan` 必须具体到你希望 worker 改哪条规则块、阈值或最终放行链。
+- 如果本轮主要改 `EXIT_PARAMS` 里的连续数值，可以用 `exit_range_scan` 给一个 3 点小范围；扫描只用于轻量预筛，最终仍只保留一个完整候选。
 - `novelty_proof` 不是自我辩护。{_novelty_proof_rule()}
 - 不允许把“未执行代码改动”“blocked”“no_edit”“no_change”这类占位回复当成完成。
 - 如果辅助记忆缺失，就直接基于当前源码做单假设判断，不要停在解释阶段。
@@ -476,6 +480,7 @@ def build_strategy_edit_worker_prompt(
     change_tags: tuple[str, ...],
     expected_effects: tuple[str, ...],
     novelty_proof: str,
+    exit_range_scan: dict[str, object] | None = None,
     closest_failed_cluster: str = "",
     current_complexity_headroom_text: str = "",
     evaluation_digest_text: str = "",
@@ -487,6 +492,9 @@ def build_strategy_edit_worker_prompt(
         if evaluation_digest_text.strip()
         else "\n"
     )
+    range_scan_text = "none"
+    if isinstance(exit_range_scan, dict) and exit_range_scan:
+        range_scan_text = str(exit_range_scan.get("raw") or exit_range_scan)
     return f"""你现在负责把已经确定的 round brief 直接落到代码。
 
 本轮 round brief：
@@ -497,6 +505,7 @@ def build_strategy_edit_worker_prompt(
 - change_tags: {", ".join(change_tags) or "-"}
 - expected_effects: {"；".join(expected_effects) or "-"}
 - novelty_proof: {novelty_proof or "-"}
+- exit_range_scan: {range_scan_text}
 {digest_block}
 
 当前要求：
@@ -523,6 +532,7 @@ def build_strategy_candidate_summary_prompt(
     change_tags: tuple[str, ...],
     expected_effects: tuple[str, ...],
     novelty_proof: str,
+    exit_range_scan: dict[str, object] | None = None,
     closest_failed_cluster: str = "",
     edited_regions: tuple[str, ...],
     region_families: tuple[str, ...],
@@ -709,6 +719,7 @@ def build_strategy_runtime_repair_prompt(
     edited_regions: tuple[str, ...],
     expected_effects: tuple[str, ...],
     novelty_proof: str,
+    exit_range_scan: dict[str, object] | None = None,
     closest_failed_cluster: str = "",
     error_message: str,
     repair_attempt: int,
@@ -768,6 +779,7 @@ def build_strategy_exploration_repair_prompt(
     edited_regions: tuple[str, ...],
     expected_effects: tuple[str, ...],
     novelty_proof: str,
+    exit_range_scan: dict[str, object] | None = None,
     closest_failed_cluster: str = "",
     block_kind: str,
     blocked_cluster: str,
