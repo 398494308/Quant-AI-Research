@@ -1,207 +1,193 @@
-# Agent / Subagent Workflow
+# 研究器 SOP
 
-这份文档专门解释当前研究器里，主 session 和各个短生命周期 subagent 是怎么配合的。
+这份文档是当前 GitHub 内的主 SOP，描述研究器从启动、出方案、落码、评估、刷新 champion 到人工介入的完整流程。
 
 ## 一图看懂
 
-图按“竖着看”的方式设计，`planner` 的持久主 session 在中轴。
-
 ```mermaid
 flowchart TB
-    A[主进程开始第 N 轮] --> B[planner 主 session<br/>读 reviewer 卡和前台记忆]
-    B --> C[planner 写 draft brief]
-    C --> D[reviewer 审稿]
-    D --> E{PASS?}
+    A[启动研究器] --> B[加载 active reference<br/>baseline 或 champion]
+    B --> C[准备当前 stage 记忆<br/>journal / wiki / direction_board]
+    C --> D[检查人工卡<br/>operator_focus 长期软引导<br/>champion_review hash 命中才生效]
 
-    E -- 否 --> F[planner 吸收打回信息<br/>重写 draft]
-    F --> D
+    D --> E[planner 持久 session<br/>读人工卡 / reviewer 卡 / 方向账本 / 前台记忆]
+    E --> F[planner 输出 draft round brief]
+    F --> G[reviewer fresh session 审稿]
+    G --> H{PASS?}
 
-    E -- 是 --> G[edit_worker 落码]
-    G --> H{代码通过?}
-    H -- 否 --> I[repair_worker 修错]
-    I --> H
+    H -- 否 --> I[planner 吸收打回理由<br/>同轮重写 draft]
+    I --> G
 
-    H -- 是 --> J[主进程跑 diff / smoke / full eval / gate]
-    J --> K[summary_worker 回写最终摘要]
-    K --> L{新 champion?}
-    L -- 是 --> M[更新 champion<br/>仅此时跑 test 验收<br/>重置 stage 和 planner session]
-    M --> B
-    L -- 否 --> N[写 journal / wiki / reviewer 卡 / direction_board]
-    N --> B
+    H -- 是 --> J[edit_worker 落码<br/>只改策略文件]
+    J --> K{技术校验通过?}
+    K -- 否 --> L[repair_worker 修技术错误<br/>不改研究主题]
+    L --> K
+
+    K -- 是 --> M[主进程判卷<br/>diff / smoke / behavioral_noop]
+    M --> N[可选 exit_range_scan<br/>单参数 3 点轻量预筛]
+    N --> O[full eval<br/>train walk-forward + val]
+    O --> P[gate + promotion_score]
+    P --> Q[summary_worker<br/>按真实 diff 回写摘要]
+    Q --> R{刷新 champion?}
+
+    R -- 否 --> S[写回 journal / wiki<br/>reviewer_summary_card / direction_board]
+    S --> E
+
+    R -- 是 --> T[更新 best/champion/策略快照]
+    T --> U[只读 test 验收<br/>2026-01-01 到 2026-04-20]
+    U --> V[生成图表 / Discord 播报 / champion_history 归档]
+    V --> W[重置 stage 和 planner session]
+    W --> X[旧 champion_review 自动失效<br/>除非人工更新 hash]
+    X --> E
 ```
 
-## Prompt 边界
+## 核心原则
 
-- `planner / reviewer / edit_worker / repair_worker / summary_worker` 各自都有独立的 system prompt。
-- 仓库级 `AGENTS.md` 和 workspace 局部 `AGENTS.md` 只提供共享长期规则，不替代各角色自己的 system prompt。
-- 真正进入每个角色的运行时上下文，是“该角色自己的 system prompt + 当前轮 runtime prompt + 当前 stage 前台记忆”，不是所有角色共用一份大 prompt。
+- 研究器只维护一个 active reference：没有合格版本时是 `baseline`，有合格版本后是 `champion`。
+- `planner` 负责想方向，不直接写代码；`reviewer` 负责拦坏方向，不替 planner 发明方向。
+- `edit_worker` 只把 reviewer 放行后的方向落到 `src/strategy_macd_aggressive.py`。
+- 主进程负责判卷，不负责想策略。
+- `test` 只在新 champion 后运行，只做只读验收，不参与晋升，也不进入普通调参循环。
+- 人工卡都是软引导，不是硬 gate；当前 champion 人工观察卡必须 hash 命中才会给 planner 看。
+
+## 当前数据与评分口径
+
+- 标的：`BTC-USDT-SWAP`，策略按 `20x` 合约研究。
+- 事实层：`15m`；`1h / 4h` 由 `15m` 聚合，只做确认层。
+- 执行层：优先使用 `1m` 回测成交。
+- 评分口径：`trend_capture_v8`。
+- `train`：`2023-07-01` 到 `2024-12-31`。
+- `val`：`2025-01-01` 到 `2025-12-31`。
+- `test`：`2026-01-01` 到 `2026-04-20`。
+- 晋升条件：先过 `gate`，再要求 `promotion_score` 高于当前 active reference。
+- `promotion_score` 以 `train/val` 连续趋势抓取分 `5:5` 为主，再混入少量按日收益路径年化分。
+
+## 每一轮怎么跑
+
+1. 主进程读取当前 active reference、窗口配置和 stage 记忆。
+2. 若 `config/research_v2_champion_review.md` 的 `champion_code_hash` 命中当前 champion，注入这张人工观察卡；否则忽略。
+3. `planner` 读取人工卡、上一轮 reviewer 卡、方向账本和前台记忆，写一个单一假设的 draft brief。
+4. `reviewer` 审稿，只输出 `PASS` 或 `REVISE`。
+5. 若 `REVISE`，planner 必须吸收打回理由，同轮重写；连续打回则本轮停止。
+6. 若 `PASS`，`edit_worker` 把方向落到策略源码。
+7. 若出现 no-edit、语法错误、缺 helper、校验失败等技术问题，`repair_worker` 只修技术错误。
+8. 主进程检查真实 diff、重复源码、smoke 行为和关键漏斗变化。
+9. 如果 brief 指定单个连续型 `EXIT_PARAMS` 的 `exit_range_scan`，主进程最多扫 3 个值，只做轻量预筛。
+10. 主进程跑完整 `train walk-forward + val`，并执行 gate 与 promotion 判断。
+11. `summary_worker` 按最终真实 diff 回写候选摘要。
+12. 没有刷新 champion：写回 `journal / wiki / reviewer_summary_card / direction_board`，进入下一轮。
+13. 刷新 champion：更新策略快照，只在此时跑 `test`，生成图表和 Discord 播报，归档 `champion_history`，然后重置 stage 与 planner session。
 
 ## 各角色职责
 
-### 1. planner
+### planner
 
-- 这是唯一的持久主 session。
-- 它负责读当前 stage 的前台记忆，然后提出本轮 `draft round brief`。
-- 它负责研究方向，但它现在没有“直接落码”的权力。
-- 它读取 wiki 时先看顶部摘要；只有方向高热、证据冲突或需要确认失败层时，才下钻更长表格。
-- 如果 `reviewer` 打回，它必须先吸收打回理由，再重写 draft。
+- 唯一持久 session。
+- 负责提出研究方向和单一可证伪假设。
+- 必须先读当前人工卡、reviewer 卡、direction board 和前台记忆。
+- 如果 reviewer 打回，必须先吸收打回理由再重写。
 
-一句话：
-`planner` 负责“想方向”，但不能绕过审稿。
+### reviewer
 
-### 2. reviewer
+- 每轮 fresh session。
+- 只审 planner 的 draft 是否值得落码。
+- 重点检查是否旧失败近邻、是否只换标签、是否说明真实交易路径变化。
+- 不写代码，不替 planner 提新方案。
 
-- 这是每轮都新开的短生命周期审稿 subagent。
-- 它只看一小包高信号证据，再审 planner 刚写出的 draft。
-- 它只能输出两种结论：
-  - `PASS`
-  - `REVISE`
-- 它不能替 planner 发明新方向，也不能直接写代码。
-
-它主要判断的是：
-
-- 这份 draft 是否仍落在最近重复失败核附近
-- 这份 draft 是否只是换了措辞、tag 或近邻阈值
-- 这份 draft 虽然还是做 `long`，但是否已经换了机制层、关键 choke point 或真实交易路径层级
-- 这份 draft 是否说明预计新增、删除或迁移哪类真实交易
-
-一句话：
-`reviewer` 负责“拦坏 draft”，不是“代替 planner”。
-
-### 3. edit_worker
+### edit_worker
 
 - 只接收 reviewer 放行后的 brief。
-- 它不做研究方向判断，只负责把 brief 落到 `src/strategy_macd_aggressive.py`。
-- 策略文件内的 `PARAMS` 和非固定 `EXIT_PARAMS` 都属于可落码范围；固定杠杆和仓位风险参数不能改。
-- 它是短生命周期 worker，不继承 planner 的长历史。
-- 它只额外接收当前 gate、最弱维度和 val 多/空捕获/命中率的紧凑诊断，用来辅助落码幅度判断。
+- 只改 `src/strategy_macd_aggressive.py`。
+- `PARAMS` 和开放的 `EXIT_PARAMS` 都可调整。
+- 杠杆、仓位比例、单仓上下限、并发数和加仓规模保持固定。
 
-一句话：
-`edit_worker` 负责“把通过审稿的方向真正写进代码”。
+### repair_worker
 
-### 4. repair_worker
+- 只处理同轮技术错误。
+- 不改研究主题，不重新想方向。
 
-- 只在当前轮出现技术错误时才会被拉起。
-- 例如：
-  - no-edit
-  - 变量丢失
-  - helper 缺失
-  - 代码校验失败
-- 它不重新定义研究方向，只修当前轮的技术问题。
+### summary_worker
 
-一句话：
-`repair_worker` 负责“修技术错误，不改研究主题”。
+- 只根据最终源码 diff 和最终候选代码写摘要。
+- 用来避免“planner 原本想改什么”和“代码实际改了什么”错位。
 
-### 5. summary_worker
+### 主进程
 
-- 只根据最终真实 diff 和当前最终代码回写候选摘要。
-- 它的存在是为了避免“planner 原本想改什么”和“代码最后真正改了什么”发生错位。
+- 负责调度、校验、评估、gate、归档、播报和记忆回写。
+- 不替 planner 想策略。
 
-一句话：
-`summary_worker` 负责“按最终代码回写真实候选说明”。
+## 人工介入 SOP
 
-### 6. 主进程
+### 临时给 planner 一句直觉
 
-- 主进程不负责想策略。
-- 它负责 orchestration：
-  - 拉起各个 agent
-  - 控制顺序
-  - 做真实 diff 检查
-  - 跑 `smoke`
-  - 对合法的单参数 `EXIT_PARAMS` 做轻量 range scan 预筛
-  - 用三点 milestone 做 early reject，不再每个后续窗口都补跑连续 snapshot
-  - 用成交指纹加关键漏斗变化判断 behavioral no-op
-  - 跑完整评估
-  - 执行 `gate`
-  - 写 `journal / wiki / heartbeat / reviewer_summary_card / direction_board`
+编辑：`config/research_v2_champion_review.md`
 
-一句话：
-主进程负责“调度和判卷”。
+要求：
 
-## 当前为什么要改成这套
+- 内容应短尽短。
+- 必须保留 `champion_code_hash`。
+- 只写针对当前 champion 的观察。
+- 新 champion 后 hash 不匹配，旧卡会自动失效。
 
-之前的问题是：
+当前示例：
 
-- `planner` 虽然能看到失败历史
-- 但它会持续替自己上一轮的方向辩护
-- 于是不断在同一个失败子路线上近邻试错
+```text
+champion_code_hash: <当前 champion hash>
 
-现在加上 `reviewer` 后，目标不是硬编码限制策略内容，而是把“是否值得继续试这条线”从 `planner` 自己手里拿出来，交给一个每轮 fresh 的审稿人。
+直觉看了一下图片，觉得现在的问题在退出方向，应该想办法保住收益。
+```
 
-所以现在的约束不是：
+### 长期方向偏好
 
-- “不准改这个 cluster”
-- “不准改这几个函数”
-- “不准继续做 long”
+编辑：`config/research_v2_operator_focus.md`
 
-而是：
+用途：长期软引导，例如优先方向、降权方向、默认动作。它不绑定 champion hash，不会自动失效。
 
-- 你可以继续做 `long`
-- 但如果这份 draft 本质上还是旧失败近邻，就先不要进入落码
+### 手工瘦身或替换 active reference
 
-## 现在每轮到底怎么跑
+1. 停掉研究器：`bash scripts/manage_research_macd_aggressive_v2.sh stop`
+2. 手工修改策略或替换 active reference。
+3. 重开 stage：`bash scripts/reset_research_macd_aggressive_v2_stage.sh`
+4. 启动研究器：`bash scripts/manage_research_macd_aggressive_v2.sh start`
+5. 跟状态：`bash scripts/manage_research_macd_aggressive_v2.sh status`
 
-一轮的真实顺序是：
+## 常用命令
 
-1. 主进程准备当前 active reference 和当前 stage 记忆
-2. `planner` 产出 `draft brief`
-3. `reviewer` 审稿
-4. 若 `REVISE`，回到 `planner`，按 reviewer 打回理由重写
-5. 若 `PASS`，进入 `edit_worker`
-6. 若代码有技术错误，进入 `repair_worker`
-7. 通过后由主进程做 `smoke / full eval / gate`
-8. `summary_worker` 回写最终候选摘要
-9. 若刷新 `champion`，主进程更新 active reference，只在这时额外跑 `test`，并开启新的 stage / planner session
-10. 若没有刷新 `champion`，主进程写回 `journal / wiki / reviewer_summary_card / direction_board`
-11. 下一轮 `planner` 再先读这些前台记忆
+```bash
+# 启动
+bash scripts/manage_research_macd_aggressive_v2.sh start
 
-## 和旧流程相比，最大的变化
+# 查看状态
+bash scripts/manage_research_macd_aggressive_v2.sh status
 
-以前更像：
+# 停止
+bash scripts/manage_research_macd_aggressive_v2.sh stop
 
-`planner -> edit_worker -> 主进程评估`
+# 重开 stage
+bash scripts/reset_research_macd_aggressive_v2_stage.sh
 
-现在是：
+# 单轮运行
+python3 scripts/research_macd_aggressive_v2.py --once
 
-`planner draft -> reviewer -> planner revise -> edit_worker -> 主进程评估 -> summary_worker`
+# 重建 OKX 数据
+python3 scripts/download_aggressive_data.py
+```
 
-关键区别只有一个：
+## 运行产物
 
-以前 `planner` 写完就能落码。  
-现在 `planner` 先过审，再落码。
+- `state/research_macd_aggressive_v2_best.json`：当前 best/champion 状态。
+- `backups/strategy_macd_aggressive_v2_best.py`：当前 best 策略快照。
+- `backups/strategy_macd_aggressive_v2_champion.py`：当前 champion 策略快照。
+- `backups/strategy_macd_aggressive_v2_candidate.py`：运行中的候选快照，不应随手提交。
+- `backups/champion_history/`：每次新 champion 的独立归档。
+- `reports/research_v2_charts/`：selection / validation 图表。
+- `logs/macd_aggressive_research_v2.log`：主日志。
+- `logs/macd_aggressive_research_v2_model_calls.jsonl`：模型调用日志。
+- `state/research_macd_aggressive_v2_memory/wiki/`：前台记忆、方向账本、失败 wiki、reviewer 卡。
 
-## 现在前台记忆里最关键的文件
+## 提交代码时的注意事项
 
-- `wiki/reviewer_summary_card.md`
-  上一轮最后一次 reviewer 为什么放行或打回
-- `wiki/latest_history_package.md`
-  当前 stage 的执行摘要、失败核、过热簇和最近轮次
-- `wiki/direction_board.md`
-  当前 active reference 下各主方向的后验热度
-- `wiki/failure_wiki.md`
-  去重后的失败模式聚合
-- `wiki/duplicate_watchlist.md`
-  最近最容易重复提交的补丁摘要
-- `wiki/last_rejected_snapshot.md`
-  最近一次被系统判错的快照
-
-其中最靠前的是：
-
-1. `reviewer_summary_card.md`
-2. `direction_board.md`
-3. `latest_history_package.md`
-4. `failure_wiki.md`
-5. `duplicate_watchlist.md`
-
-说明：
-
-- `latest_history_package.md` 现在只保留精简前台记忆，重点给 planner 看执行摘要、失败核、方向账本摘要和最近轮次元信息。
-- `reviewer_summary_card.md` 只保留当前轮最后一次 reviewer 判定；如果同轮先 `REVISE` 后重写再 `PASS`，最终卡记录最后一次 `PASS`。
-- 全量历史表格仍写入 `memory/raw/*` 和对应 json 归档，但不再反复塞进主研究 prompt。
-- 如果进程随后只是为了承接刚刷新的 `champion` 而重启，启动时那条 `📌 已加载 champion 参考` Discord 播报会静默一次；真正的 `🚀 新 champion` 播报仍然保留。
-
-## 一句话总结
-
-当前研究器的核心工作流是：
-
-`持久 planner 想方向，fresh reviewer 审方向，worker 落代码，主进程判结果，再把结果写回前台记忆给下一轮继续用。`
+- 研究器运行中会持续改写候选和策略文件。
+- 只想提交当前 champion 时，先停研究器，再排除 `backups/strategy_macd_aggressive_v2_candidate.py`。
+- 文档、配置或流程改动完成后，要同步更新文档并推送 git。
+- 不要把运行中的候选误当成稳定 champion 提交。

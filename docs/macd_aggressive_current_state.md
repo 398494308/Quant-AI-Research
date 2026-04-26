@@ -167,14 +167,14 @@
 
 当前 planner 的顺序约束：
 
-- 先看上一轮 `reviewer` 总结卡
-- 再看 `direction_board`，确认当前主方向是否已经高热，以及这次是不是还在同一热区横移
-- planner 读取 wiki 时先看顶部摘要；只有方向高热、证据冲突或需要确认失败层时，才下钻更长表格
-- 再看结构化失败反馈和当前诊断，确认当前到底是 `long_impulse / long_retest / long_reaccel / long_relay` 还是 `short_impulse / short_retest / short_reaccel` 在拖分
-- 先复盘上一轮为什么失败、失败更像发生在哪一层交易路径
-- 先决定这轮继续同方向还是转向，再写 draft brief
-- 最后才写 `hypothesis / change_plan / novelty_proof`
-- `novelty_proof` 现在用于先说明“上一版被什么证据否掉”，再说明“这轮为什么继续或转向”，最后才补“这次换了哪一层真实触达路径或关键规则链”
+- 先看当前 champion 人工观察卡；只有 `champion_code_hash` 命中时，这张卡才会进入 prompt。
+- 再看上一轮 `reviewer` 总结卡，先判断上一轮为什么失败。
+- 再看 `direction_board / duplicate_watchlist / failure_wiki`，确认当前主方向是否已经高热，以及这次是不是仍在同一热区横移。
+- planner 读取 wiki 时先看顶部摘要；只有方向高热、证据冲突或需要确认失败层时，才下钻更长表格。
+- 再看当前诊断，定位失败更像发生在 `outer_context / path / final_veto / routing / followthrough / exit / unknown` 的哪一层。
+- 先决定这轮继续同方向还是转向，再写 draft brief。
+- 最后才写 `hypothesis / change_plan / novelty_proof`。
+- `novelty_proof` 现在用于先说明“上一版被什么证据否掉”，再说明“这轮为什么继续或转向”，最后才补“这次换了哪一层真实触达路径或关键规则链”。
 
 当前 edit_worker 约束：
 
@@ -201,9 +201,9 @@
 
 人工观察卡：
 
-- `config/research_v2_champion_review.md` 只给 planner 看，是软引导，不是硬 gate。
+- `config/research_v2_champion_review.md` 只给 planner 看，是短人工直觉，不是硬 gate。
+- 内容应短尽短；适合写一句当前 champion 的图形直觉。
 - 卡内 `champion_code_hash` 必须命中当前 champion；刷新新 champion 后主进程自动忽略旧卡，避免旧直觉污染新阶段。
-- 适合记录人工看图后的直觉，例如退出过晚、利润回吐、回撤结构等。
 
 当前 session 规则：
 
@@ -233,7 +233,7 @@
 - 把复杂度提示反复塞进 planner / reviewer prompt
 - 把复杂度状态发到 Discord 作为流程提示
 
-推荐 SOP：
+手工瘦身 SOP：
 
 1. 停掉研究器。
 2. 手工瘦身或手工替换 active reference。
