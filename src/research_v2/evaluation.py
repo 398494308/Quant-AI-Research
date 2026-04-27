@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Any
 
-from research_v2.config import GateConfig
+from research_v2.config import GateConfig, ScoringConfig
 
 
 # ==================== 数据结构 ====================
@@ -101,6 +101,15 @@ class ValidationBlockReport:
     used_block_count: int
 
 
+@dataclass(frozen=True)
+class DrawdownRiskSideReport:
+    risk_score: float
+    window_count: int
+    median_ulcer_pct: float
+    tail_ulcer_pct: float
+    blended_ulcer_pct: float
+
+
 HIT_SCORE_THRESHOLD = 0.25
 OVERFIT_WARN_SCORE = 20.0
 OVERFIT_HIGH_SCORE = 40.0
@@ -132,9 +141,6 @@ TREND_REVERSAL_MOVE_FLOOR = 0.025
 TREND_MIN_SEGMENT_BARS = 3
 MIN_VALIDATION_BLOCK_POINTS = 60
 TRAIN_VAL_SCORE_WEIGHT = 0.50
-PROMOTION_CAPTURE_SCORE_WEIGHT = 0.75
-PROMOTION_TIMED_RETURN_SCORE_WEIGHT = 0.15
-PROMOTION_TURN_PROTECTION_SCORE_WEIGHT = 0.10
 TURN_PROTECTION_NEUTRAL_DD_PCT = 12.0
 TURN_PROTECTION_DD_STEP_PCT = 6.0
 TURN_PROTECTION_SCORE_MIN = -1.0
@@ -750,6 +756,83 @@ def _annualized_return_score(daily_returns: list[float]) -> float:
     return _clamp(math.log(max(annualized_growth, 1e-9), 2.0), -2.0, 3.0)
 
 
+def _window_slices(length: int, window_days: int, step_days: int) -> list[tuple[int, int]]:
+    if length <= 0:
+        return []
+    window_size = max(1, min(window_days, length))
+    step_size = max(1, step_days)
+    if length <= window_size:
+        return [(0, length)]
+    ranges: list[tuple[int, int]] = []
+    start_idx = 0
+    while start_idx + window_size <= length:
+        ranges.append((start_idx, start_idx + window_size))
+        start_idx += step_size
+    tail_start = max(0, length - window_size)
+    tail_range = (tail_start, length)
+    if not ranges or ranges[-1] != tail_range:
+        ranges.append(tail_range)
+    return ranges
+
+
+def _ulcer_index_pct(daily_returns: list[float]) -> float:
+    if not daily_returns:
+        return 0.0
+    equity = 1.0
+    peak = 1.0
+    squared_drawdowns: list[float] = []
+    for value in daily_returns:
+        equity *= max(1e-9, 1.0 + float(value))
+        peak = max(peak, equity)
+        drawdown_pct = 0.0 if peak <= 1e-12 else (peak - equity) / peak * 100.0
+        squared_drawdowns.append(drawdown_pct * drawdown_pct)
+    return math.sqrt(_mean(squared_drawdowns))
+
+
+def _drawdown_risk_side_report(
+    daily_returns: list[float],
+    scoring: ScoringConfig,
+) -> DrawdownRiskSideReport:
+    if not daily_returns:
+        return DrawdownRiskSideReport(
+            risk_score=0.0,
+            window_count=0,
+            median_ulcer_pct=0.0,
+            tail_ulcer_pct=0.0,
+            blended_ulcer_pct=0.0,
+        )
+    window_ranges = _window_slices(
+        len(daily_returns),
+        scoring.risk_window_days,
+        scoring.risk_window_step_days,
+    )
+    window_ulcer_pcts = [
+        _ulcer_index_pct(daily_returns[start_idx:end_idx])
+        for start_idx, end_idx in window_ranges
+    ]
+    if not window_ulcer_pcts:
+        return DrawdownRiskSideReport(
+            risk_score=0.0,
+            window_count=0,
+            median_ulcer_pct=0.0,
+            tail_ulcer_pct=0.0,
+            blended_ulcer_pct=0.0,
+        )
+    tail_quantile = _clamp(scoring.drawdown_risk_tail_quantile, 0.50, 0.99)
+    tail_weight = _clamp(scoring.drawdown_risk_tail_weight, 0.0, 1.0)
+    median_ulcer_pct = median(window_ulcer_pcts)
+    tail_ulcer_pct = _quantile(window_ulcer_pcts, tail_quantile)
+    blended_ulcer_pct = (1.0 - tail_weight) * median_ulcer_pct + tail_weight * tail_ulcer_pct
+    risk_score = _clamp(blended_ulcer_pct / max(scoring.drawdown_risk_scale_pct, 0.1), 0.0, 3.0)
+    return DrawdownRiskSideReport(
+        risk_score=risk_score,
+        window_count=len(window_ulcer_pcts),
+        median_ulcer_pct=median_ulcer_pct,
+        tail_ulcer_pct=tail_ulcer_pct,
+        blended_ulcer_pct=blended_ulcer_pct,
+    )
+
+
 def _trend_score_report(points: list[dict[str, Any]]) -> TrendScoreReport:
     if len(points) < 6:
         return TrendScoreReport(
@@ -1194,8 +1277,10 @@ def summarize_evaluation(
     gates: GateConfig,
     selection_period_result: dict[str, Any] | None = None,
     validation_continuous_result: dict[str, Any] | None = None,
+    scoring: ScoringConfig | None = None,
     **_kwargs: Any,
 ) -> EvaluationReport:
+    scoring = scoring or ScoringConfig()
     if selection_period_result is None:
         selection_period_result = _kwargs.get("full_period_result")
     eval_results = _window_payloads(results, "eval")
@@ -1268,6 +1353,14 @@ def summarize_evaluation(
         TRAIN_VAL_SCORE_WEIGHT * train_timed_return_score
         + TRAIN_VAL_SCORE_WEIGHT * validation_timed_return_score
     )
+    train_drawdown_risk_report = _drawdown_risk_side_report(eval_daily_path.returns, scoring)
+    validation_drawdown_risk_report = _drawdown_risk_side_report(validation_daily_path.returns, scoring)
+    train_drawdown_risk_score = train_drawdown_risk_report.risk_score
+    validation_drawdown_risk_score = validation_drawdown_risk_report.risk_score
+    drawdown_risk_score = (
+        TRAIN_VAL_SCORE_WEIGHT * train_drawdown_risk_score
+        + TRAIN_VAL_SCORE_WEIGHT * validation_drawdown_risk_score
+    )
     train_turn_protection_score = train_continuous_trend_report.turn_protection_score
     validation_turn_protection_score = validation_trend_report.turn_protection_score
     turn_protection_score = (
@@ -1285,9 +1378,9 @@ def summarize_evaluation(
     promotion_gap = capture_drop
     overfit_report = _overfit_risk_report(selection_trend_report, capture_drop)
     promotion_score = (
-        PROMOTION_CAPTURE_SCORE_WEIGHT * capture_score
-        + PROMOTION_TIMED_RETURN_SCORE_WEIGHT * timed_return_score
-        + PROMOTION_TURN_PROTECTION_SCORE_WEIGHT * turn_protection_score
+        scoring.promotion_capture_weight * capture_score
+        + scoring.promotion_timed_return_weight * timed_return_score
+        - scoring.promotion_drawdown_penalty_weight * drawdown_risk_score
     )
     validation_long_trades, validation_short_trades = _trade_side_counts(validation_source)
     selection_long_trades, selection_short_trades = _trade_side_counts(selection_source)
@@ -1361,9 +1454,19 @@ def summarize_evaluation(
             f"{train_capture_score:.2f} / {validation_capture_score:.2f} / {capture_score:.2f}"
         ),
         (
-            "train/val按日收益年化分 / 收益补充分 / 掉头保护分 / 晋级分: "
+            "train/val按日收益年化分 / 收益补充分 / 固定窗口回撤风险分 / 晋级分: "
             f"{train_timed_return_score:.2f} / {validation_timed_return_score:.2f} / "
-            f"{timed_return_score:.2f} / {turn_protection_score:.2f} / {promotion_score:.2f}"
+            f"{timed_return_score:.2f} / {drawdown_risk_score:.2f} / {promotion_score:.2f}"
+        ),
+        (
+            "train/val回撤风险分(窗口数): "
+            f"{train_drawdown_risk_score:.2f}({train_drawdown_risk_report.window_count}) / "
+            f"{validation_drawdown_risk_score:.2f}({validation_drawdown_risk_report.window_count})"
+        ),
+        (
+            "train/val窗口 Ulcer 中位 / P75: "
+            f"{train_drawdown_risk_report.median_ulcer_pct:.2f}/{train_drawdown_risk_report.tail_ulcer_pct:.2f} / "
+            f"{validation_drawdown_risk_report.median_ulcer_pct:.2f}/{validation_drawdown_risk_report.tail_ulcer_pct:.2f}"
         ),
         f"val到来 / 陪跑 / 掉头: {validation_trend_report.arrival_score:.2f} / {validation_trend_report.escort_score:.2f} / {validation_trend_report.turn_score:.2f}",
         (
@@ -1430,7 +1533,7 @@ def summarize_evaluation(
         (
             f"- 当前基底: 质量分(train连续趋势分)={quality_score:.2f}，晋级分={promotion_score:.2f}，"
             f"抓取主分={capture_score:.2f}，收益补充分={timed_return_score:.2f}，"
-            f"掉头保护分={turn_protection_score:.2f}，"
+            f"回撤风险惩罚分={drawdown_risk_score:.2f}，"
             f"gate={gate_reason}"
         ),
         f"- 当前主短板: {validation_weakest_axis}",
@@ -1456,7 +1559,7 @@ def summarize_evaluation(
         (
             f"- 当前评分组成: train/val 连续趋势抓取={train_capture_score:.2f}/{validation_capture_score:.2f}，"
             f"train/val 按日收益年化分={train_timed_return_score:.2f}/{validation_timed_return_score:.2f}，"
-            f"train/val 掉头保护分={train_turn_protection_score:.2f}/{validation_turn_protection_score:.2f}"
+            f"train/val 固定窗口回撤风险分={train_drawdown_risk_score:.2f}/{validation_drawdown_risk_score:.2f}"
         ),
         (
             f"- train+val 状态: 趋势分/收益分={selection_trend_report.trend_score:.2f}/"
@@ -1467,6 +1570,8 @@ def summarize_evaluation(
         ),
         (
             f"- 风险与成本: 最大回撤={worst_drawdown:.2f}%，"
+            f"窗口 Ulcer(train/val blended)="
+            f"{train_drawdown_risk_report.blended_ulcer_pct:.2f}/{validation_drawdown_risk_report.blended_ulcer_pct:.2f}%，"
             f"手续费拖累={avg_fee_drag:.2f}%，"
             f"train/val 抓取分差={promotion_gap:.2f}"
         ),
@@ -1519,6 +1624,17 @@ def summarize_evaluation(
         "train_timed_return_score": train_timed_return_score,
         "validation_timed_return_score": validation_timed_return_score,
         "timed_return_score": timed_return_score,
+        "train_drawdown_risk_score": train_drawdown_risk_score,
+        "validation_drawdown_risk_score": validation_drawdown_risk_score,
+        "drawdown_risk_score": drawdown_risk_score,
+        "train_window_ulcer_median_pct": train_drawdown_risk_report.median_ulcer_pct,
+        "train_window_ulcer_p75_pct": train_drawdown_risk_report.tail_ulcer_pct,
+        "train_window_ulcer_blended_pct": train_drawdown_risk_report.blended_ulcer_pct,
+        "train_drawdown_window_count": float(train_drawdown_risk_report.window_count),
+        "validation_window_ulcer_median_pct": validation_drawdown_risk_report.median_ulcer_pct,
+        "validation_window_ulcer_p75_pct": validation_drawdown_risk_report.tail_ulcer_pct,
+        "validation_window_ulcer_blended_pct": validation_drawdown_risk_report.blended_ulcer_pct,
+        "validation_drawdown_window_count": float(validation_drawdown_risk_report.window_count),
         "train_turn_protection_score": train_turn_protection_score,
         "validation_turn_protection_score": validation_turn_protection_score,
         "turn_protection_score": turn_protection_score,

@@ -104,10 +104,23 @@ class GateConfig:
 
 
 @dataclass(frozen=True)
+class ScoringConfig:
+    promotion_capture_weight: float = 0.80
+    promotion_timed_return_weight: float = 0.20
+    promotion_drawdown_penalty_weight: float = 0.40
+    risk_window_days: int = 28
+    risk_window_step_days: int = 7
+    drawdown_risk_tail_quantile: float = 0.75
+    drawdown_risk_tail_weight: float = 0.60
+    drawdown_risk_scale_pct: float = 6.0
+
+
+@dataclass(frozen=True)
 class ResearchRuntimeConfig:
     paths: ResearchPaths
     windows: WindowConfig
     gates: GateConfig
+    scoring: ScoringConfig
     loop_interval_seconds: int
     provider_recovery_wait_seconds: int
     failure_cooldown_seconds: int
@@ -180,11 +193,27 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         min_validation_block_floor=_env_float("MACD_V2_MIN_VALIDATION_BLOCK_FLOOR", -0.35),
         max_validation_block_failures=_env_int("MACD_V2_MAX_VALIDATION_BLOCK_FAILURES", 1),
     )
+    risk_window_days = _env_int("MACD_V2_RISK_WINDOW_DAYS", windows.eval_window_days)
+    risk_window_step_days = _env_int(
+        "MACD_V2_RISK_WINDOW_STEP_DAYS",
+        max(1, risk_window_days // 4),
+    )
+    scoring = ScoringConfig(
+        promotion_capture_weight=_env_float("MACD_V2_PROMOTION_CAPTURE_WEIGHT", 0.80),
+        promotion_timed_return_weight=_env_float("MACD_V2_PROMOTION_TIMED_RETURN_WEIGHT", 0.20),
+        promotion_drawdown_penalty_weight=_env_float("MACD_V2_PROMOTION_DRAWDOWN_PENALTY_WEIGHT", 0.40),
+        risk_window_days=max(1, risk_window_days),
+        risk_window_step_days=max(1, risk_window_step_days),
+        drawdown_risk_tail_quantile=_env_float("MACD_V2_DRAWDOWN_RISK_TAIL_QUANTILE", 0.75),
+        drawdown_risk_tail_weight=_env_float("MACD_V2_DRAWDOWN_RISK_TAIL_WEIGHT", 0.60),
+        drawdown_risk_scale_pct=max(0.1, _env_float("MACD_V2_DRAWDOWN_RISK_SCALE_PCT", 6.0)),
+    )
 
     return ResearchRuntimeConfig(
         paths=paths,
         windows=windows,
         gates=gates,
+        scoring=scoring,
         loop_interval_seconds=_env_int("MACD_V2_LOOP_INTERVAL_SECONDS", 10),
         provider_recovery_wait_seconds=_env_int("MACD_V2_PROVIDER_RECOVERY_WAIT_SECONDS", 90),
         failure_cooldown_seconds=_env_int("MACD_V2_FAILURE_COOLDOWN_SECONDS", 10),

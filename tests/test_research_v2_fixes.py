@@ -27,7 +27,7 @@ from market_data_catalog import default_market_data_paths
 import scripts.research_macd_aggressive_v2 as research_script
 import strategy_macd_aggressive as strategy_module
 from scripts.research_macd_aggressive_v2 import select_smoke_windows
-from research_v2.config import GateConfig
+from research_v2.config import GateConfig, ScoringConfig
 from research_v2.evaluation import (
     EvaluationReport,
     _annualized_return_score,
@@ -504,10 +504,12 @@ class EvaluationFixesTest(unittest.TestCase):
             report.metrics["train_capture_score"] - report.metrics["validation_capture_score"],
         )
         expected_promotion_score = (
-            0.85 * report.metrics["capture_score"]
-            + 0.15 * report.metrics["timed_return_score"]
+            0.80 * report.metrics["capture_score"]
+            + 0.20 * report.metrics["timed_return_score"]
+            - 0.40 * report.metrics["drawdown_risk_score"]
         )
         self.assertAlmostEqual(report.metrics["promotion_score"], expected_promotion_score)
+        self.assertGreaterEqual(report.metrics["drawdown_risk_score"], 0.0)
         self.assertEqual(report.metrics["validation_block_count_used"], 0.0)
         self.assertEqual(report.metrics["eval_unique_trend_points"], 15.0)
         self.assertEqual(report.metrics["eval_overlap_trend_points"], 2.0)
@@ -676,7 +678,93 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertGreater(report.metrics["overfit_risk_score"], 0.0)
         self.assertGreater(report.metrics["overfit_top1_positive_share"], 0.60)
         self.assertEqual(report.metrics["overfit_hard_fail"], 1.0)
-        self.assertAlmostEqual(report.metrics["promotion_score"], 0.85 * report.metrics["capture_score"])
+        self.assertAlmostEqual(report.metrics["promotion_score"], 0.80 * report.metrics["capture_score"])
+
+    def test_summarize_evaluation_drawdown_risk_penalizes_persistent_underwater_path(self):
+        scoring = ScoringConfig(
+            risk_window_days=5,
+            risk_window_step_days=2,
+            drawdown_risk_tail_quantile=0.75,
+            drawdown_risk_tail_weight=0.60,
+            drawdown_risk_scale_pct=6.0,
+        )
+        eval_window = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-10"})()
+        validation_window = type("Window", (), {"group": "validation", "label": "val1", "start_date": "2026-01-11", "end_date": "2026-01-20"})()
+        base_eval_points = [
+            {"timestamp": idx, "label": f"e{idx}", "market_close": 100.0 + idx, "atr_ratio": 0.01, "strategy_equity": 100000.0 + idx * 1200.0}
+            for idx in range(1, 11)
+        ]
+        base_validation_points = [
+            {"timestamp": idx + 100, "label": f"v{idx}", "market_close": 110.0 + idx, "atr_ratio": 0.01, "strategy_equity": 112000.0 + idx * 900.0}
+            for idx in range(1, 11)
+        ]
+
+        def build_report(eval_daily_returns, validation_daily_returns):
+            results = [
+                {
+                    "window": eval_window,
+                    "result": {
+                        "return": 8.0,
+                        "max_drawdown": 6.0,
+                        "daily_returns": eval_daily_returns,
+                        "trades": 5,
+                        "fee_drag_pct": 0.2,
+                        "liquidations": 0,
+                        "trend_capture_points": base_eval_points,
+                    },
+                },
+                {
+                    "window": validation_window,
+                    "result": {
+                        "return": 5.0,
+                        "max_drawdown": 5.0,
+                        "daily_returns": validation_daily_returns,
+                        "trades": 4,
+                        "fee_drag_pct": 0.2,
+                        "liquidations": 0,
+                        "trend_capture_points": base_validation_points,
+                    },
+                },
+            ]
+            return summarize_evaluation(
+                results,
+                make_gate_config(),
+                selection_period_result={
+                    "return": 13.0,
+                    "max_drawdown": 7.0,
+                    "daily_returns": list(eval_daily_returns) + list(validation_daily_returns),
+                    "trend_capture_points": base_eval_points + base_validation_points,
+                },
+                validation_continuous_result={
+                    "return": 5.0,
+                    "max_drawdown": 5.0,
+                    "daily_returns": validation_daily_returns,
+                    "trend_capture_points": base_validation_points,
+                },
+                scoring=scoring,
+            )
+
+        fast_recovery_report = build_report(
+            [0.03, 0.03, -0.12, 0.08, 0.06, 0.03, 0.03, 0.02, 0.01, 0.01],
+            [0.02, 0.02, -0.08, 0.05, 0.04, 0.02, 0.02, 0.01, 0.01, 0.01],
+        )
+        persistent_underwater_report = build_report(
+            [0.03, 0.03, -0.12, -0.04, -0.03, 0.01, 0.01, 0.00, 0.01, 0.01],
+            [0.02, 0.02, -0.08, -0.03, -0.02, 0.00, 0.00, 0.01, 0.00, 0.01],
+        )
+
+        self.assertGreater(
+            persistent_underwater_report.metrics["drawdown_risk_score"],
+            fast_recovery_report.metrics["drawdown_risk_score"],
+        )
+        self.assertGreater(
+            persistent_underwater_report.metrics["validation_window_ulcer_p75_pct"],
+            fast_recovery_report.metrics["validation_window_ulcer_p75_pct"],
+        )
+        self.assertLess(
+            persistent_underwater_report.metrics["promotion_score"],
+            fast_recovery_report.metrics["promotion_score"],
+        )
 
     def test_summarize_evaluation_emits_funnel_and_low_activity_soft_signal(self):
         eval_window = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-10"})()
@@ -1536,6 +1624,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("promotion_score` 高于当前 champion", prompt)
         self.assertIn("连续趋势抓取分 `5:5`", prompt)
         self.assertIn("按日收益路径年化分", prompt)
+        self.assertIn("固定窗口回撤风险惩罚", prompt)
         self.assertNotIn("promotion_delta >", prompt)
         self.assertIn("当前回合任务", prompt)
         self.assertIn("本轮阅读顺序（必须执行）", prompt)
