@@ -2,17 +2,20 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODE="${1:-dry-run}"
+MODE="${1:-demo}"
 
 case "${MODE}" in
   dry-run|dryrun)
     CONFIG_PATH="${SCRIPT_DIR}/runtime/dryrun/config.runtime.json"
     ;;
+  demo)
+    CONFIG_PATH="${SCRIPT_DIR}/runtime/demo/config.runtime.json"
+    ;;
   live)
     CONFIG_PATH="${SCRIPT_DIR}/runtime/live/config.runtime.json"
     ;;
   *)
-    echo "usage: bash status.sh {dry-run|live}"
+    echo "usage: bash status.sh {demo|dry-run|live}"
     exit 1
     ;;
 esac

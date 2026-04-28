@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${I_UNDERSTAND_LIVE_RISK:-}" != "YES" ]]; then
-  echo "Refusing to start live trading. Export I_UNDERSTAND_LIVE_RISK=YES first."
-  exit 1
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-RUNTIME_DIR="${SCRIPT_DIR}/runtime/live"
-USER_DATA_DIR="${SCRIPT_DIR}/user_data/live"
+RUNTIME_DIR="${SCRIPT_DIR}/runtime/demo"
+USER_DATA_DIR="${SCRIPT_DIR}/user_data/demo"
 PYTHON_BIN="${PYTHON_BIN:-${REPO_ROOT}/.venv/bin/python}"
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   PYTHON_BIN="${PYTHON_BIN_FALLBACK:-python3}"
@@ -24,12 +19,19 @@ if [[ -z "${FREQTRADE_BIN}" ]]; then
   exit 1
 fi
 
+PINNED_STRATEGY_PATH="${SCRIPT_DIR}/pinned/demo/strategy_macd_aggressive.py"
+if [[ ! -f "${PINNED_STRATEGY_PATH}" ]]; then
+  echo "demo pinned strategy missing: ${PINNED_STRATEGY_PATH}"
+  echo "run: ${PYTHON_BIN} ${SCRIPT_DIR}/pin_strategy.py --source ${REPO_ROOT}/backups/strategy_macd_aggressive_v2_champion.py"
+  exit 1
+fi
+
 mkdir -p "${RUNTIME_DIR}" "${USER_DATA_DIR}/data"
-"${PYTHON_BIN}" "${SCRIPT_DIR}/build_runtime_config.py" --mode live >/dev/null
+"${PYTHON_BIN}" "${SCRIPT_DIR}/build_runtime_config.py" --mode demo >/dev/null
 
 exec "${FREQTRADE_BIN}" trade \
   --config "${RUNTIME_DIR}/config.runtime.json" \
   --strategy-path "${SCRIPT_DIR}/strategies" \
-  --strategy MacdAggressiveStrategy \
+  --strategy MacdAggressivePinnedStrategy \
   --user-data-dir "${USER_DATA_DIR}" \
   --logfile "${RUNTIME_DIR}/freqtrade.log"

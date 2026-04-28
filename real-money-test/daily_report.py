@@ -2,167 +2,64 @@
 from __future__ import annotations
 
 import json
-import os
-import re
 import sqlite3
-import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
 
+from runtime_common import (
+    CN_TZ,
+    LOCAL_REPORT_ENV_PATH,
+    SECRETS_ENV_PATH,
+    UTC_TZ,
+    BotStatus,
+    format_age,
+    get_mode_spec,
+    load_env,
+    load_pinned_metadata,
+    read_bot_status,
+    resolve_runtime_paths,
+    send_discord,
+)
 
-CN_TZ = ZoneInfo("Asia/Shanghai")
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
-SECRETS_ENV_PATH = REPO_ROOT / "config" / "secrets.env"
-LOCAL_ENV_PATH = SCRIPT_DIR / "report.env"
-DISCORD_API_BASE = "https://discord.com/api/v10"
-LOG_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}")
-
-# 运行模式：通过命令行参数或环境变量选择
-REPORT_MODE = os.getenv("REPORT_MODE", "dry-run")
+try:  # pragma: no cover - 线上依赖 .venv 提供
+    import ccxt
+except ImportError:  # pragma: no cover
+    ccxt = None
 
 
-def _resolve_paths(mode: str) -> tuple[Path, Path, Path, Path, Path]:
-    """根据模式返回 (runtime_dir, config_path, pid_file, db_path, log_path)。"""
-    if mode == "live":
-        runtime_dir = SCRIPT_DIR / "runtime" / "live"
-        db_name = "tradesv3.live.sqlite"
-        log_name = "freqtrade.log"
-    else:
-        runtime_dir = SCRIPT_DIR / "runtime" / "dryrun"
-        db_name = "tradesv3.dryrun.sqlite"
-        log_name = "freqtrade.log"
-    return (
-        runtime_dir,
-        runtime_dir / "config.runtime.json",
-        runtime_dir / "freqtrade.pid",
-        runtime_dir / db_name,
-        runtime_dir / log_name,
-    )
+REPORT_MODE = "demo"
 
 
 @dataclass
-class BotStatus:
-    running: bool
-    pid: str = ""
-    heartbeat_at: datetime | None = None
-    last_log_at: datetime | None = None
+class AccountSnapshot:
+    equity: float | None
+    available_balance: float | None
+    source_label: str
+    degraded_reason: str = ""
 
 
-def load_env(paths: Iterable[Path]) -> dict[str, str]:
-    env: dict[str, str] = {}
-    for path in paths:
-        if not path.exists():
-            continue
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            env[key.strip()] = value.strip()
-    return env
-
-
-def parse_log_timestamp(line: str) -> datetime | None:
-    match = LOG_TIMESTAMP_RE.match(line)
-    if not match:
-        return None
-    try:
-        return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=CN_TZ)
-    except ValueError:
-        return None
-
-
-def tail_lines(path: Path, limit: int = 200) -> list[str]:
-    if not path.exists():
-        return []
-    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    return lines[-limit:]
-
-
-def pid_is_alive(pid: str) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except Exception:
-        return False
-
-
-def find_running_pid() -> str:
-    if PID_FILE.exists():
-        pid = PID_FILE.read_text(encoding="utf-8").strip()
-        if pid_is_alive(pid):
-            return pid
-    try:
-        result = subprocess.run(
-            ["ps", "-eo", "pid=,args="],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except Exception:
-        return ""
-    for line in result.stdout.splitlines():
-        if "freqtrade trade" not in line or str(CONFIG_PATH) not in line:
-            continue
-        parts = line.strip().split(maxsplit=1)
-        if parts:
-            return parts[0]
-    return ""
-
-
-def read_bot_status() -> BotStatus:
-    pid = find_running_pid()
-    heartbeat_at = None
-    last_log_at = None
-    for line in reversed(tail_lines(LOG_PATH, limit=400)):
-        ts = parse_log_timestamp(line)
-        if ts and last_log_at is None:
-            last_log_at = ts
-        if "Bot heartbeat." in line and ts:
-            heartbeat_at = ts
-            break
-    return BotStatus(running=bool(pid), pid=pid, heartbeat_at=heartbeat_at, last_log_at=last_log_at)
-
-
-def format_age(ts: datetime | None, now: datetime) -> str:
-    if ts is None:
-        return "-"
-    delta = now - ts
-    seconds = max(0, int(delta.total_seconds()))
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes, sec = divmod(seconds, 60)
-    if minutes < 60:
-        return f"{minutes}m"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h{minutes:02d}m"
-
-
-def read_runtime_config() -> dict:
-    if not CONFIG_PATH.exists():
+def read_runtime_config(config_path: Path) -> dict[str, Any]:
+    if not config_path.exists():
         return {}
-    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    return json.loads(config_path.read_text(encoding="utf-8"))
 
 
-def open_db() -> sqlite3.Connection | None:
-    if not DB_PATH.exists():
+def open_db(db_path: Path) -> sqlite3.Connection | None:
+    if not db_path.exists():
         return None
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def read_summary(now: datetime) -> dict:
-    summary = {
+def read_summary(now: datetime, db_path: Path) -> dict[str, Any]:
+    summary: dict[str, Any] = {
         "total_trades": 0,
         "open_trades": 0,
         "closed_trades": 0,
@@ -175,11 +72,11 @@ def read_summary(now: datetime) -> dict:
         "open_positions": [],
         "recent_closes": [],
     }
-    conn = open_db()
+    conn = open_db(db_path)
     if conn is None:
         return summary
 
-    now_utc = now.astimezone(ZoneInfo("UTC"))
+    now_utc = now.astimezone(UTC_TZ)
     cutoff = (now_utc - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
     cur = conn.cursor()
 
@@ -277,30 +174,33 @@ def pair_to_okx_inst_id(pair: str) -> str:
     return f"{base}-{quote}-{settle}"
 
 
-def fetch_current_prices(positions: list[dict]) -> dict[str, float]:
+def fetch_current_prices(positions: list[dict[str, Any]]) -> dict[str, float]:
     prices: dict[str, float] = {}
     for pos in positions:
-        pair = pos["pair"]
-        if pair in prices:
+        pair = str(pos.get("pair") or "")
+        if not pair or pair in prices:
             continue
         inst_id = pair_to_okx_inst_id(pair)
-        response = requests.get(
-            f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}",
-            timeout=10,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        data = payload.get("data") or []
-        if not data:
+        try:
+            response = requests.get(
+                f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}",
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data") or []
+            if not data:
+                continue
+            last = data[0].get("last")
+            if last is None:
+                continue
+            prices[pair] = float(last)
+        except Exception:
             continue
-        last = data[0].get("last")
-        if last is None:
-            continue
-        prices[pair] = float(last)
     return prices
 
 
-def calc_unrealized_pnl_abs(position: dict, current_rate: float | None) -> float:
+def calc_unrealized_pnl_abs(position: dict[str, Any], current_rate: float | None) -> float:
     if current_rate is None:
         return 0.0
     amount = float(position.get("amount") or 0.0)
@@ -308,7 +208,6 @@ def calc_unrealized_pnl_abs(position: dict, current_rate: float | None) -> float
     if amount <= 0 or open_rate <= 0:
         return 0.0
     direction = -1.0 if position.get("is_short") else 1.0
-    # For this OKX linear swap setup, `amount` is already the base-asset size.
     return direction * (current_rate - open_rate) * amount
 
 
@@ -324,38 +223,52 @@ def format_abs(value: float | None) -> str:
     return f"{value:+.2f}U"
 
 
-def load_snapshots() -> list[dict]:
-    if not SNAPSHOT_PATH.exists():
+def format_plain(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.2f}U"
+
+
+def load_snapshots(snapshot_path: Path) -> list[dict[str, Any]]:
+    if not snapshot_path.exists():
         return []
     try:
-        payload = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
     except Exception:
         return []
     return payload if isinstance(payload, list) else []
 
 
-def save_snapshots(snapshots: list[dict]) -> None:
-    SNAPSHOT_PATH.write_text(json.dumps(snapshots, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+def save_snapshots(snapshot_path: Path, snapshots: list[dict[str, Any]]) -> None:
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text(json.dumps(snapshots, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def previous_snapshot_for_date(snapshots: list[dict], report_date: str) -> dict | None:
+def previous_snapshot_for_date(snapshots: list[dict[str, Any]], report_date: str) -> dict[str, Any] | None:
     for snapshot in reversed(snapshots):
         if snapshot.get("date") != report_date:
             return snapshot
     return None
 
 
-def upsert_snapshot(snapshots: list[dict], snapshot: dict) -> list[dict]:
+def baseline_snapshot(snapshots: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for snapshot in snapshots:
+        if snapshot.get("equity") is not None:
+            return snapshot
+    return None
+
+
+def upsert_snapshot(snapshots: list[dict[str, Any]], snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     updated = [item for item in snapshots if item.get("date") != snapshot.get("date")]
     updated.append(snapshot)
     updated.sort(key=lambda item: item.get("date", ""))
-    return updated[-30:]
+    return updated[-60:]
 
 
-def format_positions(positions: list[dict]) -> str:
+def format_positions(positions: list[dict[str, Any]]) -> str:
     if not positions:
         return "空仓"
-    rendered = []
+    rendered: list[str] = []
     for pos in positions[:2]:
         current_rate = pos.get("current_rate")
         unrealized_pnl_abs = float(pos.get("unrealized_pnl_abs") or 0.0)
@@ -363,12 +276,14 @@ def format_positions(positions: list[dict]) -> str:
         stake_amount = float(pos.get("stake_amount") or 0.0)
         if stake_amount > 0:
             pnl_pct = unrealized_pnl_abs / stake_amount * 100.0
+        enter_tag = str(pos.get("enter_tag") or "").strip()
         rendered.append(
             (
                 f"{pos['pair']} {format_side(pos.get('is_short'))} "
                 f"x{int(pos.get('leverage') or 0)} "
                 f"uPnL={format_abs(unrealized_pnl_abs)} "
                 f"({format_pct(pnl_pct)})"
+                + (f" tag={enter_tag}" if enter_tag else "")
                 + (f" now={float(current_rate):.2f}" if current_rate else "")
             )
         )
@@ -377,7 +292,7 @@ def format_positions(positions: list[dict]) -> str:
     return " | ".join(rendered)
 
 
-def format_recent_closes(closes: list[dict]) -> str:
+def format_recent_closes(closes: list[dict[str, Any]]) -> str:
     if not closes:
         return "无"
     rendered = []
@@ -393,124 +308,193 @@ def format_recent_closes(closes: list[dict]) -> str:
     return " | ".join(rendered)
 
 
-def resolve_discord_channel_id(env: dict[str, str]) -> str:
-    if env.get("DISCORD_CHANNEL_ID"):
-        return env["DISCORD_CHANNEL_ID"]
-    token = env.get("DISCORD_BOT_TOKEN", "")
-    guild_id = env.get("DISCORD_GUILD_ID", "")
-    channel_name = env.get("DISCORD_CHANNEL_NAME", "quant-highrisk")
-    if not token or not guild_id or not channel_name:
-        return ""
-    response = requests.get(
-        f"{DISCORD_API_BASE}/guilds/{guild_id}/channels",
-        headers={"Authorization": f"Bot {token}"},
-        timeout=15,
-    )
-    response.raise_for_status()
-    for channel in response.json():
-        if channel.get("type") == 0 and channel.get("name") == channel_name:
-            return channel.get("id", "")
-    return ""
+def _balance_value(payload: dict[str, Any], section: str, currency: str) -> float | None:
+    section_payload = payload.get(section) or {}
+    if isinstance(section_payload, dict):
+        raw_value = section_payload.get(currency)
+        if raw_value is None:
+            return None
+        try:
+            return float(raw_value)
+        except Exception:
+            return None
+    return None
 
 
-def send_discord(message: str, env: dict[str, str]) -> None:
-    token = env.get("DISCORD_BOT_TOKEN", "")
-    channel_id = resolve_discord_channel_id(env)
-    if not token or not channel_id:
-        raise RuntimeError("missing DISCORD_BOT_TOKEN or channel id")
-    response = requests.post(
-        f"{DISCORD_API_BASE}/channels/{channel_id}/messages",
-        headers={"Authorization": f"Bot {token}"},
-        json={"content": message},
-        timeout=15,
-    )
-    response.raise_for_status()
+def _account_credentials(mode: str, env: dict[str, str]) -> tuple[dict[str, str], str]:
+    if mode == "demo":
+        prefix = "OKX_DEMO"
+    elif mode == "live":
+        prefix = "OKX"
+    else:
+        return {}, ""
+    creds = {
+        "apiKey": env.get(f"{prefix}_API_KEY", ""),
+        "secret": env.get(f"{prefix}_API_SECRET", ""),
+        "password": env.get(f"{prefix}_API_PASSWORD", ""),
+    }
+    return creds, prefix
 
 
-def build_message(now: datetime, status: BotStatus, runtime_config: dict, summary: dict, mode_label: str = "Dry Run") -> str:
+def fetch_okx_account_snapshot(mode: str, runtime_config: dict[str, Any], env: dict[str, str]) -> AccountSnapshot:
+    if mode not in {"demo", "live"}:
+        return AccountSnapshot(None, None, "local_estimate", "dry-run mode")
+    if ccxt is None:
+        return AccountSnapshot(None, None, "local_estimate", "ccxt unavailable")
+
+    creds, prefix = _account_credentials(mode, env)
+    if not all(creds.values()):
+        return AccountSnapshot(None, None, "local_estimate", f"missing {prefix}_* credentials")
+
+    params = {
+        **creds,
+        "sandbox": mode == "demo",
+        "enableRateLimit": True,
+        "options": {"defaultType": "swap"},
+    }
+    exchange = ccxt.okx(params)
+    try:
+        balance = exchange.fetch_balance({"type": "swap"})
+        quote = str(runtime_config.get("stake_currency") or "USDT")
+        equity = _balance_value(balance, "total", quote)
+        available_balance = _balance_value(balance, "free", quote)
+        if equity is None and available_balance is not None:
+            used = _balance_value(balance, "used", quote)
+            if used is not None:
+                equity = available_balance + used
+        if equity is None and available_balance is None:
+            return AccountSnapshot(None, None, "local_estimate", "balance payload missing stake currency")
+        return AccountSnapshot(equity, available_balance, "exchange_api")
+    except Exception as exc:
+        return AccountSnapshot(None, None, "local_estimate", str(exc))
+    finally:
+        try:
+            exchange.close()
+        except Exception:
+            pass
+
+
+def estimate_account_snapshot(runtime_config: dict[str, Any], summary: dict[str, Any]) -> AccountSnapshot:
     initial_capital = float(runtime_config.get("dry_run_wallet") or 0.0)
     total_realized = float(summary["closed_pnl_abs"]) + float(summary["open_realized_pnl_abs"])
     equity = initial_capital + total_realized + float(summary["unrealized_pnl_abs"])
-    cumulative_pct = None
-    if initial_capital > 0:
-        cumulative_pct = (equity / initial_capital - 1.0) * 100.0
+    return AccountSnapshot(equity, None, "local_estimate", "account api unavailable")
 
-    snapshots = load_snapshots()
+
+def build_message(
+    now: datetime,
+    mode: str,
+    status: BotStatus,
+    runtime_config: dict[str, Any],
+    summary: dict[str, Any],
+    env: dict[str, str],
+    snapshot_path: Path,
+) -> str:
+    spec = get_mode_spec(mode)
+    total_realized = float(summary["closed_pnl_abs"]) + float(summary["open_realized_pnl_abs"])
+    account_snapshot = fetch_okx_account_snapshot(mode, runtime_config, env)
+    if account_snapshot.equity is None:
+        estimated_snapshot = estimate_account_snapshot(runtime_config, summary)
+        account_snapshot = AccountSnapshot(
+            equity=estimated_snapshot.equity,
+            available_balance=estimated_snapshot.available_balance,
+            source_label=estimated_snapshot.source_label,
+            degraded_reason=account_snapshot.degraded_reason or estimated_snapshot.degraded_reason,
+        )
+
+    snapshots = load_snapshots(snapshot_path)
     report_date = now.strftime("%Y-%m-%d")
     previous_snapshot = previous_snapshot_for_date(snapshots, report_date)
+    baseline = baseline_snapshot(snapshots)
+
     day_delta_abs = None
     day_delta_pct = None
-    if previous_snapshot is not None:
+    if previous_snapshot is not None and account_snapshot.equity is not None:
         previous_equity = float(previous_snapshot.get("equity") or 0.0)
-        day_delta_abs = equity - previous_equity
+        day_delta_abs = account_snapshot.equity - previous_equity
         if previous_equity > 0:
             day_delta_pct = day_delta_abs / previous_equity * 100.0
 
-    pairlist = runtime_config.get("exchange", {}).get("pair_whitelist", [])
-    pair_text = ", ".join(pairlist) if pairlist else "-"
-    heartbeat_age = format_age(status.heartbeat_at, now)
-    position_usage = f"{summary['open_trades']}/{runtime_config.get('max_open_trades', '-')}"
+    cumulative_pct = None
+    if mode == "dry-run":
+        initial_capital = float(runtime_config.get("dry_run_wallet") or 0.0)
+        if initial_capital > 0 and account_snapshot.equity is not None:
+            cumulative_pct = (account_snapshot.equity / initial_capital - 1.0) * 100.0
+    elif baseline is not None and account_snapshot.equity is not None:
+        baseline_equity = float(baseline.get("equity") or 0.0)
+        if baseline_equity > 0:
+            cumulative_pct = (account_snapshot.equity / baseline_equity - 1.0) * 100.0
 
     snapshot = {
         "date": report_date,
         "reported_at": now.isoformat(),
-        "equity": equity,
-        "initial_capital": initial_capital,
+        "equity": account_snapshot.equity,
+        "available_balance": account_snapshot.available_balance,
         "total_trades": summary["total_trades"],
         "open_trades": summary["open_trades"],
         "closed_trades": summary["closed_trades"],
         "total_realized": total_realized,
         "unrealized_pnl_abs": summary["unrealized_pnl_abs"],
+        "account_source": account_snapshot.source_label,
     }
-    save_snapshots(upsert_snapshot(snapshots, snapshot))
+    save_snapshots(snapshot_path, upsert_snapshot(snapshots, snapshot))
 
-    lines = [
-        f"【{mode_label}】{now.strftime('%Y-%m-%d %H:%M CST')}",
-        (
-            f"权益 {equity:.2f}U"
-            f" | 昨日 {format_abs(day_delta_abs)} ({format_pct(day_delta_pct)})"
-            f" | 累计 {format_pct(cumulative_pct)}"
-        ),
-        (
-            f"交易 总{summary['total_trades']}"
-            f" | 24h {summary['day_closed_trades']}"
-            f" | 持仓 {position_usage}"
-        ),
-        (
-            f"PnL 已实现 {format_abs(total_realized)}"
-            f" | 未实现 {format_abs(summary['unrealized_pnl_abs'])}"
-        ),
-        (
-            f"仓位 {format_positions(summary['open_positions'])}"
-        ),
+    pairlist = runtime_config.get("exchange", {}).get("pair_whitelist", [])
+    pair_text = ", ".join(pairlist) if pairlist else "-"
+    position_usage = f"{summary['open_trades']}/{runtime_config.get('max_open_trades', '-')}"
+    heartbeat_age = format_age(status.heartbeat_at, now)
+    day_closed_trades = int(summary["day_closed_trades"] or 0)
+    day_wins = int(summary["day_wins"] or 0)
+    win_rate = (day_wins / day_closed_trades * 100.0) if day_closed_trades > 0 else None
+    pinned_metadata = load_pinned_metadata(mode) if mode == "demo" else {}
+
+    lines = [f"【{spec.label}】{now.strftime('%Y-%m-%d %H:%M CST')}"]
+    lines.append(
         (
             f"状态 {'RUNNING' if status.running else 'STOPPED'}"
             + (f" | hb {heartbeat_age}" if status.running else "")
-            + f" | {pair_text} {runtime_config.get('timeframe', '-')}"
-        ),
-        f"最近 {format_recent_closes(summary['recent_closes'])}",
-    ]
+            + (f" | lastlog {format_age(status.last_log_at, now)}" if status.last_log_at else "")
+        )
+    )
+    if mode == "demo":
+        if pinned_metadata:
+            lines.append(
+                f"策略 {pinned_metadata.get('code_hash_short') or '-'}"
+                f" | {pinned_metadata.get('source_name') or '-'}"
+            )
+        else:
+            lines.append("策略 未固定")
+    account_line = (
+        f"账户 权益 {format_plain(account_snapshot.equity)}"
+        f" | 可用 {format_plain(account_snapshot.available_balance)}"
+        f" | 昨日 {format_abs(day_delta_abs)} ({format_pct(day_delta_pct)})"
+        f" | 累计 {format_pct(cumulative_pct)}"
+    )
+    if account_snapshot.degraded_reason:
+        account_line += f" | degraded={account_snapshot.degraded_reason}"
+    lines.append(account_line)
+    lines.append(
+        f"交易 总{summary['total_trades']} | 24h平仓 {day_closed_trades} | 24h胜率 {format_pct(win_rate)}"
+        f" | 已实现 {format_abs(total_realized)} | 未实现 {format_abs(summary['unrealized_pnl_abs'])}"
+    )
+    lines.append(f"持仓 {position_usage} | {format_positions(summary['open_positions'])}")
+    lines.append(f"环境 {spec.label} | {pair_text} {runtime_config.get('timeframe', '-')}")
+    lines.append(f"最近 {format_recent_closes(summary['recent_closes'])}")
     return "\n".join(lines)
 
 
 def main() -> int:
     mode = REPORT_MODE
-    if len(sys.argv) > 1 and sys.argv[1] in ("dry-run", "live"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("dry-run", "dryrun", "demo", "live"):
         mode = sys.argv[1]
 
-    # 设置模块级路径变量
-    global RUNTIME_DIR, CONFIG_PATH, PID_FILE, DB_PATH, LOG_PATH, SNAPSHOT_PATH
-    RUNTIME_DIR, CONFIG_PATH, PID_FILE, DB_PATH, LOG_PATH = _resolve_paths(mode)
-    SNAPSHOT_PATH = RUNTIME_DIR / "daily-report-snapshots.json"
-
-    mode_label = "Live" if mode == "live" else "Dry Run"
-
-    env = load_env([SECRETS_ENV_PATH, LOCAL_ENV_PATH])
+    paths = resolve_runtime_paths(mode)
+    env = load_env([SECRETS_ENV_PATH, LOCAL_REPORT_ENV_PATH])
     now = datetime.now(CN_TZ)
-    runtime_config = read_runtime_config()
-    status = read_bot_status()
-    summary = read_summary(now)
-    message = build_message(now, status, runtime_config, summary, mode_label=mode_label)
+    runtime_config = read_runtime_config(paths.config_path)
+    status = read_bot_status(paths)
+    summary = read_summary(now, paths.db_path)
+    message = build_message(now, mode, status, runtime_config, summary, env, paths.snapshot_path)
     send_discord(message, env)
     print(message)
     return 0

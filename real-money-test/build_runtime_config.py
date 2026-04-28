@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a local freqtrade runtime config for dry-run or live trading."""
+"""Build a local freqtrade runtime config for dry-run, demo or live trading."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import os
 import sys
 from copy import deepcopy
 from pathlib import Path
+
+from runtime_common import get_mode_spec, normalize_mode, resolve_runtime_paths
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -24,14 +26,6 @@ if str(SRC_DIR) not in sys.path:
 
 import backtest_macd_aggressive as backtest_module
 import strategy_macd_aggressive as strategy_module
-
-
-def _runtime_dir(mode: str) -> Path:
-    return BASE_DIR / "runtime" / ("live" if mode == "live" else "dryrun")
-
-
-def _user_data_dir(mode: str) -> Path:
-    return BASE_DIR / "user_data" / ("live" if mode == "live" else "dryrun")
 
 
 def _load_json(path: Path) -> dict:
@@ -59,16 +53,23 @@ def _deep_merge(dst: dict, src: dict) -> dict:
     return dst
 
 
-def _copy_exchange_credentials(runtime_config: dict, source_config: dict) -> None:
+def _copy_exchange_credentials(runtime_config: dict, source_config: dict, *, mode: str) -> None:
     _load_env_file(SECRETS_ENV_FILE)
     source_exchange = source_config.get("exchange", {})
     target_exchange = runtime_config.setdefault("exchange", {})
     required_keys = ("key", "secret", "password")
-    env_aliases = {
-        "key": ("OKX_API_KEY", "FT_OKX_API_KEY"),
-        "secret": ("OKX_API_SECRET", "FT_OKX_API_SECRET"),
-        "password": ("OKX_API_PASSWORD", "FT_OKX_API_PASSWORD"),
-    }
+    if mode == "demo":
+        env_aliases = {
+            "key": ("OKX_DEMO_API_KEY",),
+            "secret": ("OKX_DEMO_API_SECRET",),
+            "password": ("OKX_DEMO_API_PASSWORD",),
+        }
+    else:
+        env_aliases = {
+            "key": ("OKX_API_KEY", "FT_OKX_API_KEY"),
+            "secret": ("OKX_API_SECRET", "FT_OKX_API_SECRET"),
+            "password": ("OKX_API_PASSWORD", "FT_OKX_API_PASSWORD"),
+        }
 
     resolved: dict[str, object] = {}
     missing: list[str] = []
@@ -79,7 +80,7 @@ def _copy_exchange_credentials(runtime_config: dict, source_config: dict) -> Non
             if env_value:
                 value = env_value
                 break
-        if value is None:
+        if value is None and mode != "demo":
             source_value = source_exchange.get(key)
             if isinstance(source_value, str) and source_value.strip():
                 value = source_value.strip()
@@ -90,16 +91,28 @@ def _copy_exchange_credentials(runtime_config: dict, source_config: dict) -> Non
 
     if missing:
         missing_text = ", ".join(missing)
+        if mode == "demo":
+            raise SystemExit(
+                "missing OKX exchange credentials. "
+                f"Set OKX_DEMO_* env vars: {missing_text}"
+            )
         raise SystemExit(
             "missing OKX exchange credentials. "
-            f"Set env vars or provide a populated source config: {missing_text}"
+            f"Set OKX_API_* env vars or provide a populated source config: {missing_text}"
         )
 
     for key in required_keys:
         target_exchange[key] = resolved[key]
-    for key in ("ccxt_config", "ccxt_async_config"):
+    for key in ("ccxt_config", "ccxt_async_config", "ccxt_sync_config"):
         if key in source_exchange:
             target_exchange[key] = deepcopy(source_exchange[key])
+
+
+def _enable_okx_demo_sandbox(runtime_config: dict) -> None:
+    exchange = runtime_config.setdefault("exchange", {})
+    for key in ("ccxt_config", "ccxt_async_config", "ccxt_sync_config"):
+        payload = exchange.setdefault(key, {})
+        payload["sandbox"] = True
 
 
 def build_runtime_config(
@@ -110,10 +123,11 @@ def build_runtime_config(
     include_telegram: bool = False,
     include_api_server: bool = False,
 ) -> Path:
+    mode = normalize_mode(mode)
     runtime_config = _load_json(base_config_path)
     source_config = _load_json(source_config_path)
 
-    _copy_exchange_credentials(runtime_config, source_config)
+    _copy_exchange_credentials(runtime_config, source_config, mode=mode)
 
     # 只继承执行参数（pricing / timeout），不继承 telegram / api_server
     for key in INHERITED_EXECUTION_KEYS:
@@ -126,27 +140,30 @@ def build_runtime_config(
     if include_api_server and "api_server" in source_config:
         runtime_config["api_server"] = deepcopy(source_config["api_server"])
 
-    runtime_dir = _runtime_dir(mode)
-    user_data_dir = _user_data_dir(mode)
+    spec = get_mode_spec(mode)
+    paths = resolve_runtime_paths(mode)
+    runtime_dir = paths.runtime_dir
+    user_data_dir = paths.user_data_dir
     runtime_dir.mkdir(parents=True, exist_ok=True)
     user_data_dir.mkdir(parents=True, exist_ok=True)
     (user_data_dir / "data").mkdir(parents=True, exist_ok=True)
 
     if output_path is None:
-        output_path = runtime_dir / "config.runtime.json"
+        output_path = paths.config_path
 
-    is_live = mode == "live"
-    runtime_config["dry_run"] = not is_live
-    if not is_live:
+    is_exchange_mode = spec.is_exchange_mode
+    runtime_config["dry_run"] = not is_exchange_mode
+    if not is_exchange_mode:
         runtime_config.setdefault("dry_run_wallet", 1000)
     else:
         runtime_config.pop("dry_run_wallet", None)
+    if mode == "demo":
+        _enable_okx_demo_sandbox(runtime_config)
 
-    db_name = "tradesv3.live.sqlite" if is_live else "tradesv3.dryrun.sqlite"
-    runtime_config["db_url"] = f"sqlite:///{runtime_dir / db_name}"
+    runtime_config["db_url"] = f"sqlite:///{runtime_dir / spec.db_name}"
     runtime_config["datadir"] = str(user_data_dir / "data")
     runtime_config["user_data_dir"] = str(user_data_dir)
-    runtime_config["bot_name"] = "macd-aggressive-live" if is_live else "macd-aggressive-dryrun"
+    runtime_config["bot_name"] = spec.bot_name
     runtime_config["position_adjustment_enable"] = True
     runtime_config["max_entry_position_adjustment"] = max(
         0,
@@ -167,7 +184,7 @@ def build_runtime_config(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build freqtrade runtime config")
-    parser.add_argument("--mode", choices=("dry-run", "live"), default="dry-run")
+    parser.add_argument("--mode", choices=("dry-run", "demo", "live"), default="demo")
     parser.add_argument("--base-config", type=Path, default=DEFAULT_BASE_CONFIG)
     parser.add_argument("--source-config", type=Path, default=DEFAULT_SOURCE_CONFIG)
     parser.add_argument("--output", type=Path, default=None)

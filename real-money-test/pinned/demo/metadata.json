@@ -1,0 +1,9 @@
+{
+  "mode": "demo",
+  "pinned_at": "2026-04-28T12:02:04.284011+08:00",
+  "source_path": "backups/strategy_macd_aggressive_v2_champion.py",
+  "source_name": "strategy_macd_aggressive_v2_champion.py",
+  "code_sha256": "7b8cca02dbf9ca0219853788d41192490597eace860612c03af696d6bdf64814",
+  "code_hash_short": "7b8cca02dbf9",
+  "target_path": "real-money-test/pinned/demo/strategy_macd_aggressive.py"
+}
