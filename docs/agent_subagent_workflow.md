@@ -154,7 +154,7 @@ champion_code_hash: <当前 champion hash>
 补充约束：
 
 - 研究器是由 `scripts/run_research_macd_aggressive_v2.sh` 这个 supervisor 循环拉起；不要只停内部 python 进程，否则 supervisor 会自动重启。
-- 如果这次改的是当前 active reference 本体，除了 `src/strategy_macd_aggressive.py`，还要同步 `backups/strategy_macd_aggressive_v2_best.py` 与 `backups/strategy_macd_aggressive_v2_champion.py`，因为启动时主进程会先从 `best` 快照装载基底。
+- 如果这次改的是当前 active reference 本体，除了 `src/strategy_macd_aggressive.py`，还要同步本机上的 `backups/strategy_macd_aggressive_v2_best.py` 与 `backups/strategy_macd_aggressive_v2_champion.py`，因为启动时主进程会先从 `best` 快照装载基底；这两个快照现在只作本地运行态文件，不再提交到 GitHub。
 
 ## 常用命令
 
@@ -181,8 +181,8 @@ python3 scripts/download_aggressive_data.py
 ## 运行产物
 
 - `state/research_macd_aggressive_v2_best.json`：当前 best/champion 状态。
-- `backups/strategy_macd_aggressive_v2_best.py`：当前 best 策略快照。
-- `backups/strategy_macd_aggressive_v2_champion.py`：当前 champion 策略快照。
+- `backups/strategy_macd_aggressive_v2_best.py`：当前 best 策略快照，仅保留在本机运行环境。
+- `backups/strategy_macd_aggressive_v2_champion.py`：当前 champion 策略快照，仅保留在本机运行环境。
 - `backups/strategy_macd_aggressive_v2_candidate.py`：运行中的候选快照，不应随手提交。
 - `backups/champion_history/`：每次新 champion 的独立归档。
 - `backups/research_v2_round_artifacts/`：每轮最小可复现归档；源码按 `code_hash` 去重，accepted 轮次会额外引用 champion 图表/快照。
@@ -200,6 +200,7 @@ python3 scripts/download_aggressive_data.py
 ## 提交代码时的注意事项
 
 - 研究器运行中会持续改写候选和策略文件。
+- `backups/strategy_macd_aggressive_v2_best.py` 与 `backups/strategy_macd_aggressive_v2_champion.py` 现在不再入库；需要分享时单独发送文件，不要重新加入 Git 跟踪。
 - 只想提交当前 champion 时，先停研究器，再排除 `backups/strategy_macd_aggressive_v2_candidate.py`。
 - 文档、配置或流程改动完成后，要同步更新文档并推送 git。
 - 不要把运行中的候选误当成稳定 champion 提交。
