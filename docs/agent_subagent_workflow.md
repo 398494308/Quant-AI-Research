@@ -185,12 +185,14 @@ python3 scripts/download_aggressive_data.py
 - `backups/strategy_macd_aggressive_v2_champion.py`：当前 champion 策略快照。
 - `backups/strategy_macd_aggressive_v2_candidate.py`：运行中的候选快照，不应随手提交。
 - `backups/champion_history/`：每次新 champion 的独立归档。
+- `backups/research_v2_round_artifacts/`：每轮最小可复现归档；源码按 `code_hash` 去重，accepted 轮次会额外引用 champion 图表/快照。
 - `reports/research_v2_charts/`：selection / validation 图表。
 - `logs/macd_aggressive_research_v2.log`：主日志。
 - `logs/macd_aggressive_research_v2_model_calls.jsonl`：模型调用日志。
 - `state/research_macd_aggressive_v2_memory/wiki/`：前台记忆、方向账本、失败 wiki、reviewer 卡。
 - `src/research_v2/reference_state.py`：reference 状态读写
 - `src/research_v2/champion_artifacts.py`：champion 快照归档
+- `src/research_v2/round_artifacts.py`：每轮最小可复现归档
 - `src/research_v2/backtest_window_runtime.py`：回测窗口运行态
 - `src/research_v2/evaluation_summary.py`：评分汇总组装
 - `src/research_v2/journal_prompt_builder.py`：journal prompt 组装

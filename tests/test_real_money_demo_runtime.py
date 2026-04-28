@@ -31,6 +31,7 @@ class DemoRuntimeTest(unittest.TestCase):
                 "OKX_DEMO_API_KEY": "demo-key",
                 "OKX_DEMO_API_SECRET": "demo-secret",
                 "OKX_DEMO_API_PASSWORD": "demo-pass",
+                "OKX_DEMO_AVAILABLE_CAPITAL": "1000",
             },
             clear=False,
         ):
@@ -48,6 +49,8 @@ class DemoRuntimeTest(unittest.TestCase):
         self.assertTrue(payload["exchange"]["ccxt_config"]["sandbox"])
         self.assertTrue(payload["exchange"]["ccxt_async_config"]["sandbox"])
         self.assertTrue(payload["exchange"]["ccxt_sync_config"]["sandbox"])
+        self.assertEqual(payload["available_capital"], 1000.0)
+        self.assertNotIn("tradable_balance_ratio", payload)
         self.assertIn("tradesv3.demo.sqlite", payload["db_url"])
 
     def test_build_runtime_config_demo_requires_demo_credentials(self):

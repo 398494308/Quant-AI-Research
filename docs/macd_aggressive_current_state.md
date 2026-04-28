@@ -38,6 +38,12 @@
 | train+val多/空捕获 | 0.41 / 0.65 |
 | Sharpe(train+val / val) | 1.38 / 1.71 |
 | hidden test收益 / Sharpe | -37.65% / -1.26 |
+
+当前轮次留档除了 `journal` 与 `memory/raw` 外，还额外维护一条最小可复现链路：
+
+- `backups/research_v2_round_artifacts/sources/`：按 `code_hash` 去重保存策略源码
+- `backups/research_v2_round_artifacts/rounds/`：每轮一个目录，只保留策略快照、关键评分、窗口/评分配置，以及数据与引擎指纹
+- 新 champion 轮次会在这份最小归档里额外引用 `champion_history` 和图表路径，但不会把 hidden test 信息回灌给研究 prompt
 | train+val交易数量 | 415 |
 
 说明：
@@ -50,6 +56,7 @@
 - 若只切换 `score_regime` 后重启，研究器现在会优先从 `backups/strategy_macd_aggressive_v2_best.py` 载入已保存 champion，并按新评分口径重算；不会再误用工作区里的当前候选文件做启动基线。
 - 当前运行状态以 [state/research_macd_aggressive_v2_heartbeat.json](../state/research_macd_aggressive_v2_heartbeat.json) 为准。
 - `real-money-test/` 这条执行壳子现在默认转为 `OKX Demo Trading`：策略必须先冻结为固定副本，`demo` 只认 `OKX_DEMO_*` 凭证，旧 `dry-run` 代码保留但不再默认使用，播报也切到 `demo` 卡口径。
+- 如果你想把 `demo` 账户里的更大余额压到固定测试规模，当前壳子支持通过 `OKX_DEMO_AVAILABLE_CAPITAL` 给 `freqtrade` 注入单 bot 资金上限；例如 `1000` 表示只按 `1000 USDT` 规模运行。
 
 ## 数据与窗口
 
@@ -157,6 +164,7 @@
 
 - `src/research_v2/reference_state.py`
 - `src/research_v2/champion_artifacts.py`
+- `src/research_v2/round_artifacts.py`
 - `src/research_v2/backtest_window_runtime.py`
 - `src/research_v2/evaluation_summary.py`
 - `src/research_v2/journal_prompt_builder.py`

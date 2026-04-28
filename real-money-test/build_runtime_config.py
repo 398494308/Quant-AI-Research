@@ -53,6 +53,21 @@ def _deep_merge(dst: dict, src: dict) -> dict:
     return dst
 
 
+def _optional_positive_float_from_env(*env_names: str) -> float | None:
+    for env_name in env_names:
+        raw_value = os.getenv(env_name, "").strip()
+        if not raw_value:
+            continue
+        try:
+            value = float(raw_value)
+        except ValueError as exc:
+            raise SystemExit(f"invalid float in {env_name}: {raw_value}") from exc
+        if value <= 0:
+            raise SystemExit(f"{env_name} must be > 0")
+        return value
+    return None
+
+
 def _copy_exchange_credentials(runtime_config: dict, source_config: dict, *, mode: str) -> None:
     _load_env_file(SECRETS_ENV_FILE)
     source_exchange = source_config.get("exchange", {})
@@ -115,6 +130,17 @@ def _enable_okx_demo_sandbox(runtime_config: dict) -> None:
         payload["sandbox"] = True
 
 
+def _apply_demo_capital_controls(runtime_config: dict) -> None:
+    available_capital = _optional_positive_float_from_env(
+        "OKX_DEMO_AVAILABLE_CAPITAL",
+        "FT_DEMO_AVAILABLE_CAPITAL",
+    )
+    if available_capital is None:
+        return
+    runtime_config["available_capital"] = available_capital
+    runtime_config.pop("tradable_balance_ratio", None)
+
+
 def build_runtime_config(
     mode: str,
     base_config_path: Path,
@@ -159,6 +185,7 @@ def build_runtime_config(
         runtime_config.pop("dry_run_wallet", None)
     if mode == "demo":
         _enable_okx_demo_sandbox(runtime_config)
+        _apply_demo_capital_controls(runtime_config)
 
     runtime_config["db_url"] = f"sqlite:///{runtime_dir / spec.db_name}"
     runtime_config["datadir"] = str(user_data_dir / "data")

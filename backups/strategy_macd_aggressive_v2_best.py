@@ -710,8 +710,6 @@ def _flow_signal_metrics(market_state, hourly, fourh, params, side):
 
 def _flow_entry_ok(market_state, hourly, fourh, params, side=None, strong=False):
     entry_side = side if side in {"long", "short"} else "short"
-    if entry_side == "long":
-        return True
     return _flow_confirmation_ok(market_state, hourly, fourh, params, entry_side, strong=strong)
 
 

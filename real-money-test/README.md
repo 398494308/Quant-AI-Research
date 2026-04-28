@@ -77,7 +77,13 @@
 OKX_DEMO_API_KEY=...
 OKX_DEMO_API_SECRET=...
 OKX_DEMO_API_PASSWORD=...
+OKX_DEMO_AVAILABLE_CAPITAL=1000
 ```
+
+其中：
+
+- `OKX_DEMO_AVAILABLE_CAPITAL=1000` 表示这个 bot 只按 `1000 USDT` 资金规模运行
+- 启用该项后，运行时会自动改用 `available_capital`，不再继续使用 `tradable_balance_ratio`
 
 ### 3. 启动 demo
 

@@ -72,6 +72,7 @@ class ResearchPaths:
     best_state_file: Path
     best_strategy_file: Path
     champion_strategy_file: Path
+    round_artifacts_dir: Path
     stop_file: Path
     strategy_backup_file: Path
 
@@ -167,6 +168,7 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         best_state_file=repo_root / "state/research_macd_aggressive_v2_best.json",
         best_strategy_file=repo_root / "backups/strategy_macd_aggressive_v2_best.py",
         champion_strategy_file=repo_root / "backups/strategy_macd_aggressive_v2_champion.py",
+        round_artifacts_dir=repo_root / "backups/research_v2_round_artifacts",
         stop_file=repo_root / "state/research_macd_aggressive_v2.stop",
         strategy_backup_file=repo_root / "backups/strategy_macd_aggressive_v2_candidate.py",
     )

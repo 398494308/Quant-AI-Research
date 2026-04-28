@@ -20,7 +20,7 @@ import shutil
 import sys
 import time
 import traceback
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -97,6 +97,7 @@ from research_v2.prompting import (
     build_strategy_summary_worker_system_prompt,
     build_strategy_runtime_repair_prompt,
 )
+from research_v2.round_artifacts import persist_round_artifact as persist_round_artifact_helper
 from research_v2.strategy_code import (
     REQUIRED_FUNCTIONS,
     StrategyCandidate,
@@ -786,12 +787,6 @@ def _discord_data_range_text() -> str:
     )
 
 
-def _append_research_journal_entry(entry: dict[str, Any]) -> None:
-    append_journal_entry(RUNTIME.paths.journal_file, entry)
-    append_journal_archive(RUNTIME.paths.memory_dir, entry)
-    _refresh_prompt_memory_snapshots()
-
-
 def _parse_state_timestamp(value: Any) -> datetime | None:
     return parse_state_timestamp_helper(value)
 
@@ -969,10 +964,72 @@ def _backtest_data_file_signatures() -> dict[str, Any]:
     return {
         "intraday": _file_cache_signature(backtest_module.DEFAULT_INTRADAY_FILE),
         "hourly": _file_cache_signature(backtest_module.DEFAULT_HOURLY_FILE),
+        "fourh": _file_cache_signature(backtest_module.DEFAULT_FOURH_FILE),
         "sentiment": _file_cache_signature(backtest_module.DEFAULT_SENTIMENT_FILE),
         "execution": _file_cache_signature(backtest_module.DEFAULT_EXECUTION_FILE),
         "funding": _file_cache_signature(backtest_module.DEFAULT_FUNDING_FILE),
     }
+
+
+def _round_artifact_engine_file_signatures() -> dict[str, Any]:
+    return {
+        "research_script": _file_cache_signature(SCRIPT_DIR / "research_macd_aggressive_v2.py"),
+        "backtest": _file_cache_signature(RUNTIME.paths.backtest_file),
+        "config": _file_cache_signature(SRC_DIR / "research_v2/config.py"),
+        "evaluation": _file_cache_signature(SRC_DIR / "research_v2/evaluation.py"),
+        "evaluation_summary": _file_cache_signature(SRC_DIR / "research_v2/evaluation_summary.py"),
+        "windows": _file_cache_signature(SRC_DIR / "research_v2/windows.py"),
+    }
+
+
+def _round_artifact_chart_paths(chart_paths: PerformanceChartPaths | None) -> dict[str, Path | None]:
+    if chart_paths is None:
+        return {}
+    return {
+        "validation_chart": chart_paths.validation_chart,
+        "selection_chart": chart_paths.selection_chart,
+    }
+
+
+def _persist_round_artifact(
+    entry: dict[str, Any],
+    *,
+    strategy_source: str,
+    shadow_test_metrics: dict[str, float] | None = None,
+    champion_snapshot_dir: Path | None = None,
+    chart_paths: PerformanceChartPaths | None = None,
+) -> None:
+    persist_round_artifact_helper(
+        RUNTIME.paths.round_artifacts_dir,
+        repo_root=RUNTIME.paths.repo_root,
+        entry=entry,
+        strategy_source=strategy_source,
+        windows=asdict(RUNTIME.windows),
+        gates=asdict(RUNTIME.gates),
+        scoring=asdict(RUNTIME.scoring),
+        data_fingerprints=_backtest_data_file_signatures(),
+        engine_fingerprints=_round_artifact_engine_file_signatures(),
+        shadow_test_metrics=shadow_test_metrics,
+        champion_snapshot_dir=champion_snapshot_dir,
+        chart_paths=_round_artifact_chart_paths(chart_paths),
+    )
+
+
+def _append_research_journal_entry(
+    entry: dict[str, Any],
+    *,
+    strategy_source: str,
+    persist_round_artifact: bool = True,
+) -> None:
+    append_journal_entry(RUNTIME.paths.journal_file, entry)
+    append_journal_archive(RUNTIME.paths.memory_dir, entry)
+    if persist_round_artifact:
+        try:
+            _persist_round_artifact(entry, strategy_source=strategy_source)
+        except Exception as exc:
+            log_info(f"round artifact 归档失败: {exc}")
+            logging.exception("round artifact persist failed(iteration=%s)", entry.get("iteration"))
+    _refresh_prompt_memory_snapshots()
 
 
 def _context_relevant_exit_params(exit_params: dict[str, Any]) -> dict[str, Any]:
@@ -3806,7 +3863,8 @@ def _record_duplicate_skip(
             stop_stage=stop_stage,
             gate_reason=gate_reason,
             note=note,
-        )
+        ),
+        strategy_source=candidate.strategy_code,
     )
     if maybe_compact(RUNTIME.paths.journal_file):
         log_info("研究日志已压缩")
@@ -3837,7 +3895,8 @@ def _record_generation_invalid(
                 "current_locks": list(block_info.get("current_locks", ()) or ()),
                 "invalid_reasons": list(block_info.get("invalid_reasons", ()) or ()),
             },
-        )
+        ),
+        strategy_source=candidate.strategy_code,
     )
     if maybe_compact(RUNTIME.paths.journal_file):
         log_info("研究日志已压缩")
@@ -3876,7 +3935,8 @@ def _record_exploration_block(
                 "low_change_param_families": list(block_info.get("low_change_param_families", ()) or ()),
                 "low_change_structural_tokens": list(block_info.get("low_change_structural_tokens", ()) or ()),
             },
-        )
+        ),
+        strategy_source=candidate.strategy_code,
     )
     if maybe_compact(RUNTIME.paths.journal_file):
         log_info("研究日志已压缩")
@@ -3902,7 +3962,8 @@ def _record_behavioral_noop(
             extra_fields={
                 "behavior_diff": behavior_diff,
             },
-        )
+        ),
+        strategy_source=candidate.strategy_code,
     )
     if maybe_compact(RUNTIME.paths.journal_file):
         log_info("研究日志已压缩")
@@ -3935,7 +3996,8 @@ def _record_runtime_failure(
             gate_reason="运行失败",
             note="；".join(errors),
             extra_fields=extra_fields,
-        )
+        ),
+        strategy_source=candidate.strategy_code,
     )
     if maybe_compact(RUNTIME.paths.journal_file):
         log_info("研究日志已压缩")
@@ -4484,7 +4546,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                     stop_stage="early_reject",
                     gate_reason="前段趋势捕获过差",
                     note=str(exc),
-                )
+                ),
+                strategy_source=candidate.strategy_code,
             )
             if maybe_compact(RUNTIME.paths.journal_file):
                 log_info("研究日志已压缩")
@@ -4600,7 +4663,11 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             suppress_initialize_saved_reference_discord_once=True,
         )
         _clear_research_session_state(remove_workspace=True, reason="new champion accepted")
-        _append_research_journal_entry(entry_base)
+        _append_research_journal_entry(
+            entry_base,
+            strategy_source=best_source,
+            persist_round_artifact=False,
+        )
         if maybe_compact(RUNTIME.paths.journal_file):
             log_info("研究日志已压缩")
         log_info(
@@ -4618,6 +4685,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             gate=best_report.gate_reason,
         )
         chart_paths = PerformanceChartPaths(validation_chart=None, selection_chart=None)
+        champion_snapshot_dir: Path | None = None
         try:
             chart_paths = _generate_new_champion_charts(
                 iteration_id,
@@ -4631,7 +4699,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             log_info(f"新 champion 图表生成失败: {exc}")
             logging.exception("新 champion 图表生成失败(iteration=%s)", iteration_id)
         try:
-            _archive_champion_snapshot(
+            champion_snapshot_dir = _archive_champion_snapshot(
                 iteration_id=iteration_id,
                 accepted_at=reference_stage_started_at,
                 candidate=candidate,
@@ -4643,6 +4711,17 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         except Exception as exc:
             log_info(f"新 champion 快照归档失败: {exc}")
             logging.exception("新 champion 快照归档失败(iteration=%s)", iteration_id)
+        try:
+            _persist_round_artifact(
+                entry_base,
+                strategy_source=best_source,
+                shadow_test_metrics=shadow_test_metrics,
+                champion_snapshot_dir=champion_snapshot_dir,
+                chart_paths=chart_paths,
+            )
+        except Exception as exc:
+            log_info(f"新 champion round artifact 归档失败: {exc}")
+            logging.exception("new champion round artifact persist failed(iteration=%s)", iteration_id)
         discord_message = build_discord_summary_message(
             title=f"🚀 研究器 v2 新 champion #{iteration_id}",
             report=best_report,
@@ -4663,7 +4742,10 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         )
         return "accepted"
 
-    _append_research_journal_entry(entry_base)
+    _append_research_journal_entry(
+        entry_base,
+        strategy_source=candidate.strategy_code,
+    )
     if maybe_compact(RUNTIME.paths.journal_file):
         log_info("研究日志已压缩")
     write_strategy_source(RUNTIME.paths.strategy_file, best_source)
