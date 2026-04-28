@@ -152,6 +152,14 @@
 6. 主进程
    负责 reviewer gating、真实 diff 检查、smoke、完整评估、gate、journal、Discord、memory 和 stage/session 管理
 
+为了把大文件切薄但不改主流程，当前又补了 5 个实现层模块：
+
+- `src/research_v2/reference_state.py`
+- `src/research_v2/champion_artifacts.py`
+- `src/research_v2/backtest_window_runtime.py`
+- `src/research_v2/evaluation_summary.py`
+- `src/research_v2/journal_prompt_builder.py`
+
 更直观的流程图见 [docs/agent_subagent_workflow.md](./agent_subagent_workflow.md)。
 
 当前不再存在这些自动行为：

@@ -44,6 +44,12 @@ from deepseek_planner_client import (
 )
 from research_v2.config import ResearchRuntimeConfig, load_research_runtime_config
 from research_v2.charting import PerformanceChartPaths, charts_available, render_performance_chart
+from research_v2.champion_artifacts import (
+    archive_champion_snapshot as archive_champion_snapshot_helper,
+    build_chart_note as build_chart_note_helper,
+    champion_snapshot_stamp as champion_snapshot_stamp_helper,
+    safe_snapshot_slug as safe_snapshot_slug_helper,
+)
 from research_v2.exit_range_scan import (
     infer_exit_range_scan_spec,
     replace_exit_param_value,
@@ -105,6 +111,15 @@ from research_v2.strategy_code import (
     source_hash,
     validate_strategy_source,
     write_strategy_source,
+)
+from research_v2.reference_state import (
+    load_saved_reference_state as load_saved_reference_state_helper,
+    parse_state_timestamp as parse_state_timestamp_helper,
+    persist_best_state as persist_best_state_helper,
+    recover_reference_stage_state as recover_reference_stage_state_helper,
+    reference_manifest_payload as reference_manifest_payload_helper,
+    report_from_saved_payload as report_from_saved_payload_helper,
+    saved_report_payload as saved_report_payload_helper,
 )
 from research_v2.windows import build_research_windows
 
@@ -756,13 +771,7 @@ def _current_stage_journal_entries(entries: list[dict[str, Any]]) -> list[dict[s
     ]
 
 def _load_saved_reference_state() -> dict[str, Any]:
-    if not RUNTIME.paths.best_state_file.exists():
-        return {}
-    try:
-        payload = json.loads(RUNTIME.paths.best_state_file.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return load_saved_reference_state_helper(RUNTIME.paths.best_state_file)
 
 
 def _reference_benchmark_report() -> EvaluationReport | None:
@@ -784,17 +793,7 @@ def _append_research_journal_entry(entry: dict[str, Any]) -> None:
 
 
 def _parse_state_timestamp(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    normalized = text.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+    return parse_state_timestamp_helper(value)
 
 
 def _recover_reference_stage_state(
@@ -803,41 +802,12 @@ def _recover_reference_stage_state(
     *,
     reference_code_hash: str,
 ) -> tuple[str, int]:
-    saved_stage_started_at = str(saved_state.get("reference_stage_started_at", "")).strip()
-    try:
-        saved_stage_iteration = int(saved_state.get("reference_stage_iteration", 0) or 0)
-    except (TypeError, ValueError):
-        saved_stage_iteration = 0
-    if saved_stage_started_at or saved_stage_iteration > 0:
-        return saved_stage_started_at, saved_stage_iteration
-
-    current_regime_entries = [
-        entry for entry in journal_entries
-        if str(entry.get("score_regime", "")).strip() == SCORE_REGIME
-    ]
-    for entry in reversed(current_regime_entries):
-        if str(entry.get("outcome", "")).strip() != "accepted":
-            continue
-        if str(entry.get("code_hash", "")).strip() != reference_code_hash:
-            continue
-        return (
-            str(entry.get("timestamp", "")).strip(),
-            int(entry.get("iteration", 0) or 0),
-        )
-
-    saved_updated_at = str(saved_state.get("updated_at", "")).strip()
-    saved_updated_dt = _parse_state_timestamp(saved_updated_at)
-    if saved_updated_dt is not None:
-        for entry in current_regime_entries:
-            entry_dt = _parse_state_timestamp(entry.get("timestamp"))
-            entry_iteration = int(entry.get("iteration", 0) or 0)
-            if entry_dt is not None and entry_iteration > 0 and entry_dt >= saved_updated_dt:
-                return saved_updated_at, entry_iteration
-        max_iteration = max((int(entry.get("iteration", 0) or 0) for entry in current_regime_entries), default=0)
-        return saved_updated_at, max_iteration + 1
-
-    max_iteration = max((int(entry.get("iteration", 0) or 0) for entry in current_regime_entries), default=0)
-    return "", (max_iteration + 1) if max_iteration > 0 else 0
+    return recover_reference_stage_state_helper(
+        saved_state,
+        journal_entries,
+        score_regime=SCORE_REGIME,
+        reference_code_hash=reference_code_hash,
+    )
 
 
 def _saved_report_payload(
@@ -846,32 +816,15 @@ def _saved_report_payload(
     *,
     shadow_test_metrics: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "code_hash": source_hash(source),
-        "metrics": report.metrics,
-        "gate_passed": report.gate_passed,
-        "gate_reason": report.gate_reason,
-        "shadow_test_metrics": shadow_test_metrics or {},
-    }
+    return saved_report_payload_helper(
+        source,
+        report,
+        shadow_test_metrics=shadow_test_metrics,
+    )
 
 
 def _report_from_saved_payload(payload: dict[str, Any]) -> EvaluationReport | None:
-    if not isinstance(payload, dict):
-        return None
-    metrics = payload.get("metrics")
-    if not isinstance(metrics, dict):
-        return None
-    try:
-        normalized_metrics = {str(key): float(value) for key, value in metrics.items()}
-    except (TypeError, ValueError):
-        return None
-    return EvaluationReport(
-        metrics=normalized_metrics,
-        gate_passed=bool(payload.get("gate_passed", False)),
-        gate_reason=str(payload.get("gate_reason", "")).strip() or "unknown",
-        summary_text="",
-        prompt_summary_text="",
-    )
+    return report_from_saved_payload_helper(payload)
 
 
 def _reference_manifest_payload(
@@ -883,30 +836,15 @@ def _reference_manifest_payload(
     stage_iteration: int = 0,
     suppress_initialize_saved_reference_discord_once: bool = False,
 ) -> dict[str, Any]:
-    reference_payload = _saved_report_payload(
+    return reference_manifest_payload_helper(
         source,
         report,
+        score_regime=SCORE_REGIME,
         shadow_test_metrics=shadow_test_metrics,
+        stage_started_at=stage_started_at,
+        stage_iteration=stage_iteration,
+        suppress_initialize_saved_reference_discord_once=suppress_initialize_saved_reference_discord_once,
     )
-    reference_role = "champion" if report.gate_passed else "baseline"
-    champion_payload = reference_payload if report.gate_passed else None
-    return {
-        "updated_at": datetime.now(UTC).isoformat(),
-        "score_regime": SCORE_REGIME,
-        "reference_role": reference_role,
-        "benchmark_role": reference_role,
-        "reference_stage_started_at": stage_started_at,
-        "reference_stage_iteration": stage_iteration,
-        "code_hash": reference_payload["code_hash"],
-        "reference": reference_payload,
-        "champion": champion_payload,
-        # Backward-compatible top-level fields for existing readers.
-        "metrics": reference_payload["metrics"],
-        "gate_passed": reference_payload["gate_passed"],
-        "gate_reason": reference_payload["gate_reason"],
-        "shadow_test_metrics": reference_payload["shadow_test_metrics"],
-        "suppress_initialize_saved_reference_discord_once": suppress_initialize_saved_reference_discord_once,
-    }
 
 
 @contextlib.contextmanager
@@ -1260,16 +1198,11 @@ def _champion_history_dir() -> Path:
 
 
 def _champion_snapshot_stamp(timestamp_text: str) -> str:
-    try:
-        dt = datetime.fromisoformat(str(timestamp_text).replace("Z", "+00:00")).astimezone(UTC)
-    except Exception:
-        dt = datetime.now(UTC)
-    return dt.strftime("%Y%m%dT%H%M%SZ")
+    return champion_snapshot_stamp_helper(timestamp_text)
 
 
 def _safe_snapshot_slug(text: str, default: str = "champion") -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "_", str(text or "").strip()).strip("_").lower()
-    return (slug or default)[:48]
+    return safe_snapshot_slug_helper(text, default=default)
 
 
 def _archive_champion_snapshot(
@@ -1282,55 +1215,22 @@ def _archive_champion_snapshot(
     shadow_test_metrics: dict[str, float] | None = None,
     chart_paths: PerformanceChartPaths | None = None,
 ) -> Path:
-    code_hash = source_hash(source)
-    snapshot_dir = _champion_history_dir() / (
-        f"{_champion_snapshot_stamp(accepted_at)}"
-        f"_i{iteration_id:04d}"
-        f"_{_safe_snapshot_slug(candidate.candidate_id, default='candidate')}"
-        f"_{code_hash[:12]}"
+    snapshot_dir = archive_champion_snapshot_helper(
+        _champion_history_dir(),
+        iteration_id=iteration_id,
+        accepted_at=accepted_at,
+        candidate=candidate,
+        source=source,
+        report=report,
+        shadow_test_metrics=shadow_test_metrics,
+        chart_paths=chart_paths,
     )
-    snapshot_dir.mkdir(parents=True, exist_ok=True)
-
-    strategy_path = snapshot_dir / "strategy_macd_aggressive.py"
-    metadata_path = snapshot_dir / "metadata.json"
-    write_strategy_source(strategy_path, source)
-
-    validation_chart_name = ""
-    selection_chart_name = ""
-    if chart_paths is not None and chart_paths.validation_chart is not None and chart_paths.validation_chart.exists():
-        validation_chart_name = "validation.png"
-        _write_chart_copy(chart_paths.validation_chart, snapshot_dir / validation_chart_name)
-    if chart_paths is not None and chart_paths.selection_chart is not None and chart_paths.selection_chart.exists():
-        selection_chart_name = "selection.png"
-        _write_chart_copy(chart_paths.selection_chart, snapshot_dir / selection_chart_name)
-
-    metadata = {
-        "iteration": iteration_id,
-        "accepted_at": accepted_at,
-        "candidate_id": candidate.candidate_id,
-        "primary_direction": candidate.primary_direction,
-        "hypothesis": candidate.hypothesis,
-        "change_plan": candidate.change_plan,
-        "change_tags": list(candidate.change_tags),
-        "edited_regions": list(candidate.edited_regions),
-        "code_hash": code_hash,
-        "quality_score": float(report.metrics.get("quality_score", 0.0)),
-        "promotion_score": float(report.metrics.get("promotion_score", 0.0)),
-        "gate_reason": report.gate_reason,
-        "validation_chart": validation_chart_name,
-        "selection_chart": selection_chart_name,
-        "shadow_test_metrics": dict(shadow_test_metrics or {}),
-    }
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2))
     log_info(f"champion快照已归档: {snapshot_dir}")
     return snapshot_dir
 
 
 def _build_chart_note(message: str) -> str:
-    return (
-        f"{message}\n"
-        "图表：每张图蓝线=策略累计增长，橙线=BTC累计增长；左轴直接显示账户价值，右轴直接显示BTC价格；若底部还有第二张图，则为test期间同口径对比。"
-    )
+    return build_chart_note_helper(message)
 
 
 def _generate_new_champion_charts(
@@ -3558,22 +3458,18 @@ def _persist_best_state(
     stage_iteration: int = 0,
     suppress_initialize_saved_reference_discord_once: bool = False,
 ) -> None:
-    RUNTIME.paths.best_state_file.parent.mkdir(parents=True, exist_ok=True)
-    payload = _reference_manifest_payload(
+    persist_best_state_helper(
+        RUNTIME.paths.best_state_file,
+        RUNTIME.paths.best_strategy_file,
+        RUNTIME.paths.champion_strategy_file,
         source,
         report,
+        score_regime=SCORE_REGIME,
         shadow_test_metrics=shadow_test_metrics,
         stage_started_at=stage_started_at,
         stage_iteration=stage_iteration,
         suppress_initialize_saved_reference_discord_once=suppress_initialize_saved_reference_discord_once,
     )
-    RUNTIME.paths.best_state_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
-    write_strategy_source(RUNTIME.paths.best_strategy_file, source)
-    if report.gate_passed:
-        RUNTIME.paths.champion_strategy_file.parent.mkdir(parents=True, exist_ok=True)
-        write_strategy_source(RUNTIME.paths.champion_strategy_file, source)
-    elif RUNTIME.paths.champion_strategy_file.exists():
-        RUNTIME.paths.champion_strategy_file.unlink()
 
 
 def initialize_best_state(force_rebuild: bool = False) -> None:

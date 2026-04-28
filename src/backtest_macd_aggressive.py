@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from market_data_catalog import default_market_data_paths, okx_flow_proxy, okx_quote_volume_fallback
+from research_v2.backtest_window_runtime import prepare_backtest_window_runtime
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_PATHS = default_market_data_paths()
@@ -1343,55 +1344,27 @@ def backtest_macd_aggressive(
     sentiment_state = prepared_context["sentiment_state"]
     sentiment_timestamps = prepared_context["sentiment_timestamps"]
 
-    intraday_start_idx, intraday_end_idx = _beijing_window_indices_from_timestamps(intraday_timestamps, start_date, end_date)
-    intraday_data = intraday_all[intraday_start_idx:intraday_end_idx]
-    if not intraday_data or not hourly_all:
-        raise ValueError(f"missing data for window {start_date}~{end_date}")
-
-    start_ts = intraday_data[0]["timestamp"]
-    end_ts = intraday_data[-1]["timestamp"] + intraday_interval_ms
-
-    execution_rows = []
-    execution_timestamps = []
-    execution_all = prepared_context["execution_all"]
-    if execution_all:
-        full_execution_timestamps = prepared_context["execution_timestamps"]
-        execution_start_idx, execution_end_idx = _timestamp_window_indices_inclusive(
-            full_execution_timestamps,
-            start_ts,
-            end_ts + 60_000,
-        )
-        execution_rows = execution_all[execution_start_idx:execution_end_idx]
-        execution_timestamps = full_execution_timestamps[execution_start_idx:execution_end_idx]
-
-    funding_rows = []
-    funding_timestamps = []
-    funding_coverage = {
-        "mode": "disabled" if int(exit_p.get("funding_fee_enabled", 1)) <= 0 else "none",
-        "ratio": 0.0,
-        "gap_count": 0,
-    }
-    funding_all = prepared_context["funding_all"]
-    if funding_all:
-        full_funding_timestamps = prepared_context["funding_timestamps"]
-        funding_interval_ms = _funding_interval_ms(full_funding_timestamps)
-        validation_start_idx, validation_end_idx = _timestamp_window_indices_inclusive(
-            full_funding_timestamps,
-            start_ts - funding_interval_ms,
-            end_ts + funding_interval_ms,
-        )
-        funding_coverage = _funding_window_coverage_report(
-            full_funding_timestamps[validation_start_idx:validation_end_idx],
-            start_ts,
-            end_ts,
-        )
-        funding_start_idx, funding_end_idx = _timestamp_window_indices_inclusive(
-            full_funding_timestamps,
-            start_ts,
-            end_ts,
-        )
-        funding_rows = funding_all[funding_start_idx:funding_end_idx]
-        funding_timestamps = full_funding_timestamps[funding_start_idx:funding_end_idx]
+    window_runtime = prepare_backtest_window_runtime(
+        prepared_context,
+        start_date=start_date,
+        end_date=end_date,
+        exit_params=exit_p,
+        include_diagnostics=include_diagnostics,
+        beijing_window_indices_from_timestamps=_beijing_window_indices_from_timestamps,
+        timestamp_window_indices_inclusive=_timestamp_window_indices_inclusive,
+        funding_interval_ms=_funding_interval_ms,
+        funding_window_coverage_report=_funding_window_coverage_report,
+    )
+    intraday_start_idx = window_runtime.intraday_start_idx
+    intraday_end_idx = window_runtime.intraday_end_idx
+    intraday_data = window_runtime.intraday_data
+    start_ts = window_runtime.start_ts
+    end_ts = window_runtime.end_ts
+    execution_rows = window_runtime.execution_rows
+    execution_timestamps = window_runtime.execution_timestamps
+    funding_rows = window_runtime.funding_rows
+    funding_timestamps = window_runtime.funding_timestamps
+    funding_coverage = window_runtime.funding_coverage
 
     capital = 100000.0
     initial_capital = capital
@@ -1424,18 +1397,9 @@ def backtest_macd_aggressive(
     delay_minutes = int(exit_p.get("entry_delay_minutes", 1))
     taker_fee_rate = float(exit_p["okx_taker_fee_rate"]) if int(exit_p.get("trading_fee_enabled", 1)) > 0 else 0.0
     slippage_pct = float(exit_p.get("slippage_pct", 0.0003))
-    four_hour_window_state = []
-    four_hour_window_close_timestamps = []
+    four_hour_window_state = window_runtime.four_hour_window_state
+    four_hour_window_close_timestamps = window_runtime.four_hour_window_close_timestamps
     next_four_hour_sample_idx = 0
-    if include_diagnostics:
-        full_four_hour_close_timestamps = prepared_context["four_hour_close_timestamps"]
-        four_hour_start_idx, four_hour_end_idx = _timestamp_window_indices_inclusive(
-            full_four_hour_close_timestamps,
-            start_ts,
-            end_ts,
-        )
-        four_hour_window_state = four_hour_state[four_hour_start_idx:four_hour_end_idx]
-        four_hour_window_close_timestamps = full_four_hour_close_timestamps[four_hour_start_idx:four_hour_end_idx]
 
     def record_trade(trade):
         trades.append(trade)

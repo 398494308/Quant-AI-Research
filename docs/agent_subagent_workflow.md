@@ -151,6 +151,11 @@ champion_code_hash: <当前 champion hash>
 4. 启动研究器：`bash scripts/manage_research_macd_aggressive_v2.sh start`
 5. 跟状态：`bash scripts/manage_research_macd_aggressive_v2.sh status`
 
+补充约束：
+
+- 研究器是由 `scripts/run_research_macd_aggressive_v2.sh` 这个 supervisor 循环拉起；不要只停内部 python 进程，否则 supervisor 会自动重启。
+- 如果这次改的是当前 active reference 本体，除了 `src/strategy_macd_aggressive.py`，还要同步 `backups/strategy_macd_aggressive_v2_best.py` 与 `backups/strategy_macd_aggressive_v2_champion.py`，因为启动时主进程会先从 `best` 快照装载基底。
+
 ## 常用命令
 
 ```bash
@@ -184,6 +189,11 @@ python3 scripts/download_aggressive_data.py
 - `logs/macd_aggressive_research_v2.log`：主日志。
 - `logs/macd_aggressive_research_v2_model_calls.jsonl`：模型调用日志。
 - `state/research_macd_aggressive_v2_memory/wiki/`：前台记忆、方向账本、失败 wiki、reviewer 卡。
+- `src/research_v2/reference_state.py`：reference 状态读写
+- `src/research_v2/champion_artifacts.py`：champion 快照归档
+- `src/research_v2/backtest_window_runtime.py`：回测窗口运行态
+- `src/research_v2/evaluation_summary.py`：评分汇总组装
+- `src/research_v2/journal_prompt_builder.py`：journal prompt 组装
 
 ## 提交代码时的注意事项
 

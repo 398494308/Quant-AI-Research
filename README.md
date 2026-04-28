@@ -67,6 +67,14 @@
 - 刷新 `champion` 时，系统只在这时跑 `test`，归档快照，重置 stage 和 planner session。
 - `config/research_v2_champion_review.md` 是绑定当前 champion hash 的短人工观察卡；新 champion 后自动失效。
 
+当前为了控制主文件体积，研究器相关代码已经拆到这些辅助模块：
+
+- `src/research_v2/reference_state.py`：active reference 持久化与恢复
+- `src/research_v2/champion_artifacts.py`：champion 快照与图表说明
+- `src/research_v2/backtest_window_runtime.py`：回测窗口切片与运行态准备
+- `src/research_v2/evaluation_summary.py`：评分汇总文本与指标组装
+- `src/research_v2/journal_prompt_builder.py`：journal prompt 摘要组装
+
 ```mermaid
 flowchart TB
     A[人工软引导] --> B[planner 写 draft]
@@ -129,6 +137,11 @@ flowchart TB
 4. 重新启动研究器，进入新 stage
 
 这个脚本会保留 `memory/raw/*`，但清空 front memory、session、workspace 和当前 stage journal。
+
+补充两条边界：
+
+- 研究器是由 `scripts/run_research_macd_aggressive_v2.sh` 的 supervisor 拉起；手工停机要走 `bash scripts/manage_research_macd_aggressive_v2.sh stop`，不要只杀 python 子进程，否则会被自动拉起。
+- 研究器启动时会先从 `backups/strategy_macd_aggressive_v2_best.py` 载入 active reference 并回写到 `src/strategy_macd_aggressive.py`；手工瘦身当前基底时，要同步 `src` 与 `best/champion` 快照。
 
 ## 常用命令
 

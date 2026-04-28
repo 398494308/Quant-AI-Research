@@ -27,6 +27,9 @@ from market_data_catalog import default_market_data_paths
 import scripts.research_macd_aggressive_v2 as research_script
 import strategy_macd_aggressive as strategy_module
 from scripts.research_macd_aggressive_v2 import select_smoke_windows
+from research_v2.backtest_window_runtime import prepare_backtest_window_runtime
+from research_v2.champion_artifacts import archive_champion_snapshot
+from research_v2.charting import PerformanceChartPaths, charts_available, render_performance_chart
 from research_v2.config import GateConfig, ScoringConfig
 from research_v2.evaluation import (
     EvaluationReport,
@@ -37,7 +40,6 @@ from research_v2.evaluation import (
     partial_eval_gate_snapshot,
     summarize_evaluation,
 )
-from research_v2.charting import charts_available, render_performance_chart
 from research_v2.journal import (
     ORDINARY_REGION_FAMILIES,
     append_journal_archive,
@@ -56,6 +58,7 @@ from research_v2.journal import (
     region_families_for_regions,
 )
 from research_v2.notifications import build_discord_summary_message
+from research_v2.reference_state import load_saved_reference_state, persist_best_state
 from research_v2.prompting import (
     EDITABLE_REGIONS,
     build_candidate_response_format_instructions,
@@ -5107,6 +5110,135 @@ class ResearchRuntimeOptimizationsTest(unittest.TestCase):
         profile_mock.assert_called_once_with([{"window": "candidate"}])
         diff_mock.assert_called_once()
         eval_mock.assert_called_once_with(candidate)
+
+
+class RefactorHelperRegressionTest(unittest.TestCase):
+    def test_prepare_backtest_window_runtime_slices_window_payload(self):
+        prepared_context = {
+            "intraday_all": [
+                {"timestamp": 0},
+                {"timestamp": 1_000},
+                {"timestamp": 2_000},
+                {"timestamp": 3_000},
+            ],
+            "intraday_timestamps": [0, 1_000, 2_000, 3_000],
+            "intraday_interval_ms": 1_000,
+            "hourly_all": [{"timestamp": 0}],
+            "execution_all": [{"timestamp": 900}, {"timestamp": 1_500}, {"timestamp": 3_500}],
+            "execution_timestamps": [900, 1_500, 3_500],
+            "funding_all": [{"timestamp": 1_000}, {"timestamp": 3_000}],
+            "funding_timestamps": [1_000, 3_000],
+            "four_hour_state": [{"marker": "a"}, {"marker": "b"}, {"marker": "c"}],
+            "four_hour_close_timestamps": [500, 2_500, 4_500],
+        }
+
+        runtime = prepare_backtest_window_runtime(
+            prepared_context,
+            start_date="unused-start",
+            end_date="unused-end",
+            exit_params={"funding_fee_enabled": 1},
+            include_diagnostics=True,
+            beijing_window_indices_from_timestamps=lambda _ts, _start, _end: (1, 4),
+            timestamp_window_indices_inclusive=lambda timestamps, start_ts, end_ts: (
+                next((idx for idx, value in enumerate(timestamps) if value >= start_ts), len(timestamps)),
+                next((idx for idx, value in enumerate(timestamps) if value > end_ts), len(timestamps)),
+            ),
+            funding_interval_ms=lambda _timestamps: 2_000,
+            funding_window_coverage_report=lambda timestamps, _start, _end: {
+                "mode": "ok",
+                "ratio": len(timestamps) / 10.0,
+                "gap_count": 0,
+            },
+        )
+
+        self.assertEqual(runtime.intraday_start_idx, 1)
+        self.assertEqual(runtime.intraday_end_idx, 4)
+        self.assertEqual([bar["timestamp"] for bar in runtime.intraday_data], [1_000, 2_000, 3_000])
+        self.assertEqual([row["timestamp"] for row in runtime.execution_rows], [1_500, 3_500])
+        self.assertEqual([row["timestamp"] for row in runtime.funding_rows], [1_000, 3_000])
+        self.assertEqual(runtime.funding_coverage["mode"], "ok")
+        self.assertEqual([row["marker"] for row in runtime.four_hour_window_state], ["b"])
+
+    def test_persist_best_state_writes_manifest_and_strategy_files(self):
+        report = EvaluationReport(
+            metrics={"promotion_score": 0.41, "quality_score": 0.28},
+            gate_passed=False,
+            gate_reason="baseline only",
+            summary_text="",
+            prompt_summary_text="",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            best_state_file = temp_root / "state/best.json"
+            best_strategy_file = temp_root / "backups/best.py"
+            champion_strategy_file = temp_root / "backups/champion.py"
+
+            persist_best_state(
+                best_state_file,
+                best_strategy_file,
+                champion_strategy_file,
+                "def strategy():\n    return 'ok'\n",
+                report,
+                score_regime="trend_capture_v11_piecewise_drawdown_penalty",
+                shadow_test_metrics={"shadow_test_score": 1.2},
+                stage_started_at="2026-04-20T00:00:00+00:00",
+                stage_iteration=9,
+            )
+
+            payload = load_saved_reference_state(best_state_file)
+            self.assertEqual(payload["reference_role"], "baseline")
+            self.assertEqual(payload["reference_stage_iteration"], 9)
+            self.assertFalse(champion_strategy_file.exists())
+            self.assertTrue(best_strategy_file.exists())
+
+    def test_archive_champion_snapshot_writes_metadata_and_copies_charts(self):
+        candidate = StrategyCandidate(
+            candidate_id="champion_1",
+            hypothesis="hypothesis",
+            change_plan="plan",
+            closest_failed_cluster="",
+            novelty_proof="novel",
+            change_tags=("drawdown",),
+            edited_regions=("strategy",),
+            expected_effects=(),
+            core_factors=(),
+            strategy_code="def strategy():\n    return None\n",
+            primary_direction="long",
+        )
+        report = EvaluationReport(
+            metrics={"quality_score": 0.55, "promotion_score": 0.61},
+            gate_passed=True,
+            gate_reason="通过",
+            summary_text="",
+            prompt_summary_text="",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            validation_chart = temp_root / "validation.png"
+            selection_chart = temp_root / "selection.png"
+            validation_chart.write_bytes(b"validation")
+            selection_chart.write_bytes(b"selection")
+
+            snapshot_dir = archive_champion_snapshot(
+                temp_root / "history",
+                iteration_id=12,
+                accepted_at="2026-04-28T01:02:03+00:00",
+                candidate=candidate,
+                source=candidate.strategy_code,
+                report=report,
+                shadow_test_metrics={"shadow_test_score": 1.5},
+                chart_paths=PerformanceChartPaths(
+                    validation_chart=validation_chart,
+                    selection_chart=selection_chart,
+                ),
+            )
+
+            metadata = json.loads((snapshot_dir / "metadata.json").read_text())
+            self.assertEqual(metadata["candidate_id"], "champion_1")
+            self.assertEqual(metadata["validation_chart"], "validation.png")
+            self.assertEqual(metadata["selection_chart"], "selection.png")
+            self.assertTrue((snapshot_dir / "validation.png").exists())
+            self.assertTrue((snapshot_dir / "selection.png").exists())
 
 
 class DiscordSummaryFormattingTest(unittest.TestCase):
