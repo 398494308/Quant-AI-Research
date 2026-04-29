@@ -18,6 +18,7 @@ def _required_symbol_text() -> str:
     function_symbols = "、".join(f"`{function_name}()`" for function_name in REQUIRED_FUNCTIONS)
     return f"`PARAMS`、{constant_symbols}、{function_symbols}"
 
+
 def _bootstrap_journal_excerpt(journal_summary: str, *, max_lines: int = 20, max_chars: int = 1800) -> str:
     if not journal_summary.strip():
         return ""
@@ -35,6 +36,101 @@ def _bootstrap_journal_excerpt(journal_summary: str, *, max_lines: int = 20, max
         lines.append(line)
         total_chars = projected
     return "\n".join(lines).strip()
+
+
+def _limit_compact_lines(lines: list[str], *, max_lines: int, max_chars: int) -> str:
+    compact_lines: list[str] = []
+    total_chars = 0
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        projected = total_chars + len(line) + 1
+        if len(compact_lines) >= max_lines or projected > max_chars:
+            break
+        compact_lines.append(line)
+        total_chars = projected
+    return "\n".join(compact_lines).strip()
+
+
+def _bullet_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("- ") or line.startswith("* "):
+            lines.append(f"- {line[2:].strip()}")
+    return lines
+
+
+def _markdown_section_bullets(text: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current_section = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            current_section = line[3:].strip()
+            sections.setdefault(current_section, [])
+            continue
+        if line.startswith("- ") or line.startswith("* "):
+            sections.setdefault(current_section, []).append(f"- {line[2:].strip()}")
+    return sections
+
+
+def _compact_operator_focus_text(text: str) -> str:
+    sections = _markdown_section_bullets(text)
+    lines: list[str] = []
+    lines.extend(sections.get("优先方向", [])[:3])
+    lines.extend(sections.get("降权方向", [])[:2])
+    lines.extend(sections.get("默认动作", [])[:1])
+    if not lines:
+        lines = _bullet_lines(text)
+    return _limit_compact_lines(lines, max_lines=6, max_chars=520)
+
+
+def _compact_champion_review_text(text: str) -> str:
+    lines = [
+        line for line in _bullet_lines(text)
+        if "champion_code_hash" not in line.lower()
+    ]
+    return _limit_compact_lines(lines, max_lines=3, max_chars=320)
+
+
+def _field_mapping(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("- ") or line.startswith("* "):
+            line = line[2:].strip()
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        normalized_key = key.strip().lower()
+        normalized_value = value.strip()
+        if normalized_key and normalized_value:
+            fields[normalized_key] = normalized_value
+    return fields
+
+
+def _compact_reviewer_summary_text(text: str) -> str:
+    fields = _field_mapping(text)
+    lines: list[str] = []
+    candidate_id = fields.get("candidate_id", "")
+    verdict = fields.get("verdict", "")
+    reviewer_summary = fields.get("reviewer_summary", "")
+    must_change = fields.get("must_change", "")
+    if candidate_id and candidate_id not in {"-", "none"}:
+        lines.append(f"- candidate_id: {candidate_id}")
+    if verdict and verdict not in {"-", "none"}:
+        lines.append(f"- verdict: {verdict}")
+    if reviewer_summary and reviewer_summary not in {"-", "none"}:
+        lines.append(f"- reviewer_summary: {reviewer_summary}")
+    if verdict == "REVISE" and must_change and must_change not in {"-", "none"}:
+        lines.append(f"- must_change: {must_change}")
+    if not lines:
+        return _bootstrap_journal_excerpt(text, max_lines=4, max_chars=320)
+    return _limit_compact_lines(lines, max_lines=4, max_chars=420)
 
 
 # ==================== 返回格式 ====================
@@ -113,33 +209,24 @@ def build_strategy_agents_instructions() -> str:
 
 工作区文件职责：
 - `src/strategy_macd_aggressive.py`：唯一允许修改的策略文件，包含入场参数 `PARAMS` 与退出参数 `EXIT_PARAMS`。
-- `src/backtest_macd_aggressive.py`：回测、成交路径与指标口径定义，只读参考；不要把它当成退出参数主源。
-- `config/research_v2_operator_focus.md`：人工方向卡，只是软引导，不是系统硬限制。
-- `config/research_v2_champion_review.md`：当前 champion 人工观察卡；只在卡内 hash 命中当前 champion 时有效，新 champion 后自动忽略。
-- `wiki/reviewer_summary_card.md`：上一轮 reviewer 审稿卡；若它明确打回某条近邻方向，planner 下一版必须先吸收这张卡里的打回理由。
-- `wiki/direction_board.md`：当前 active reference 作用域下的方向账本；先看主方向是否已经高热，再决定本轮是否要换失败层或关键规则链。
-- `wiki/duplicate_watchlist.md`：最近高频重复源码黑名单摘要；先扫它，避免把同一份补丁再交一次。
-- `wiki/failure_wiki.md`：当前评分口径下的失败 wiki；先看它，避免重走已知坏 cut。
-- `wiki/latest_history_package.md`：当前 stage 历史摘要包；先看前部执行摘要与失败核，再决定是否下钻表格。
-- `wiki/last_rejected_snapshot.md`：最近一次被系统判错的候选摘要、失败原因与 diff 提示；重生轮优先看它。
-- `wiki/last_rejected_candidate.py`：最近一次被系统判错的完整候选代码，只读反例参考；不要把它当成本轮改动基底。
-- `memory/`：研究记忆归档，只读参考；其中 `raw/` 保留原始历史，`summaries/` 保留压缩摘要。
-- `data/`：OKX K 线 / funding / 成交流量代理等数据，只读参考。
+- `src/backtest_macd_aggressive.py`：回测与成交口径定义，只读参考；不要把它当成退出参数主源。
+- `config/research_v2_operator_focus.md` / `config/research_v2_champion_review.md`：人工软引导；后者只在当前 champion hash 命中时有效。
+- `wiki/reviewer_summary_card.md` / `wiki/direction_board.md` / `wiki/duplicate_watchlist.md` / `wiki/failure_wiki.md` / `wiki/latest_history_package.md`：当前 stage 的前台记忆与失败证据。
+- `wiki/last_rejected_snapshot.md` / `wiki/last_rejected_candidate.py`：最近一次被拒的反例；只读参考，不是本轮基底。
+- `memory/` / `data/`：研究归档与行情数据，只读参考。
 
 工作方式：
 - 先想再写，先看历史再下手。
+- 当前运行环境约 `2 核 8G`；不要假设可以做大网格搜索、超长额外回测或重型试错。
 - 不要 hard code，不要堆屎。
-- 具体角色职责以各自 `system prompt` 为准，不要把别的角色的任务揽到自己身上。
-- 必要时先阅读 `src/strategy_macd_aggressive.py` 与相关只读证据，再行动；不要靠猜测写策略。
 - 最近结构化失败证据优先级高于 `weak side` 或 champion 缺陷提示；先复盘失败点，再决定是否继续同方向。
 - 每轮只验证一个可证伪假设；改动要能映射到真实交易路径变化，而不是只制造源码 diff。
-- `primary_direction` 只写本轮主动施力方向，不要求你先证明完整因果；真正的结果好坏以后验评估为准。
 - 如果某个主方向已经高热，优先换失败层、关键规则链或真实触达路径；不要只换标签或措辞。
 - 优先保持代码结构化、规则块命名清晰、阈值集中、因果链可解释。
 - 默认先做删减、合并、替换，再考虑新增条件；如果一个新条件只覆盖很窄的历史片段，优先删旧条件或改旧阈值，不要继续叠分叉。
 - 不要把同一侧 path 拆成多个近似微变体；一个 path 没有明显新增交易路径时，应视为失败假设，而不是继续微调同一区间。
 - 允许只改 `strategy()` / `PARAMS` / `EXIT_PARAMS` / 少量新 helper 做结构化重排，但前提是你能明确说明这会改变最终信号集合、退出集合或真实交易路径；否则不要为了造 diff 去动它们。
-- 明确要求：不要“堆屎”。很多你想到的过滤、例外、path 或 veto，当前策略里往往已经以别的名字存在；新增前先检查现有规则块、阈值和最终放行链是否已经表达了同一因果。
+- 明确要求：不要“堆屎”。新增前先检查现有规则块、阈值和最终放行链是否已经表达了同一因果。
 - 若现有脚本里已经有近似逻辑，不要换个名字再写一份重复条件；优先删旧、并旧、改旧，禁止把同一因果链在不同 helper / path / veto 里重复实现。
 - 明确允许结构性删减轮：`remove_dead_gate`、`merge_veto`、`widen_outer_context` 都是合法 change_tags；这类轮次的目标是减少死分支、提高 reachability。
 
@@ -340,70 +427,73 @@ def build_strategy_research_prompt(
     bootstrap_block = ""
     if session_mode == "bootstrap":
         bootstrap_block = (
-            "\n新 session 启动补充（完整版本见 "
-            f"`{history_package_path}`）：\n"
-            f"{bootstrap_excerpt or '请先读取本地历史包摘要。'}\n"
+            "新 session 启动补充:\n"
+            f"- 来源: `{history_package_path}`\n"
+            f"{bootstrap_excerpt or '- 请先读取本地历史包摘要。'}\n"
         )
-    reviewer_summary_excerpt = _bootstrap_journal_excerpt(
-        reviewer_summary_text,
-        max_lines=6,
-        max_chars=600,
-    )
+    operator_focus_excerpt = _compact_operator_focus_text(operator_focus_text)
+    operator_focus_block = ""
+    if operator_focus_excerpt:
+        operator_focus_block = (
+            "人工方向卡摘要:\n"
+            f"- 来源: `{operator_focus_path}`\n"
+            f"{operator_focus_excerpt}\n"
+        )
+    champion_review_excerpt = _compact_champion_review_text(champion_review_text)
+    champion_review_block = ""
+    if champion_review_excerpt:
+        champion_review_hash_line = (
+            f"- 绑定 champion hash: `{champion_review_code_hash}`\n"
+            if champion_review_code_hash
+            else ""
+        )
+        champion_review_block = (
+            "当前 champion 人工观察摘要:\n"
+            f"- 来源: `{champion_review_path}`\n"
+            f"{champion_review_hash_line}"
+            f"{champion_review_excerpt}\n"
+        )
+    reviewer_summary_excerpt = _compact_reviewer_summary_text(reviewer_summary_text)
     reviewer_summary_block = (
-        "上一轮 reviewer 总结卡（高优先级，先看）:\n"
-        f"- 文件: `{reviewer_summary_path}`\n"
+        "上一轮 reviewer 摘要:\n"
+        f"- 来源: `{reviewer_summary_path}`\n"
         f"{reviewer_summary_excerpt or '- 暂无 reviewer 卡；本轮按当前诊断自行判断。'}\n"
     )
     session_label = "stage_bootstrap" if session_mode == "bootstrap" else "stage_resume"
     return f"""当前回合任务：
-- session 状态：`{session_label}`
-- 先复盘最近一条最强结构化失败证据，再决定本轮继续还是转向；不要先替当前方向辩护。
-- 围绕一个可证伪假设，先产出一个简洁 round brief，交给后续 edit worker 落码。
-- 本轮目标是改变真实交易路径，不是只制造源码 diff；若后续落码后的 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
+- session 状态：`{session_label}`；先复盘最近结构化失败证据，再决定继续还是转向。
+- 围绕一个可证伪假设先写 round brief，交给后续 edit worker 落码。
+- 本轮目标是改变真实交易路径，不是只制造源码 diff；若 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
 - 当前评分口径是 `{score_regime}`；只要 `gate` 通过，且 `promotion_score` 高于当前 {benchmark_label}，候选就有资格刷新当前 active reference。
-- `promotion_score` 现在以连续趋势抓取主分与按日收益年化补分权重 `8:2` 为主体，再减去分段回撤惩罚和轻量鲁棒性软惩罚；鲁棒性只看 `train/val` 落差、`val` 分块稳定性，以及退出参数邻域在 `val` 3 段上的平台形态。
+- `promotion_score` 现在以连续趋势抓取主分与按日收益年化补分权重 `8:2` 为主体，再减去分段回撤惩罚和轻量鲁棒性软惩罚。
+- 鲁棒性只看 `train/val` 落差、`val` 分块稳定性，以及退出参数邻域在 `val` 3 段上的平台形态。
+- `train` 滚动窗口均值/中位数、过拟合集中度仍保留为 gate/诊断，但不再是 `promotion_score` 主公式的一部分。
 - `test` 只做只读观察，不参与晋升，也不能作为下一轮 prompt 的证据源。
-- `train` 滚动窗口均值/中位数、`val` 分块稳定性和过拟合集中度仍保留为 gate/诊断，但不再是 `promotion_score` 主公式的一部分。
 
 当前 active reference 角色：`{current_base_role}`
 当前 {benchmark_label} 参考晋级分：{previous_best_score:.2f}
 {side_bias_block}
 {champion_focus_block}
-{operator_focus_block}
-{champion_review_block}
+卡片摘要（已展开，不需要再假设自己能读本地文件）：
+{operator_focus_block}{champion_review_block}
 {reviewer_summary_block}
-本轮本地只读记忆文件：
-- reviewer 总结卡：`{reviewer_summary_path}`
-- 当前 champion 人工观察卡：`{champion_review_path}`
+方向与历史摘要来源：
 - 当前方向账本：`{direction_board_path}`
 - 重复黑名单：`{duplicate_watchlist_path}`
 - 失败 wiki：`{failure_wiki_path}`
 - 历史摘要包：`{history_package_path}`
 {bootstrap_block}
 
-本轮读取预算（软约束）：
-- 先读 reviewer 卡、direction_board 顶部摘要和 latest_history_package 前部摘要；只有方向高热、证据冲突或需要确认失败层时，才下钻更长表格。
-- 读取文件是为了定位失败层，不是把全部 wiki 内容搬进脑内后再开始思考。
-
-本轮阅读顺序（必须执行）：
-1. 先看“刷新条件与本轮目标”、当前 champion 人工观察卡和上一轮 `reviewer` 总结卡；先判断上一轮为什么失败，再决定本轮继续还是转向。
-2. 再看 `{direction_board_path}`、`{duplicate_watchlist_path}`、`{failure_wiki_path}`；先确认你的 `primary_direction` 是否已经高热。`{history_package_path}` 只在需要下钻时再看前部摘要。
-3. 再看“当前诊断”，定位当前 gate 主失败项、弱侧和 val 漏斗堵点，并判断失败更像发生在 `outer_context / path / final_veto / routing / followthrough / exit / unknown` 的哪一层。
-4. 再决定本轮继续还是转向；如果某个主方向已经高热，本轮至少要换失败层、关键规则链或真实触达路径，不要只换标签。
-5. 最后才提出一个单一因果假设，并明确它预计会新增、删除或迁移哪类真实交易。
-6. 形成假设后，必须回看一次 `{direction_board_path}`、`{duplicate_watchlist_path}` 与 `{failure_wiki_path}` 做自检；若你这次仍在同一高热热区横移，优先在本轮内改写假设再提交。
-
 {evaluation_summary}
 
 本轮执行框架：
-- 先确定“目标侧 + 目标环节”，再决定具体改哪个 choke point；不要只因为弱侧还是 `long` 就继续留在旧路线。
-- 新增 path 不等于新增交易；必须继续检查最终合流与否决链。长侧重点看 `long_signal_path_ok -> long_final_veto_clear -> _trend_followthrough_long()`，空侧重点看 `breakdown_ready -> short_final_veto_clear -> _trend_followthrough_short()`。
+- 先判断上一版为什么失败，再决定继续还是转向；不要只因为弱侧还是 `long` 就留在旧路线。
+- 若 `primary_direction` 已高热，本轮至少要换失败层、关键规则链或真实触达路径，不要只换标签。
+- 新增 path 不等于新增交易；长侧重点看 `long_signal_path_ok -> long_final_veto_clear -> _trend_followthrough_long()`，空侧重点看 `breakdown_ready -> short_final_veto_clear -> _trend_followthrough_short()`。
 - 如果主要改 `_trend_followthrough_ok()`、`_trend_quality_ok()` 或 `_flow_confirmation_ok()`，必须确认现有 `strategy()` 路径会触达；否则优先改 `strategy()`。
-- 若最近连续出现 `behavioral_noop` 或结果盆地重复，本轮默认必须放大步长：优先切不同方向簇，或切不同 choke point / 最终放行链；不要只换措辞、tag 或近邻阈值。
-- `primary_direction` 只写本轮主动施力方向，不要求你先证明结果一定更好；真正好坏以后验评估为准。
-- 若漏斗诊断显示一侧长期 0 交易、outer_context 几乎全死，或 path 能过但 final_veto 基本全死，可以考虑结构性删减轮：`remove_dead_gate` / `merge_veto` / `widen_outer_context`；但只有在它仍是当前最可能改变真实交易路径的根因时才这样做。
-- 若你的主要假设是最终路由或最终 veto 错配，允许只改 `strategy()` 或少量结构化 helper；但必须在 `change_plan` 里写清楚它会新增、删除或迁移哪类真实交易。
-- 读不到 `{direction_board_path}`、`{duplicate_watchlist_path}`、`{failure_wiki_path}` 或 `{history_package_path}` 不是合法 no-edit 理由；当前源码仍是硬事实源，必须继续改代码。
+- 若最近连续 `behavioral_noop` 或结果盆地重复，默认必须放大步长：优先换方向簇、换 choke point 或换最终放行链。
+- 若漏斗显示一侧长期 0 交易、outer_context 几乎全死，或 path 能过但 final_veto 基本全死，可以考虑结构性删减轮。
+- 读不到 `{direction_board_path}`、`{duplicate_watchlist_path}`、`{failure_wiki_path}` 或 `{history_package_path}` 不是合法 no-edit 理由；当前源码仍是硬事实源。
 
 当前口径的 gate / 评分提醒：
 - val 趋势段命中率 >= 35%
@@ -415,13 +505,12 @@ def build_strategy_research_prompt(
 - train+val 严重集中度过拟合会直接淘汰
 
 本轮硬完成条件：
-- 当前阶段不要直接编辑文件；只输出 round brief，供后续 worker 落码。
+- 当前阶段不要直接编辑文件；只输出 `draft round brief`，供后续 worker 落码。
 - round brief 输出要求：
 {build_candidate_response_format_instructions()}
-- 这份 round brief 只是 `draft`；主进程还会交给 `reviewer` 审稿。若 reviewer 打回，本轮必须先吸收其反馈再重写，不允许绕过审稿直接进入落码。
-- `primary_direction` 必须是你本轮主动施力的主方向，不要把所有联动改动都往里塞。
-- `change_plan` 必须具体到你希望 worker 改哪条规则块、阈值或最终放行链。
-- 如果本轮主要改 `EXIT_PARAMS` 里的连续数值，可以用 `exit_range_scan` 给一个 3 点小范围；扫描只用于轻量预筛，最终仍只保留一个完整候选。系统会在 full eval 后额外做一次只读 `plateau_probe`，只看 `val` 3 段平台，不会自动改代码。
+- 主进程还会把这份 `draft` 交给 `reviewer` 审稿；若 reviewer 打回，本轮必须先吸收反馈再重写。
+- `primary_direction` 只写本轮主动施力方向；`change_plan` 必须具体到规则块、阈值或最终放行链。
+- 如果本轮主要改 `EXIT_PARAMS` 里的连续数值，可以用 `exit_range_scan` 给一个 3 点小范围；系统 full eval 后会额外做只读 `plateau_probe`，不会自动改代码。
 - `novelty_proof` 不是自我辩护。{_novelty_proof_rule()}
 - 不允许把“未执行代码改动”“blocked”“no_edit”“no_change”这类占位回复当成完成。
 - 如果辅助记忆缺失，就直接基于当前源码做单假设判断，不要停在解释阶段。
@@ -456,7 +545,7 @@ def build_strategy_reviewer_prompt(
 - 你不是 planner，不要替它发明新方向。
 - 你不是 edit worker，不要提出代码级修改步骤。
 - 你只能做两种结论：`PASS` 或 `REVISE`。
-- 若 `REVISE`，重点说清“为什么当前 draft 仍是旧失败近邻”以及“下一版至少要换哪一层”；不要写成泛泛而谈的建议。
+- 若 `REVISE`，重点说清“为什么当前 draft 仍是旧失败近邻”以及“下一版至少要换哪一层”。
 
 当前 draft round brief：
 {round_brief_text}
@@ -468,23 +557,22 @@ def build_strategy_reviewer_prompt(
 - 当前 stage 摘录：
 {evidence_excerpt or '- 无'}
 
-本地只读证据文件：
-- 历史摘要包：`{history_package_path}`
+摘要来源：
 - 当前方向账本：`{direction_board_path}`
 - 失败 wiki：`{failure_wiki_path}`
 - 重复黑名单：`{duplicate_watchlist_path}`
 - 最近一次被系统判错的快照：`{last_rejected_snapshot_path}`
+- 历史摘要包：`{history_package_path}`
 - 上一轮 reviewer 总结卡：`{reviewer_summary_path}`
 
 审稿要求：
 1. 先判断它的 `primary_direction` 是否命中当前方向账本里的高热方向。
-2. 如果没有命中高热方向，默认不要因为“解释不够漂亮”而打回；首次或低热尝试应允许进入落码。
-3. `PASS` 前确认 draft 已说明它预计新增、删除或迁移哪类真实交易；若完全没有交易路径变化说明，应判 `REVISE` 让 planner 补清楚。
-4. 如果命中高热方向，重点检查这份 draft 是否明确换了失败层、关键规则链或真实触达路径；不要要求它先证明完整因果。
-5. 如果它仍只是换措辞、换标签或局部阈值，而没有明确换层，应判 `REVISE`。
-6. 只要 draft 已明确声明了结构性差异和真实交易路径变化，即使方向仍相同，也可以 `PASS` 让它进入评估。
-7. `REVISE` 时不要替 planner 写新方案；只指出它必须换哪一层。
-8. 若证据不足，优先回看本地只读证据文件；不要因为 draft 自己写了 `novelty_proof` 就直接放行。
+2. 如果没有命中高热方向，默认允许首次或低热尝试进入落码，不要因为“解释不够漂亮”就打回。
+3. `PASS` 前确认 draft 已说明它预计新增、删除或迁移哪类真实交易；若没有交易路径变化说明，应判 `REVISE`。
+4. 如果命中高热方向，重点检查它是否明确换了失败层、关键规则链或真实触达路径。
+5. 如果它仍只是换措辞、换标签或局部阈值，没有明确换层，应判 `REVISE`。
+6. `REVISE` 时不要替 planner 写新方案；只指出它必须换哪一层。
+7. 若证据不足，优先回看摘要来源；不要因为 draft 自己写了 `novelty_proof` 就直接放行。
 
 输出要求：
 {build_reviewer_response_format_instructions()}
@@ -833,37 +921,20 @@ def build_strategy_exploration_repair_prompt(
 - 近期高频失败/过热方向（软提示）: {hot_cluster_text}
 {feedback_block}
 
-工作区说明：
-- 主进程已把工作区里的 `src/strategy_macd_aggressive.py` 重置为当前正确基底（当前主参考），避免你在已知坏版本上继续叠改
-- 刚才被系统拒收的候选版本只作为反例参考，不再是这次改动的基底
-- `wiki/reviewer_summary_card.md` 记录了上一轮 reviewer 为什么放行或打回；先看它，再看更细的失败快照
-- `wiki/duplicate_watchlist.md` 只列最近最容易重复提交的少量源码指纹；提交前先快速核对，避免把同一份补丁再交一次
-- `wiki/last_rejected_snapshot.md` 记录了上一版为什么被判错；`wiki/last_rejected_candidate.py` 保留了上一版完整代码，都是只读参考
-- 你必须从当前正确基底重新修改该文件，产出一个新的候选方向
-- 不要把源码贴回回复文本；主进程会直接读取你改好的文件
-- 除 `src/strategy_macd_aggressive.py` 外，不要创建、修改或删除其他文件
-- 不允许把“未读到 wiki/history”“环境阻塞”“no_edit”“未执行代码改动”当成合法重生结果；必须继续改出真实 diff
+当前事实：
+- 工作区里的 `src/strategy_macd_aggressive.py` 已重置为当前正确基底；刚才被拒的候选只作反例参考。
+- `wiki/reviewer_summary_card.md`、`wiki/duplicate_watchlist.md`、`wiki/last_rejected_snapshot.md`、`wiki/last_rejected_candidate.py` 都是只读辅助。
+- 你必须从当前正确基底重新修改 `src/strategy_macd_aggressive.py`，不要创建或修改其他文件。
 
 重生规则：
 - 这不是代码修错；不要只做微小阈值近邻调整然后原样留在被拒簇。
 - 先复盘上一版错在目标层、choke point 还是步长；先决定继续还是转向，再写新方案。
-- 优先切到不同方向簇。
-- 若确实留在同簇，必须明确切换外层 choke point、最终放行链、目标侧或核心规则块中的至少一项；`strategy-only` 结构性改路由是允许的，但必须明确说明为什么这次会触达不同交易路径。
-- 不要只换 tag、只换措辞、或只补一两条很像的条件。
-- 若上一版是 `behavioral_noop`，不要沿用原 hypothesis / change_plan 只换表述；应默认把那条局部路径假设视为已被证伪，并改成新的可触达交易路径。
-- 重生后的候选必须预计改变 smoke 窗口实际交易路径；如果上一版只是 helper / followthrough 变化但没有触发新交易，优先改 `strategy()` 的最终入场路径。
-- 如果附加反馈显示 smoke 窗口的交易数、收益和信号统计完全没变，默认说明你上一版改动没有触达真实交易路径；这次必须优先改能改变最终信号集合或退出集合的规则块，而不是继续只拨不会触发的细阈值。
-- 若你认为上一版里某个局部思路仍有价值，必须在当前正确基底上重新实现；不要默认沿用上一版残留代码。
-- 在动手前先快速核对 `wiki/last_rejected_snapshot.md`，必要时再看 `wiki/last_rejected_candidate.py`；目标是理解“上一版为什么错”，不是继续在错题代码上补丁。
-- 在提交重生版之前，先快速核对 `wiki/duplicate_watchlist.md`，再回看一次 `wiki/failure_wiki.md`；如果你这次仍命中相同或高度相似的重复补丁/失败 cut，优先继续改写，不要无意义原样交回。
-- 对长侧优先检查 `long_outer_context_ok` 与 `long_final_veto_clear`；对空侧优先检查 `short_outer_context_ok` 与 `short_final_veto_clear`。若这些总闸门不动，新增 path 很可能仍是死分支。
-- 不要把“新增一个 `xxx_path_ok`”误当成一定会新增交易；只有它真正穿过最终 veto / followthrough，smoke 行为才会改变。
-- 若附加反馈显示 `outer_context` 或 `final_veto` 是主要堵点，允许直接做结构性删减轮：`remove_dead_gate`、`merge_veto`、`widen_outer_context`。
-- 若附加反馈显示你上一版没有真实 diff，本轮第一优先级是产出真实源码改动，而不是解释为什么没改。
-- 在动手前先快速核对 `wiki/reviewer_summary_card.md`；若 reviewer 已明确打回某条近邻方向，本轮不要原样续写。
-- 仍然只允许修改 `src/strategy_macd_aggressive.py`，但整份文件都可以改。
-- 不要引入网络、文件、随机数、外部依赖。
-- 代码仍必须保持简洁、结构化、可读。
+- 优先切到不同方向簇；若留在同簇，至少换外层 choke point、最终放行链、目标侧或核心规则块中的一项。
+- 若上一版是 `behavioral_noop`，默认说明局部假设没有触达真实行为层；不要沿用原 hypothesis / change_plan 只换表述。
+- 重生后的候选必须预计改变 smoke 窗口实际交易路径；如果上一版只是 helper / followthrough 变化但没有触发新交易，优先改 `strategy()` 的最终路径。
+- 若附加反馈显示漏斗堵点仍在 `outer_context` 或 `final_veto`，允许直接做结构性删减轮：`remove_dead_gate`、`merge_veto`、`widen_outer_context`。
+- 动手前先看 `wiki/last_rejected_snapshot.md` 与 `wiki/reviewer_summary_card.md`；提交前再核对 `wiki/duplicate_watchlist.md` 与 `wiki/failure_wiki.md`。
+- 不要引入网络、文件、随机数、外部依赖；代码仍必须简洁、结构化、可读。
 
 输出要求：
 - 返回格式仍然使用同一组纯文本字段，不要 JSON。

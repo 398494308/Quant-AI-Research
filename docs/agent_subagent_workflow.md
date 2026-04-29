@@ -90,6 +90,7 @@ flowchart TB
 - 负责提出研究方向和单一可证伪假设。
 - 必须先读当前人工卡、reviewer 卡、direction board 和前台记忆。
 - 如果 reviewer 打回，必须先吸收打回理由再重写。
+- 同一 stage 内即使出现 `behavioral_noop`、同轮重生或方向切换，也继续复用这个 session；只有重开 stage 或刷新 champion 才重置。
 
 ### reviewer
 

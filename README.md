@@ -64,8 +64,9 @@
 - `reviewer` 每轮 fresh，只判断 draft 是否值得落码，结论只有 `PASS / REVISE`。
 - `edit_worker` 只改 [src/strategy_macd_aggressive.py](src/strategy_macd_aggressive.py)。
 - 主进程负责 `diff / smoke / behavioral_noop / exit_range_scan / full eval / gate / 归档 / 播报`。
-- 没有刷新 `champion` 时，结果写回 `journal / wiki / reviewer_summary_card / direction_board`，下一轮继续同一 stage。
-- 刷新 `champion` 时，系统只在这时跑 `test`，归档快照，重置 stage 和 planner session。
+- 没有刷新 `champion` 时，结果写回 `journal / wiki / reviewer_summary_card / direction_board`；若该轮已完成 full eval，还会后台异步补跑 `test` 关键指标留档，然后继续同一 stage。
+- 同一 stage 内，即使出现 reviewer 打回、`behavioral_noop`、同轮重生或方向切换，`planner` 也不自动重置 session；只有手工重开 stage 或刷新 `champion` 才重置。
+- 刷新 `champion` 时，会同步跑 `test`、归档快照，然后重置 stage 和 planner session。
 - `config/research_v2_champion_review.md` 是绑定当前 champion hash 的短人工观察卡；新 champion 后自动失效。
 
 当前为了控制主文件体积，研究器相关代码已经拆到这些辅助模块：
@@ -109,6 +110,9 @@ flowchart TB
 - 规则继承方式：实验接法会把工作区 `AGENTS.md` 的全文显式注入 `planner` 的 system prompt，保证原有 `apply on planner` 规则继续生效
 - DeepSeek planner 的多轮上下文保存在 `state/research_macd_aggressive_v2_agent_workspace/.deepseek_planner_session_*.json`
 - DeepSeek planner 的 trace 额外保存在 `state/research_macd_aggressive_v2_agent_workspace/.deepseek_planner_trace_*.jsonl`
+- 同一 stage 内不会因为 `behavioral_noop`、reviewer 打回或方向切换而重置 planner session
+- 本地 session 默认只保留最近 `12` 条非 system 历史消息；`reasoning_content` 只写 trace，不再回灌到 session history
+- 模型调用 telemetry 同时记录原始 prompt 大小与真实发送上下文大小，便于核对内联 `AGENTS.md` 和历史消息带来的成本
 
 ### 当前实验结论
 

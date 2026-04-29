@@ -2748,6 +2748,27 @@ def _run_model_text_request(
             workspace_root=workspace_root,
         )
     elapsed_seconds = round(max(0.0, time.monotonic() - started_at), 3)
+
+    def _metadata_int(name: str, default: int) -> int:
+        try:
+            return max(0, int(response_metadata.get(name, default)))
+        except (TypeError, ValueError):
+            return max(0, default)
+
+    system_prompt_chars_sent = _metadata_int(
+        "system_prompt_chars_sent",
+        len(resolved_system_prompt),
+    )
+    history_message_chars_sent = _metadata_int("history_message_chars_sent", 0)
+    history_message_count_sent = _metadata_int("history_message_count_sent", 0)
+    total_message_chars_sent = _metadata_int(
+        "total_message_chars_sent",
+        system_prompt_chars_sent + history_message_chars_sent + len(prompt),
+    )
+    estimated_prompt_tokens_sent = _metadata_int(
+        "estimated_prompt_tokens_sent",
+        max(1, (total_message_chars_sent + 3) // 4),
+    )
     _append_model_call_telemetry(
         {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -2762,6 +2783,11 @@ def _run_model_text_request(
             "prompt_chars": len(prompt),
             "system_prompt_chars": len(system_prompt),
             "estimated_prompt_tokens": _estimate_prompt_tokens(prompt, system_prompt),
+            "system_prompt_chars_sent": system_prompt_chars_sent,
+            "history_message_chars_sent": history_message_chars_sent,
+            "history_message_count_sent": history_message_count_sent,
+            "total_message_chars_sent": total_message_chars_sent,
+            "estimated_prompt_tokens_sent": estimated_prompt_tokens_sent,
             "response_chars": len(raw_text),
             "workspace_root": str(workspace_root),
             "repair_attempt": repair_attempt,

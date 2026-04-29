@@ -53,7 +53,7 @@ def load_deepseek_planner_config() -> DeepSeekPlannerConfig:
         thinking_type=os.getenv("DEEPSEEK_PLANNER_THINKING_TYPE", "enabled").strip() or "enabled",
         reasoning_effort=os.getenv("DEEPSEEK_PLANNER_REASONING_EFFORT", "max").strip() or "max",
         timeout_seconds=max(1, int(os.getenv("DEEPSEEK_PLANNER_TIMEOUT_SECONDS", os.getenv("CODEX_TIMEOUT_SECONDS", "600")))),
-        max_history_messages=max(4, int(os.getenv("DEEPSEEK_PLANNER_MAX_HISTORY_MESSAGES", "80"))),
+        max_history_messages=max(4, int(os.getenv("DEEPSEEK_PLANNER_MAX_HISTORY_MESSAGES", "12"))),
     )
 
 
@@ -101,11 +101,7 @@ def _load_history(path: Path) -> list[dict[str, str | Any]]:
         role = str(item.get("role", "")).strip()
         content = str(item.get("content", "")).strip()
         if role and content:
-            message: dict[str, str | Any] = {"role": role, "content": content}
-            reasoning_content = str(item.get("reasoning_content", "")).strip()
-            if reasoning_content:
-                message["reasoning_content"] = reasoning_content
-            messages.append(message)
+            messages.append({"role": role, "content": content})
     return messages
 
 
@@ -183,6 +179,14 @@ def _to_api_messages(messages: list[dict[str, str | Any]]) -> list[dict[str, str
     return api_messages
 
 
+def _message_chars(messages: list[dict[str, str]]) -> int:
+    return sum(len(item.get("content", "")) for item in messages)
+
+
+def _estimate_tokens_from_chars(total_chars: int) -> int:
+    return max(1, (max(0, int(total_chars)) + 3) // 4)
+
+
 def generate_text_response(
     *,
     prompt: str,
@@ -215,9 +219,15 @@ def generate_text_response(
         prompt=prompt,
         max_history_messages=client_config.max_history_messages,
     )
+    api_messages = _to_api_messages(messages)
+    history_messages = api_messages[1:-1] if len(api_messages) >= 2 else []
+    system_prompt_chars_sent = len(api_messages[0]["content"]) if api_messages else 0
+    history_message_chars_sent = _message_chars(history_messages)
+    history_message_count_sent = len(history_messages)
+    total_message_chars_sent = _message_chars(api_messages)
     payload: dict[str, Any] = {
         "model": client_config.model,
-        "messages": _to_api_messages(messages),
+        "messages": api_messages,
         "thinking": {"type": client_config.thinking_type},
         "reasoning_effort": client_config.reasoning_effort,
         "stream": False,
@@ -276,10 +286,7 @@ def generate_text_response(
     if not raw_text:
         raise StrategyGenerationError("deepseek api returned an empty assistant content")
 
-    assistant_record: dict[str, str | Any] = {"role": "assistant", "content": raw_text}
-    if reasoning_text:
-        assistant_record["reasoning_content"] = reasoning_text
-    messages.append(assistant_record)
+    messages.append({"role": "assistant", "content": raw_text})
     _persist_history(
         history_path,
         _trim_history(messages, max_history_messages=client_config.max_history_messages),
@@ -308,6 +315,11 @@ def generate_text_response(
                 "thinking_type": client_config.thinking_type,
                 "trace_path": str(trace_path),
                 "reasoning_chars": len(reasoning_text),
+                "system_prompt_chars_sent": system_prompt_chars_sent,
+                "history_message_chars_sent": history_message_chars_sent,
+                "history_message_count_sent": history_message_count_sent,
+                "total_message_chars_sent": total_message_chars_sent,
+                "estimated_prompt_tokens_sent": _estimate_tokens_from_chars(total_message_chars_sent),
             }
         )
 

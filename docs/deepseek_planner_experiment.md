@@ -45,7 +45,12 @@ DeepSeek 没有直接复用 Codex 的 session 机制。
 - `state/research_macd_aggressive_v2_agent_workspace/.deepseek_planner_session_*.json`
 
 它仍然受当前 `active reference + stage` 作用域约束；stage 重开或 champion 刷新时，
-本地 planner session 也会跟着重置。
+本地 planner session 才会重置。
+
+补充两点：
+
+- 同一 stage 内，即使出现 reviewer 打回、`behavioral_noop`、同轮重生或方向切换，也不会自动重置 planner session。
+- 本地 session 默认只保留最近 `12` 条非 system 历史消息，目标是保留失败记忆，但压掉长尾原始对话。
 
 ### 4. planner reasoning 会额外落本地 trace
 
@@ -61,6 +66,28 @@ DeepSeek 没有直接复用 Codex 的 session 机制。
 - DeepSeek 返回的 `assistant_reasoning_content`
 
 这个 trace 只用于观测，不会把旧的 `reasoning_content` 再喂回模型，因此不会改变原有研究流程。
+本地 session history 现在也不会再持久化 `reasoning_content`，避免无效膨胀。
+
+### 5. prompt 结构没变，只做压缩
+
+这轮实验没有改研究器角色分工、SOP 或 prompt 分层架构，只做了减重：
+
+- 压缩 planner / reviewer / repair 的重复规则文本
+- 把人工卡、reviewer 卡和 front memory 改成更短的摘要块
+- 保留原有“先复盘失败证据，再决定继续还是转向”的工作方式
+
+### 6. telemetry 现在区分原始 prompt 和真实发送上下文
+
+模型调用日志仍保留原来的 `prompt_chars / system_prompt_chars / estimated_prompt_tokens`，
+同时新增真实发送口径，例如：
+
+- `system_prompt_chars_sent`
+- `history_message_chars_sent`
+- `history_message_count_sent`
+- `total_message_chars_sent`
+- `estimated_prompt_tokens_sent`
+
+这样可以直接看出内联 `AGENTS.md` 和持久 session 历史到底把 planner 上下文推高了多少。
 
 ## 运行层补充
 

@@ -15,6 +15,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import backtest_macd_aggressive as backtest
+import deepseek_planner_client as deepseek_planner_client
 from codex_exec_client import (
     StrategyClientConfig,
     StrategyGenerationSessionError,
@@ -1716,16 +1717,16 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("鲁棒性软惩罚", prompt)
         self.assertNotIn("promotion_delta >", prompt)
         self.assertIn("当前回合任务", prompt)
-        self.assertIn("本轮阅读顺序（必须执行）", prompt)
+        self.assertIn("卡片摘要（已展开，不需要再假设自己能读本地文件）", prompt)
         self.assertIn("reviewer_summary_card.md", prompt)
         self.assertIn("direction_board.md", prompt)
         self.assertIn("duplicate_watchlist.md", prompt)
         self.assertIn("failure_wiki.md", prompt)
-        self.assertIn("本轮读取预算（软约束）", prompt)
-        self.assertIn("只有方向高热、证据冲突或需要确认失败层时，才下钻", prompt)
-        self.assertIn("先复盘最近一条最强结构化失败证据", prompt)
+        self.assertIn("方向与历史摘要来源", prompt)
+        self.assertIn("先判断上一版为什么失败，再决定继续还是转向", prompt)
         self.assertIn("继续还是转向", prompt)
-        self.assertIn("形成假设后，必须回看一次", prompt)
+        self.assertIn("若最近连续 `behavioral_noop` 或结果盆地重复", prompt)
+        self.assertIn("如果本轮主要改 `EXIT_PARAMS` 里的连续数值", prompt)
         self.assertNotIn("当前因子模式", prompt)
         self.assertIn("本轮硬完成条件", prompt)
         self.assertIn("round brief", prompt)
@@ -1742,7 +1743,7 @@ class JournalPromptFixesTest(unittest.TestCase):
             reviewer_summary_path="wiki/reviewer_summary_card.md",
         )
 
-        self.assertIn("上一轮 reviewer 总结卡", prompt)
+        self.assertIn("上一轮 reviewer 摘要", prompt)
         self.assertIn("wiki/reviewer_summary_card.md", prompt)
         self.assertIn("换机制层", prompt)
 
@@ -1755,7 +1756,7 @@ class JournalPromptFixesTest(unittest.TestCase):
             operator_focus_path="config/research_v2_operator_focus.md",
         )
 
-        self.assertIn("人工方向卡（软引导，不是硬限制", prompt)
+        self.assertIn("人工方向卡摘要", prompt)
         self.assertIn("config/research_v2_operator_focus.md", prompt)
         self.assertIn("优先检查多头外层 choke point", prompt)
 
@@ -1769,10 +1770,10 @@ class JournalPromptFixesTest(unittest.TestCase):
             champion_review_code_hash="a" * 64,
         )
 
-        self.assertIn("当前 champion 人工观察卡", prompt)
+        self.assertIn("当前 champion 人工观察摘要", prompt)
         self.assertIn("config/research_v2_champion_review.md", prompt)
         self.assertIn("退出过晚", prompt)
-        self.assertIn("新 champion 后自动忽略", prompt)
+        self.assertIn("绑定 champion hash", prompt)
 
     def test_load_champion_review_text_requires_matching_hash(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1829,6 +1830,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("不要继续叠分叉", prompt)
         self.assertIn("不要“堆屎”", prompt)
         self.assertIn("不要换个名字再写一份重复条件", prompt)
+        self.assertIn("2 核 8G", prompt)
 
     def test_build_strategy_planner_system_prompt_mentions_agents_md_and_text_contract(self):
         prompt = build_strategy_planner_system_prompt()
@@ -1998,7 +2000,7 @@ class JournalPromptFixesTest(unittest.TestCase):
     def test_build_strategy_agents_instructions_keeps_role_boundaries_out_of_shared_layer(self):
         prompt = build_strategy_agents_instructions()
 
-        self.assertIn("具体角色职责以各自 `system prompt` 为准", prompt)
+        self.assertIn("工作区文件职责", prompt)
         self.assertNotIn("它只能 `PASS` 或 `REVISE`", prompt)
         self.assertNotIn("完成编辑后只回复 `EDIT_DONE`", prompt)
 
@@ -2110,7 +2112,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         )
 
         self.assertIn("重置为当前正确基底", prompt)
-        self.assertIn("不再是这次改动的基底", prompt)
+        self.assertIn("刚才被拒的候选只作反例参考", prompt)
         self.assertIn("从当前正确基底重新修改", prompt)
         self.assertIn("wiki/last_rejected_snapshot.md", prompt)
         self.assertIn("wiki/last_rejected_candidate.py", prompt)
@@ -2139,9 +2141,11 @@ class JournalPromptFixesTest(unittest.TestCase):
             regeneration_attempt=1,
         )
 
-        for prompt in (runtime_prompt, planner_prompt, exploration_prompt):
+        for prompt in (runtime_prompt, planner_prompt):
             self.assertIn("no_edit", prompt)
             self.assertIn("未执行代码改动", prompt)
+        self.assertIn("候选未产生真实代码改动", exploration_prompt)
+        self.assertIn("从当前正确基底重新修改", exploration_prompt)
 
     def test_region_family_mapping_merges_entry_path_blocks(self):
         region_families = region_families_for_regions(
@@ -4545,6 +4549,90 @@ class CodexExecClientTest(unittest.TestCase):
         self.assertEqual(metadata["session_id"], "thread_123")
         self.assertTrue(metadata["resumed"])
 
+    def test_load_deepseek_planner_config_defaults_to_compact_history_window(self):
+        with mock.patch.dict(deepseek_planner_client.os.environ, {}, clear=True):
+            config = deepseek_planner_client.load_deepseek_planner_config()
+
+        self.assertEqual(config.max_history_messages, 12)
+
+    def test_deepseek_planner_generate_text_response_keeps_reasoning_only_in_trace(self):
+        class FakeResponse:
+            status_code = 200
+            text = "ok"
+
+            def json(self):
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "new answer",
+                                "reasoning_content": "new reasoning",
+                            }
+                        }
+                    ]
+                }
+
+        config = deepseek_planner_client.DeepSeekPlannerConfig(
+            enabled=True,
+            api_key="test-key",
+            base_url="https://api.deepseek.com",
+            model="deepseek-v4-pro",
+            thinking_type="enabled",
+            reasoning_effort="max",
+            timeout_seconds=30,
+            max_history_messages=12,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_root = Path(temp_dir)
+            session_id = "session-123"
+            history_path = workspace_root / ".deepseek_planner_session_session-123.json"
+            history_path.write_text(
+                json.dumps(
+                    [
+                        {"role": "system", "content": "old system"},
+                        {"role": "user", "content": "old prompt"},
+                        {"role": "assistant", "content": "old answer", "reasoning_content": "old hidden reasoning"},
+                    ],
+                    ensure_ascii=False,
+                )
+            )
+            metadata: dict[str, object] = {}
+
+            with mock.patch("deepseek_planner_client.requests.post", return_value=FakeResponse()):
+                result = deepseek_planner_client.generate_text_response(
+                    prompt="new prompt",
+                    system_prompt="fresh system",
+                    workspace_root=workspace_root,
+                    config=config,
+                    session_id=session_id,
+                    response_metadata=metadata,
+                )
+
+            self.assertEqual(result, "new answer")
+
+            persisted_history = json.loads(history_path.read_text())
+            self.assertEqual(persisted_history[0]["content"], "fresh system")
+            self.assertEqual(persisted_history[-1]["content"], "new answer")
+            self.assertTrue(all("reasoning_content" not in item for item in persisted_history))
+
+            trace_path = workspace_root / ".deepseek_planner_trace_session-123.jsonl"
+            trace_entries = [json.loads(line) for line in trace_path.read_text().splitlines() if line.strip()]
+            self.assertEqual(len(trace_entries), 1)
+            self.assertEqual(trace_entries[0]["assistant_reasoning_content"], "new reasoning")
+
+            self.assertEqual(metadata["system_prompt_chars_sent"], len("fresh system"))
+            self.assertEqual(metadata["history_message_count_sent"], 2)
+            self.assertEqual(metadata["history_message_chars_sent"], len("old prompt") + len("old answer"))
+            self.assertEqual(
+                metadata["total_message_chars_sent"],
+                len("fresh system") + len("old prompt") + len("old answer") + len("new prompt"),
+            )
+            self.assertEqual(
+                metadata["estimated_prompt_tokens_sent"],
+                (metadata["total_message_chars_sent"] + 3) // 4,
+            )
+
     def test_generate_json_object_raises_session_error_on_invalid_resume(self):
         class FakePopen:
             def __init__(self, *args, **kwargs):
@@ -5171,8 +5259,77 @@ class ResearchRuntimeOptimizationsTest(unittest.TestCase):
         self.assertEqual(result, "retry_ok")
         self.assertEqual(call_count, 2)
         telemetry_mock.assert_called_once()
+        telemetry_payload = telemetry_mock.call_args.args[0]
+        self.assertEqual(telemetry_payload["system_prompt_chars_sent"], len("test system"))
+        self.assertEqual(telemetry_payload["history_message_chars_sent"], 0)
+        self.assertEqual(telemetry_payload["history_message_count_sent"], 0)
+        self.assertEqual(
+            telemetry_payload["total_message_chars_sent"],
+            len("test prompt") + len("test system"),
+        )
+        self.assertEqual(
+            telemetry_payload["estimated_prompt_tokens_sent"],
+            research_script._estimate_prompt_tokens("test prompt", "test system"),
+        )
         store_session_mock.assert_not_called()
         self.assertTrue(any("短重试" in str(call.args[0]) for call in log_mock.call_args_list))
+
+    def test_run_model_text_request_telemetry_uses_deepseek_sent_context_metadata(self):
+        def fake_generate_deepseek(**kwargs):
+            metadata = kwargs["response_metadata"]
+            metadata.update(
+                {
+                    "session_id": "deepseek-session",
+                    "resumed": True,
+                    "system_prompt_chars_sent": 300,
+                    "history_message_chars_sent": 140,
+                    "history_message_count_sent": 4,
+                    "total_message_chars_sent": 470,
+                    "estimated_prompt_tokens_sent": 118,
+                }
+            )
+            return "deepseek_ok"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_root = Path(temp_dir)
+            with mock.patch.object(research_script, "_planner_uses_deepseek", return_value=True):
+                with mock.patch.object(research_script, "_active_research_session_id", return_value=""):
+                    with mock.patch.object(
+                        research_script,
+                        "_embed_workspace_agents_for_api",
+                        return_value="resolved system prompt",
+                    ):
+                        with mock.patch.object(
+                            research_script,
+                            "generate_deepseek_planner_text_response",
+                            side_effect=fake_generate_deepseek,
+                        ) as deepseek_mock:
+                            with mock.patch.object(research_script, "_append_model_call_telemetry") as telemetry_mock:
+                                with mock.patch.object(research_script, "_store_research_session_metadata") as store_session_mock:
+                                    result = research_script._run_model_text_request(
+                                        prompt="test prompt",
+                                        system_prompt="raw system prompt",
+                                        phase="planner",
+                                        workspace_root=workspace_root,
+                                        session_kind="planner",
+                                        use_persistent_session=True,
+                                    )
+
+        self.assertEqual(result, "deepseek_ok")
+        self.assertEqual(deepseek_mock.call_args.kwargs["system_prompt"], "resolved system prompt")
+        telemetry_mock.assert_called_once()
+        telemetry_payload = telemetry_mock.call_args.args[0]
+        self.assertEqual(telemetry_payload["prompt_chars"], len("test prompt"))
+        self.assertEqual(telemetry_payload["system_prompt_chars"], len("raw system prompt"))
+        self.assertEqual(telemetry_payload["system_prompt_chars_sent"], 300)
+        self.assertEqual(telemetry_payload["history_message_chars_sent"], 140)
+        self.assertEqual(telemetry_payload["history_message_count_sent"], 4)
+        self.assertEqual(telemetry_payload["total_message_chars_sent"], 470)
+        self.assertEqual(telemetry_payload["estimated_prompt_tokens_sent"], 118)
+        store_session_mock.assert_called_once_with(
+            session_id="deepseek-session",
+            workspace_root=workspace_root,
+        )
 
     def test_candidate_with_repair_uses_single_candidate_smoke_pass(self):
         candidate = StrategyCandidate(

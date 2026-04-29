@@ -209,7 +209,7 @@
 - 方向风险/过热簇
 - 最近轮次元信息
 
-不再把全量表格反复塞进 planner 主上下文。
+不再把全量表格反复塞进 planner 主上下文。当前做法是：保持原来的 prompt 架构与角色边界，只压缩重复规则文本、人工卡摘要和前台记忆摘要。
 
 当前 planner 的顺序约束：
 
@@ -256,10 +256,18 @@
 - `planner` 在同一个 stage 内复用同一个 session
 - `reviewer / edit_worker / repair_worker / summary_worker` 都不复用 planner session
 - session scope 只绑定当前 active reference 的 `code_hash + stage`
+- 同一 stage 内，即使出现 reviewer 打回、`behavioral_noop`、同轮重生或方向切换，也不自动重置 planner session
 - 一旦手工重开 stage，或 champion 刷新，planner session 就会重置
+- DeepSeek planner 本地 session 默认只保留最近 `12` 条非 system 历史消息
+- `reasoning_content` 只保留在 `.deepseek_planner_trace_*.jsonl` 里做观测，不再回灌到 session history
 - `wiki/reviewer_summary_card.md` 只保留当前轮最后一次 reviewer 判定；如果同轮先 `REVISE` 后重写再 `PASS`，最终卡记录最后一次 `PASS`
 - 如果本轮没有刷新 champion，主进程会写回 `journal / wiki / reviewer_summary_card / direction_board`，然后沿用当前 stage / planner session 进入下一轮
 - 当前同一轮允许出现 `planner -> reviewer -> planner 重写 -> reviewer` 的短链，但只有 planner 复用持久 session
+
+当前 telemetry 也分成两层口径：
+
+- 原始 prompt：`prompt_chars / system_prompt_chars / estimated_prompt_tokens`
+- 真实发送上下文：`system_prompt_chars_sent / history_message_chars_sent / history_message_count_sent / total_message_chars_sent / estimated_prompt_tokens_sent`
 
 ## 复杂度与手工瘦身
 
