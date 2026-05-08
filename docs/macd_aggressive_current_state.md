@@ -42,7 +42,7 @@
 | train+val多/空捕获 | 0.14 / 0.22 |
 | Sharpe(train / val / train+val) | 0.48 / 0.22 / 0.37 |
 | test收益 / Sharpe | - / - |
-| train/val连续交易 | 28 / 26 |
+| train/val非加仓开仓 | 28 / 26 |
 | train/val交易短缺率 / 低频惩罚 | 0.8444 / 0.7833 / 0.3128 |
 
 当前轮次留档除了 `journal` 与 `memory/raw` 外，还额外维护一条最小可复现链路：
@@ -55,7 +55,7 @@
 
 - 上表按当前 [state/research_macd_aggressive_v2_best.json](../state/research_macd_aggressive_v2_best.json) 的最近保存态整理；切到 `v17` 后，保存态分数会由研究器启动流程按新公式重算。
 - 仓库默认评分已经切到 `trend_capture_v17_activity_adjusted_sharpe`；研究器重启后会按新口径重算 active reference。
-- 新口径下 `drawdown_risk_score` 仍是固定窗口 `Ulcer` 风格风险分；`promotion_score` 在分段回撤惩罚之外，又额外接了一层轻量鲁棒性软惩罚，当前更明确压 `val` 最差块、尾块和 `train/val` Sharpe gap。Sharpe 主分不再取弱侧，也不封顶，而是按 train/val 各 50% 后用月交易频率折扣。
+- 新口径下 `drawdown_risk_score` 仍是固定窗口 `Ulcer` 风格风险分；`promotion_score` 在分段回撤惩罚之外，又额外接了一层轻量鲁棒性软惩罚，当前更明确压 `val` 最差块、尾块和 `train/val` Sharpe gap。Sharpe 主分不再取弱侧，也不封顶，而是按 train/val 各 50% 后用月非加仓开仓频率折扣。
 - 当前人工方向已经从“继续补多头收益”切到“优先 `train/val` 稳定性、中频覆盖和弱侧修复”；长期软引导在 [config/research_v2_operator_focus.md](../config/research_v2_operator_focus.md)，人工观察卡仍在 [config/research_v2_champion_review.md](../config/research_v2_champion_review.md) 中按 hash 绑定，仅命中当前 hash 时生效。
 - `state/research_macd_aggressive_v2_best.json` 里如果还带旧字段，例如 `working_base`，那只是历史兼容读取入口；新状态写回只使用单一 active reference 语义。
 - 本次重启前已先把当前人工压缩版源码同步到 `backups/strategy_macd_aggressive_v2_best.py`，避免研究器启动时把旧保存态覆盖回主策略文件。
@@ -97,7 +97,7 @@
 - `timed_return_score`
   `train/val` 按日收益路径年化分按 `5:5` 平均后的补充分
 - `activity_adjusted_sharpe_score`
-  `train` 与 `val` 的 Sharpe 各 50% 计入，先除以 `2.0` 保持量级，不封顶；再按各自月交易频率折扣。`10-15` 笔/月较健康，`5` 笔/月以下基本不计 Sharpe。
+  `train` 与 `val` 的 Sharpe 各 50% 计入，先除以 `2.0` 保持量级，不封顶；再按各自月非加仓开仓频率折扣。`10-15` 笔/月较健康，`5` 笔/月以下基本不计 Sharpe。
 - `drawdown_risk_score`
   `train/val` 固定窗口回撤风险分按 `5:5` 平均后的原始风险指标；窗口内用 `Ulcer` 风格回撤深度与持续时间衡量利润回吐压力
 - `drawdown_penalty_score`
@@ -119,15 +119,15 @@
 
 `timed_return_score = 0.50 * train_timed_return_score + 0.50 * val_timed_return_score`
 
-`train_activity_discount = interpolate(train_monthly_closed_trades, [(0,0.00),(5,0.05),(7,0.28),(9,0.62),(10,0.78),(12,0.90),(15,1.00)])`
+`train_activity_discount = interpolate(train_monthly_entries, [(0,0.00),(5,0.05),(7,0.28),(9,0.62),(10,0.78),(12,0.90),(15,1.00)])`
 
-`val_activity_discount = interpolate(validation_monthly_closed_trades, [(0,0.00),(5,0.05),(7,0.28),(9,0.62),(10,0.78),(12,0.90),(15,1.00)])`
+`val_activity_discount = interpolate(validation_monthly_entries, [(0,0.00),(5,0.05),(7,0.28),(9,0.62),(10,0.78),(12,0.90),(15,1.00)])`
 
 `activity_adjusted_sharpe_score = 0.50 * (train_sharpe_ratio / 2.0) * train_activity_discount + 0.50 * (val_sharpe_ratio / 2.0) * val_activity_discount`
 
-`train_trade_activity_shortfall = clamp(max(180 - train_closed_trades, 0) / 180, 0.0, 1.0)`
+`train_trade_activity_shortfall = clamp(max(180 - train_entry_trades, 0) / 180, 0.0, 1.0)`
 
-`val_trade_activity_shortfall = clamp(max(120 - validation_closed_trades, 0) / 120, 0.0, 1.0)`
+`val_trade_activity_shortfall = clamp(max(120 - validation_entry_trades, 0) / 120, 0.0, 1.0)`
 
 `trade_count_penalty = 0.20 * (0.50 * train_trade_activity_shortfall + 0.50 * val_trade_activity_shortfall)`
 
@@ -145,7 +145,9 @@
 
 这里特意把 `capture_score` 从“更像追最大段”拉回到“既看大段，也看整体覆盖”；同时把 Sharpe 从弱侧保底改成交易活跃度折扣，避免低频策略靠少量交易拿到完整 Sharpe 分。
 
-`trade_activity_penalty` 不新增回测。`train` 交易数直接复用现有连续期结果：用 `train+val` 连续回测总交易数减去 `val` 连续回测交易数，得到 `train` 两年的连续交易数；`val` 交易数直接复用现有 `val` 连续回测结果。当前实现只在交易数低于下沿时扣分：`train` 下沿是 `180`，`val` 下沿是 `120`。高于这些下沿不加分也不扣分；区间上沿 `270 / 180` 主要用于研究提示和人工读数，不额外参与计算。回测会记录每笔交易的入场时间，并额外惩罚 `train/val` 中超过 `7` 天没有新开仓的长空窗。
+`trade_activity_penalty` 不新增回测。`train` 交易数直接复用现有连续期结果：用 `train+val` 连续回测非加仓开仓数减去 `val` 连续回测非加仓开仓数，得到 `train` 两年的非加仓开仓数；`val` 交易数直接复用现有 `val` 连续回测结果。加仓只改变已有 position 的规模，不计入交易活跃度，也不占用 `max_concurrent_positions`。当前实现只在交易数低于下沿时扣分：`train` 下沿是 `180`，`val` 下沿是 `120`。高于这些下沿不加分也不扣分；区间上沿 `270 / 180` 主要用于研究提示和人工读数，不额外参与计算。回测会记录每笔交易的入场时间，并额外惩罚 `train/val` 中超过 `7` 天没有新开仓的长空窗。
+
+回测执行层允许多空在总仓位上限内并行持有。反向信号不再自动强平已有仓位；只要总独立 position 数低于 `max_concurrent_positions`，已有多仓时触发空信号也可以新开空仓，已有空仓时触发多信号也同理。
 
 `drawdown_risk_score` 直接复用现有 `train/val` 日收益路径，不新增回测。两侧都按固定 `28` 天窗口滚动切分，再对每个窗口计算 `Ulcer` 风格回撤值，最后用 `median + P75` 的加权聚合成风险分。这样 `train` 的滚动窗口路径和 `val` 的整年路径会落到同一时间单位上比较，也不会被一次单日极端点完全主导。
 

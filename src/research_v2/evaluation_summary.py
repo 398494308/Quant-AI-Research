@@ -148,15 +148,20 @@ def summarize_evaluation_impl(
     robustness_penalty_score = robustness_penalty_payload["robustness_penalty_score"]
     validation_long_trades, validation_short_trades = mod._trade_side_counts(validation_source)
     selection_long_trades, selection_short_trades = mod._trade_side_counts(selection_source)
+    validation_long_entries, validation_short_entries = mod._entry_side_counts(validation_source)
+    selection_long_entries, selection_short_entries = mod._entry_side_counts(selection_source)
     validation_closed_trades = int(validation_source.get("trades", validation_long_trades + validation_short_trades))
     selection_closed_trades = int(selection_source.get("trades", selection_long_trades + selection_short_trades))
     train_closed_trades = max(0, selection_closed_trades - validation_closed_trades)
+    validation_entry_trades = validation_long_entries + validation_short_entries
+    selection_entry_trades = selection_long_entries + selection_short_entries
+    train_entry_trades = max(0, selection_entry_trades - validation_entry_trades)
     train_trade_activity_shortfall = mod._trade_activity_shortfall(
-        train_closed_trades,
+        train_entry_trades,
         scoring.trade_activity_train_range_low,
     )
     validation_trade_activity_shortfall = mod._trade_activity_shortfall(
-        validation_closed_trades,
+        validation_entry_trades,
         scoring.trade_activity_validation_range_low,
     )
     trade_activity_shortfall = (
@@ -202,10 +207,10 @@ def summarize_evaluation_impl(
     trade_activity_penalty = trade_count_penalty + trade_idle_penalty
     train_months = mod._period_months_from_timestamps(selection_start_ts, validation_start_ts)
     validation_months = mod._period_months_from_timestamps(validation_start_ts, validation_end_ts)
-    train_monthly_closed_trades = mod._monthly_trade_rate(train_closed_trades, train_months)
-    validation_monthly_closed_trades = mod._monthly_trade_rate(validation_closed_trades, validation_months)
-    train_sharpe_activity_discount = mod._sharpe_activity_discount(train_monthly_closed_trades)
-    validation_sharpe_activity_discount = mod._sharpe_activity_discount(validation_monthly_closed_trades)
+    train_monthly_entries = mod._monthly_trade_rate(train_entry_trades, train_months)
+    validation_monthly_entries = mod._monthly_trade_rate(validation_entry_trades, validation_months)
+    train_sharpe_activity_discount = mod._sharpe_activity_discount(train_monthly_entries)
+    validation_sharpe_activity_discount = mod._sharpe_activity_discount(validation_monthly_entries)
     activity_adjusted_sharpe_score = mod._activity_adjusted_sharpe_score(
         train_sharpe_ratio=eval_sharpe_ratio,
         validation_sharpe_ratio=validation_sharpe_ratio,
@@ -293,10 +298,10 @@ def summarize_evaluation_impl(
             f"{timed_return_score:.2f} / {drawdown_risk_score:.2f} / {drawdown_penalty_score:.2f} / {promotion_score:.2f}"
         ),
         (
-            "交易活跃度区间(train/val) / 连续交易 / 短缺率 / 惩罚: "
+            "交易活跃度区间(train/val) / 非加仓开仓 / 短缺率 / 惩罚: "
             f"{scoring.trade_activity_train_range_low}-{scoring.trade_activity_train_range_high} / "
             f"{scoring.trade_activity_validation_range_low}-{scoring.trade_activity_validation_range_high} | "
-            f"{train_closed_trades} / {validation_closed_trades} | "
+            f"{train_entry_trades} / {validation_entry_trades} | "
             f"{train_trade_activity_shortfall:.2f} / {validation_trade_activity_shortfall:.2f} / "
             f"{trade_count_penalty:.2f}"
         ),
@@ -308,8 +313,8 @@ def summarize_evaluation_impl(
             f"{trade_idle_penalty:.2f}"
         ),
         (
-            "train/val月交易频率 / Sharpe活动折扣 / 活动调整Sharpe分: "
-            f"{train_monthly_closed_trades:.2f} / {validation_monthly_closed_trades:.2f} | "
+            "train/val月非加仓开仓频率 / Sharpe活动折扣 / 活动调整Sharpe分: "
+            f"{train_monthly_entries:.2f} / {validation_monthly_entries:.2f} | "
             f"{train_sharpe_activity_discount:.2f} / {validation_sharpe_activity_discount:.2f} | "
             f"{activity_adjusted_sharpe_score:.2f}"
         ),
@@ -339,6 +344,7 @@ def summarize_evaluation_impl(
         f"val趋势段 / 命中率: {validation_trend_report.segment_count} / {validation_trend_report.hit_rate:.0%}",
         f"val连续综合分 / 收益分: {raw_validation_score:.2f} / {validation_trend_report.return_score:.2f}",
         f"val多 / 空平仓数: {validation_long_trades} / {validation_short_trades}",
+        f"val多 / 空非加仓开仓数: {validation_long_entries} / {validation_short_entries}",
         mod._format_funnel_line("train滚动漏斗(long)", eval_funnel_counts["long"]),
         mod._format_funnel_line("train滚动漏斗(short)", eval_funnel_counts["short"]),
         mod._format_funnel_line("val连续漏斗(long)", validation_funnel_counts["long"]),
@@ -390,7 +396,12 @@ def summarize_evaluation_impl(
         f"train 4h唯一路径点 / 重叠点 / 被覆盖点: {eval_path.unique_points} / {eval_path.overlap_points} / {eval_path.dropped_points}",
         f"funding覆盖(train均值 / val / train+val): {eval_funding_coverage:.0%} / {validation_funding_coverage:.0%} / {selection_funding_coverage:.0%}",
         f"最大回撤 / 手续费拖累: {worst_drawdown:.2f}% / {avg_fee_drag:.2f}%",
-        f"train+val连续交易 / train连续交易 / val连续交易 / 爆仓: {selection_closed_trades} / {train_closed_trades} / {validation_closed_trades} / {liquidations}",
+        (
+            "train+val非加仓开仓 / train非加仓开仓 / val非加仓开仓 / "
+            f"平仓(train+val/train/val) / 爆仓: {selection_entry_trades} / "
+            f"{train_entry_trades} / {validation_entry_trades} / "
+            f"{selection_closed_trades}/{train_closed_trades}/{validation_closed_trades} / {liquidations}"
+        ),
         f"质量分(train连续趋势分) / 晋级分: {quality_score:.2f} / {promotion_score:.2f}",
         f"Gate: {gate_reason}",
         "",
@@ -447,9 +458,9 @@ def summarize_evaluation_impl(
         (
             f"- 当前评分组成: train/val 连续趋势抓取混合分={train_capture_score:.2f}/{validation_capture_score:.2f}，"
             f"train/val 按日收益年化分={train_timed_return_score:.2f}/{validation_timed_return_score:.2f}，"
-            f"train/val 连续交易={train_closed_trades}/{validation_closed_trades}，"
+            f"train/val 非加仓开仓={train_entry_trades}/{validation_entry_trades}，"
             f"短缺率={train_trade_activity_shortfall:.2f}/{validation_trade_activity_shortfall:.2f}，"
-            f"月频={train_monthly_closed_trades:.2f}/{validation_monthly_closed_trades:.2f}，"
+            f"月频={train_monthly_entries:.2f}/{validation_monthly_entries:.2f}，"
             f"Sharpe活动折扣={train_sharpe_activity_discount:.2f}/{validation_sharpe_activity_discount:.2f}，"
             f"最长无新开仓={train_max_trade_idle_days:.1f}/{validation_max_trade_idle_days:.1f}天，"
             f"频率惩罚={trade_activity_penalty:.2f}，"
@@ -597,6 +608,13 @@ def summarize_evaluation_impl(
         "validation_long_closed_trades": float(validation_long_trades),
         "validation_short_closed_trades": float(validation_short_trades),
         "train_closed_trades": float(train_closed_trades),
+        "validation_long_entries": float(validation_long_entries),
+        "validation_short_entries": float(validation_short_entries),
+        "selection_long_entries": float(selection_long_entries),
+        "selection_short_entries": float(selection_short_entries),
+        "train_entry_trades": float(train_entry_trades),
+        "validation_entry_trades": float(validation_entry_trades),
+        "selection_entry_trades": float(selection_entry_trades),
         "train_trade_activity_shortfall": train_trade_activity_shortfall,
         "validation_trade_activity_shortfall": validation_trade_activity_shortfall,
         "trade_activity_shortfall": trade_activity_shortfall,
@@ -622,8 +640,8 @@ def summarize_evaluation_impl(
         "validation_sharpe_ratio": validation_sharpe_ratio,
         "selection_sharpe_ratio": selection_sharpe_ratio,
         "train_val_sharpe_gap": robustness_penalty_payload["train_val_sharpe_gap"],
-        "train_monthly_closed_trades": train_monthly_closed_trades,
-        "validation_monthly_closed_trades": validation_monthly_closed_trades,
+        "train_monthly_entries": train_monthly_entries,
+        "validation_monthly_entries": validation_monthly_entries,
         "train_sharpe_activity_discount": train_sharpe_activity_discount,
         "validation_sharpe_activity_discount": validation_sharpe_activity_discount,
         "activity_adjusted_sharpe_score": activity_adjusted_sharpe_score,

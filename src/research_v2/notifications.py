@@ -246,7 +246,7 @@ def build_discord_summary_message(
     normalized_test_metrics = normalize_test_metrics_payload(test_metrics)
     selection_return_pct = float(metrics.get("selection_total_return_pct", metrics.get("full_period_return_pct", 0.0)))
     validation_return_pct = float(metrics.get("validation_total_return_pct", metrics.get("validation_avg_return", 0.0)))
-    selection_trade_count = int(metrics.get("selection_closed_trades", metrics.get("total_trades", 0.0)))
+    selection_entry_count = int(metrics.get("selection_entry_trades", metrics.get("selection_closed_trades", 0.0)))
     window_text = f"train滚动 {eval_window_count} 个"
     if validation_window_count > 0:
         window_text += f" / val连续 {validation_window_count} 个"
@@ -268,7 +268,7 @@ def build_discord_summary_message(
             if normalized_test_metrics
             else f"{metrics.get('eval_sharpe_ratio', 0.0):.2f} / {metrics.get('validation_sharpe_ratio', 0.0):.2f} / -"
         ),
-        ("train+val交易数量", str(selection_trade_count)),
+        ("train+val非加仓开仓", str(selection_entry_count)),
         (
             "val多/空捕获",
             f"{metrics.get('validation_bull_capture_score', 0.0):.2f} / "

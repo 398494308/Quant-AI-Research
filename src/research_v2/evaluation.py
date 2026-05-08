@@ -489,10 +489,10 @@ def _period_months_from_timestamps(start_timestamp: int | None, end_timestamp: i
     return (end_timestamp - start_timestamp) / DAY_MS / MONTH_DAYS
 
 
-def _monthly_trade_rate(closed_trades: int, months: float) -> float:
+def _monthly_trade_rate(trade_count: int, months: float) -> float:
     if months <= 0.0:
         return 0.0
-    return max(0, int(closed_trades)) / months
+    return max(0, int(trade_count)) / months
 
 
 def _sharpe_activity_discount(monthly_trades: float) -> float:
@@ -1499,6 +1499,17 @@ def _trade_side_counts(result: dict[str, Any] | None) -> tuple[int, int]:
         elif signal.startswith("short_"):
             short_count += 1
     return long_count, short_count
+
+
+def _entry_side_counts(result: dict[str, Any] | None) -> tuple[int, int]:
+    payload = result or {}
+    filled_payload = payload.get("filled_side_entries", {})
+    if isinstance(filled_payload, dict):
+        return (
+            max(0, int(filled_payload.get("long", 0) or 0)),
+            max(0, int(filled_payload.get("short", 0) or 0)),
+        )
+    return _trade_side_counts(payload)
 
 
 def _validation_weakest_axis(

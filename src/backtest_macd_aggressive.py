@@ -1394,7 +1394,6 @@ def backtest_macd_aggressive(
     position_fraction = float(exit_p["position_fraction"])
     position_size_min = float(exit_p["position_size_min"])
     position_size_max = float(exit_p["position_size_max"])
-    max_concurrent_positions = int(exit_p["max_concurrent_positions"])
     positions = []
     trades = []
     settlement_legs = []
@@ -1691,24 +1690,6 @@ def backtest_macd_aggressive(
             positions,
             market_state,
         )
-        if signal and positions and _signal_side(signal) != _position_side(positions[0]):
-            for position in positions:
-                rev_side = _position_side(position)
-                rev_fill = _fill_with_slippage(market_fill_price, rev_side, False, slippage_pct)
-                trade, _gross_pnl_amount, cash_release, exit_fee = _settle_full_position(
-                    position,
-                    rev_fill,
-                    "反向信号",
-                    leverage,
-                    exit_p,
-                    exit_timestamp=bar_close_ts,
-                )
-                capital += cash_release
-                total_trading_fees += exit_fee
-                record_settlement_leg(trade)
-                _apply_trade_leg_rollup(position, trade)
-                record_trade(_build_closed_trade(position))
-            positions = []
         target_position_size = capital * position_fraction * risk_profile["position_fraction_scale"]
         max_affordable_size = capital / (1.0 + leverage * taker_fee_rate) if taker_fee_rate > 0 else capital
         target_position_size = min(position_size_max, target_position_size, max_affordable_size)
@@ -1718,7 +1699,6 @@ def backtest_macd_aggressive(
             and capital >= position_size_min
             and target_position_size >= position_size_min
             and market_state["atr"] > 0
-            and (not positions or _signal_side(signal) == _position_side(positions[0]))
         ):
             stop_mult = float(_exit_value(exit_p, {"entry_signal": signal}, "stop_atr_mult"))
             signal_side = _signal_side(signal)

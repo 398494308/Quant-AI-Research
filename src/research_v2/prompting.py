@@ -464,7 +464,8 @@ def build_strategy_research_prompt(
 - 围绕一个可证伪假设先写 round brief，交给后续 edit worker 落码。
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
 - 当前评分口径是 `{score_regime}`；候选必须先过 `gate`，且 `promotion_score` 严格高于当前 active reference，才有资格刷新 champion；当前不再要求额外晋级边际。
-- `promotion_score` 现在以 `capture_score / timed_return_score / activity_adjusted_sharpe_score = 0.45 / 0.30 / 0.25` 为主体；再额外减去 `trade_activity_penalty`。Sharpe 不封顶，train/val 各 50%，但会按月交易频率折扣：10-15 笔/月较健康，8-9 笔/月偏少，7 笔/月以下明显负面，5 笔/月以下基本不计 Sharpe。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，空窗惩罚权重是 `{trade_idle_penalty_weight:.2f}`。`timed_return_score` 仍是按日收益年化补分，再减去分段回撤惩罚和轻量鲁棒性软惩罚。
+- `promotion_score` 现在以 `capture_score / timed_return_score / activity_adjusted_sharpe_score = 0.45 / 0.30 / 0.25` 为主体；再额外减去 `trade_activity_penalty`。Sharpe 不封顶，train/val 各 50%，但会按月非加仓开仓频率折扣：10-15 笔/月较健康，8-9 笔/月偏少，7 笔/月以下明显负面，5 笔/月以下基本不计 Sharpe。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，空窗惩罚权重是 `{trade_idle_penalty_weight:.2f}`。`timed_return_score` 仍是按日收益年化补分，再减去分段回撤惩罚和轻量鲁棒性软惩罚。
+- 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓不占这个数量。
 - `capture_score` 不再只偏向少数最大趋势段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
 - 鲁棒性重点看 `train/val` 抓取落差、`train/val` Sharpe 平衡、`val` 分块稳定性，以及退出参数邻域在 `val` 分段上的平台形态。
 - `train` 滚动窗口均值/中位数只做诊断；严重过拟合集中度仍保留为 gate；二者都不直接进入 `promotion_score` 主公式。

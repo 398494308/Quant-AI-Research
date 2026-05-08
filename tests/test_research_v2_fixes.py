@@ -39,6 +39,7 @@ from research_v2.evaluation import (
     _annualized_return_score,
     _collect_daily_path,
     _collect_trend_path,
+    _entry_side_counts,
     _max_trade_idle_days_from_timestamps,
     _period_months_from_timestamps,
     _robustness_penalty_payload,
@@ -359,6 +360,126 @@ class BacktestFixesTest(unittest.TestCase):
         allowed = backtest._should_pyramid(position, market_state, close_pnl_pct=18.0, exit_p=exit_params)
 
         self.assertTrue(allowed)
+
+    def test_backtest_opens_opposite_side_without_reverse_exit(self):
+        interval_ms = 15 * 60 * 1000
+        bars = [
+            {
+                "timestamp": idx * interval_ms,
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 1000.0,
+            }
+            for idx in range(3)
+        ]
+        intraday_state = [
+            {
+                "trade_count": 100.0,
+                "trade_count_ratio": 1.0,
+                "taker_buy_volume": 500.0,
+                "taker_sell_volume": 500.0,
+                "taker_buy_ratio": 0.5,
+                "taker_sell_ratio": 0.5,
+                "flow_imbalance": 0.0,
+                "ema_fast": 100.0,
+                "ema_slow": 99.0,
+                "adx": 30.0,
+                "atr": 10.0,
+                "atr_ratio": 0.01,
+                "rsi": 50.0,
+                "chop": 40.0,
+                "macd_line": 1.0,
+                "signal_line": 0.0,
+                "histogram": 1.0,
+            }
+            for _ in bars
+        ]
+        higher_state = [
+            {
+                "close": 100.0,
+                "ema_fast": 100.0,
+                "ema_slow": 99.0,
+                "macd_line": 1.0,
+                "signal_line": 0.0,
+                "adx": 30.0,
+                "chop": 40.0,
+                "trend_spread_pct": 0.01,
+                "ema_slow_slope_pct": 0.01,
+            }
+            for _ in bars
+        ]
+        prepared_context = {
+            "intraday_all": bars,
+            "hourly_all": bars,
+            "intraday_timestamps": [bar["timestamp"] for bar in bars],
+            "intraday_interval_ms": interval_ms,
+            "execution_interval_ms": 60_000,
+            "execution_all": [],
+            "execution_timestamps": [],
+            "funding_all": [],
+            "funding_timestamps": [],
+            "hourly_state": higher_state,
+            "four_hour_state": higher_state,
+            "intraday_state": intraday_state,
+            "hourly_close_timestamps": [bar["timestamp"] + interval_ms for bar in bars],
+            "four_hour_close_timestamps": [bar["timestamp"] + interval_ms for bar in bars],
+            "sentiment_state": [],
+            "sentiment_timestamps": [],
+        }
+        runtime = type(
+            "Runtime",
+            (),
+            {
+                "intraday_data": bars,
+                "intraday_start_idx": 0,
+                "intraday_end_idx": len(bars),
+                "start_ts": bars[0]["timestamp"],
+                "end_ts": bars[-1]["timestamp"] + interval_ms,
+                "execution_rows": [],
+                "execution_timestamps": [],
+                "funding_rows": [],
+                "funding_timestamps": [],
+                "funding_coverage": {"mode": "disabled", "ratio": 0.0, "gap_count": 0},
+                "four_hour_window_state": [],
+                "four_hour_window_close_timestamps": [],
+            },
+        )()
+
+        def alternating_strategy(_data, idx, _positions, _market_state):
+            return {0: "long_breakout", 1: "short_breakdown"}.get(idx)
+
+        exit_params = {
+            "max_concurrent_positions": 4,
+            "position_fraction": 0.10,
+            "trading_fee_enabled": 0,
+            "funding_fee_enabled": 0,
+            "regime_exit_enabled": 0,
+            "tp1_pnl_pct": 999.0,
+            "trailing_activation_pct": 999.0,
+            "break_even_activation_pct": 999.0,
+            "max_hold_bars": 100,
+            "pyramid_enabled": 0,
+        }
+
+        with mock.patch.object(backtest, "prepare_backtest_window_runtime", return_value=runtime):
+            result = backtest.backtest_macd_aggressive(
+                alternating_strategy,
+                intraday_file=None,
+                hourly_file=None,
+                start_date="2026-01-01",
+                end_date="2026-01-02",
+                strategy_params={},
+                exit_params=exit_params,
+                include_diagnostics=True,
+                prepared_context=prepared_context,
+            )
+
+        self.assertEqual(result["filled_side_entries"], {"long": 1, "short": 1})
+        self.assertEqual(result["reverse_exit_count"], 0)
+        self.assertEqual(result["trade_reason_stats"].get("反向信号", 0), 0)
+        self.assertEqual(result["trades"], 2)
 
 
 class EvaluationFixesTest(unittest.TestCase):
@@ -771,6 +892,97 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(_trade_activity_shortfall(270, 270), 0.0)
         self.assertAlmostEqual(_trade_activity_shortfall(180, 270), 90.0 / 270.0)
         self.assertAlmostEqual(_trade_activity_shortfall(0, 180), 1.0)
+
+    def test_entry_side_counts_prefers_filled_entries_and_ignores_pyramids(self):
+        result = {
+            "filled_side_entries": {"long": 12, "short": 3},
+            "pyramid_add_count": 20,
+            "trades_detail": [
+                {"entry_signal": "short_breakdown"},
+                {"entry_signal": "short_breakdown"},
+            ],
+        }
+
+        self.assertEqual(_entry_side_counts(result), (12, 3))
+
+    def test_activity_scoring_uses_non_pyramid_entries(self):
+        month_ms = int(30.4375 * 24 * 60 * 60 * 1000)
+        eval_window = type(
+            "Window",
+            (),
+            {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-31"},
+        )()
+        validation_window = type(
+            "Window",
+            (),
+            {"group": "validation", "label": "val1", "start_date": "2026-02-01", "end_date": "2026-03-01"},
+        )()
+        results = [
+            {
+                "window": eval_window,
+                "result": {
+                    "return": 1.0,
+                    "max_drawdown": 1.0,
+                    "daily_returns": [0.01, 0.01],
+                    "trades": 0,
+                    "fee_drag_pct": 0.0,
+                    "liquidations": 0,
+                    "filled_side_entries": {"long": 30, "short": 0},
+                },
+            },
+            {
+                "window": validation_window,
+                "result": {
+                    "return": 1.0,
+                    "max_drawdown": 1.0,
+                    "daily_returns": [0.01, 0.01],
+                    "trades": 0,
+                    "fee_drag_pct": 0.0,
+                    "liquidations": 0,
+                    "filled_side_entries": {"long": 15, "short": 0},
+                },
+            },
+        ]
+        validation_continuous_result = {
+            "return": 1.0,
+            "max_drawdown": 1.0,
+            "trades": 0,
+            "fee_drag_pct": 0.0,
+            "liquidations": 0,
+            "filled_side_entries": {"long": 15, "short": 0},
+            "period_start_timestamp": month_ms,
+            "period_end_timestamp": month_ms * 2,
+        }
+        full_period_result = {
+            "return": 2.0,
+            "max_drawdown": 1.0,
+            "trades": 0,
+            "fee_drag_pct": 0.0,
+            "liquidations": 0,
+            "filled_side_entries": {"long": 45, "short": 0},
+            "period_start_timestamp": 0,
+            "period_end_timestamp": month_ms * 2,
+        }
+
+        report = summarize_evaluation(
+            results,
+            make_gate_config(),
+            validation_continuous_result=validation_continuous_result,
+            full_period_result=full_period_result,
+            scoring=ScoringConfig(
+                trade_activity_train_range_low=30,
+                trade_activity_validation_range_low=15,
+            ),
+        )
+
+        self.assertEqual(report.metrics["train_entry_trades"], 30.0)
+        self.assertEqual(report.metrics["validation_entry_trades"], 15.0)
+        self.assertEqual(report.metrics["selection_entry_trades"], 45.0)
+        self.assertAlmostEqual(report.metrics["train_trade_activity_shortfall"], 0.0)
+        self.assertAlmostEqual(report.metrics["validation_trade_activity_shortfall"], 0.0)
+        self.assertAlmostEqual(report.metrics["train_monthly_entries"], 30.0)
+        self.assertAlmostEqual(report.metrics["validation_monthly_entries"], 15.0)
+        self.assertNotIn("train_monthly_closed_trades", report.metrics)
 
     def test_sharpe_activity_discount_uses_monthly_trade_anchors(self):
         self.assertAlmostEqual(_sharpe_activity_discount(4.0), 0.04)
@@ -6001,7 +6213,7 @@ class DiscordSummaryFormattingTest(unittest.TestCase):
         self.assertIn("val期间收益", message)
         self.assertIn("Sharpe(train / val / test)", message)
         self.assertIn("1.11 / 0.56 / -", message)
-        self.assertIn("train+val交易数量", message)
+        self.assertIn("train+val非加仓开仓", message)
         self.assertIn("val多/空捕获", message)
         self.assertIn("train+val期间回撤/手续费拖累", message)
         self.assertIn("test 仅新 champion 时运行", message)
