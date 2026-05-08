@@ -72,7 +72,6 @@ def load_round_artifact_metadata(round_dir: Path) -> dict[str, Any]:
     payload["test_metrics"] = test_metrics
     payload.pop("shadow_test_metrics", None)
     payload["test_evaluation"] = _copy_jsonable_mapping(payload.get("test_evaluation"))
-    payload["plateau_probe"] = _copy_jsonable_mapping(payload.get("plateau_probe"))
     return payload
 
 
@@ -88,7 +87,6 @@ def write_round_artifact_metadata(round_dir: Path, metadata: Mapping[str, Any]) 
     )
     payload.pop("shadow_test_metrics", None)
     payload["test_evaluation"] = _copy_jsonable_mapping(payload.get("test_evaluation"))
-    payload["plateau_probe"] = _copy_jsonable_mapping(payload.get("plateau_probe"))
     temp_path = metadata_path.with_suffix(".json.tmp")
     temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     temp_path.replace(metadata_path)
@@ -294,7 +292,6 @@ def persist_round_artifact(
         "metrics": metrics_payload,
         "test_metrics": normalize_test_metrics_payload(test_metrics),
         "test_evaluation": _copy_jsonable_mapping(test_evaluation),
-        "plateau_probe": _copy_jsonable_mapping(entry.get("plateau_probe")),
         "evaluation_context": {
             "windows": _copy_jsonable_mapping(windows),
             "gates": _copy_jsonable_mapping(gates),

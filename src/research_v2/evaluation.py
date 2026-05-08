@@ -916,190 +916,143 @@ def _promotion_drawdown_penalty(drawdown_risk_score: float, scoring: ScoringConf
     return base_penalty + excess_penalty
 
 
-def _upper_band_penalty(
+def _finite_float_values(values: list[float] | tuple[float, ...]) -> list[float]:
+    clean: list[float] = []
+    for value in values:
+        candidate = float(value)
+        if math.isfinite(candidate):
+            clean.append(candidate)
+    return clean
+
+
+def _soft_threshold_penalty(
     value: float,
     *,
-    warn_threshold: float,
-    fail_threshold: float,
-    warn_penalty: float,
-    fail_penalty: float,
+    warn: float,
+    fail: float,
+    extreme: float,
+    max_penalty: float,
 ) -> float:
     candidate = max(0.0, float(value))
-    if candidate <= float(warn_threshold):
+    max_score = max(0.0, float(max_penalty))
+    warn_threshold = max(0.0, float(warn))
+    fail_threshold = max(warn_threshold, float(fail))
+    extreme_threshold = max(fail_threshold, float(extreme))
+    if max_score <= 0.0 or candidate <= warn_threshold:
         return 0.0
-    if candidate <= float(fail_threshold):
-        return max(0.0, float(warn_penalty))
-    return max(0.0, float(fail_penalty))
+    if candidate <= fail_threshold and fail_threshold > warn_threshold:
+        progress = (candidate - warn_threshold) / (fail_threshold - warn_threshold)
+        return max_score * 0.25 * _clamp(progress, 0.0, 1.0)
+    if extreme_threshold > fail_threshold:
+        progress = (candidate - fail_threshold) / (extreme_threshold - fail_threshold)
+        return max_score * (0.25 + 0.75 * _clamp(progress, 0.0, 1.0) ** 2)
+    return max_score
 
 
-def _lower_band_penalty(
-    value: float,
-    *,
-    warn_threshold: float,
-    fail_threshold: float,
-    warn_penalty: float,
-    fail_penalty: float,
-) -> float:
-    candidate = float(value)
-    if candidate >= float(warn_threshold):
-        return 0.0
-    if candidate >= float(fail_threshold):
-        return max(0.0, float(warn_penalty))
-    return max(0.0, float(fail_penalty))
-
-
-def _plateau_penalty_payload(
-    plateau_probe: Mapping[str, Any] | None,
-    scoring: ScoringConfig,
-) -> dict[str, float]:
-    payload = dict(plateau_probe or {}) if isinstance(plateau_probe, Mapping) else {}
-    enabled = bool(payload.get("enabled"))
-    if not enabled:
-        return {
-            "enabled": 0.0,
-            "current_value": 0.0,
-            "best_value": 0.0,
-            "center_period_score": 0.0,
-            "best_period_score": 0.0,
-            "center_gap": 0.0,
-            "score_span": 0.0,
-            "drawdown_span": 0.0,
-            "current_is_best": 0.0,
-            "penalty_score": 0.0,
-        }
-
-    center_gap = max(0.0, float(payload.get("center_gap", 0.0) or 0.0))
-    score_span = max(0.0, float(payload.get("score_span", 0.0) or 0.0))
-    drawdown_span = max(0.0, float(payload.get("drawdown_span", 0.0) or 0.0))
-    current_is_best = bool(payload.get("current_is_best"))
-
-    penalty_score = _upper_band_penalty(
-        center_gap,
-        warn_threshold=scoring.robustness_plateau_center_gap_warn_threshold,
-        fail_threshold=scoring.robustness_plateau_center_gap_fail_threshold,
-        warn_penalty=scoring.robustness_plateau_center_gap_warn_penalty,
-        fail_penalty=scoring.robustness_plateau_center_gap_fail_penalty,
-    )
-    if score_span > float(scoring.robustness_plateau_score_span_threshold):
-        penalty_score += max(0.0, float(scoring.robustness_plateau_extra_penalty))
-    if drawdown_span > float(scoring.robustness_plateau_drawdown_span_threshold):
-        penalty_score += max(0.0, float(scoring.robustness_plateau_extra_penalty))
-    if (not current_is_best) and center_gap > float(scoring.robustness_plateau_center_gap_warn_threshold):
-        penalty_score += max(0.0, float(scoring.robustness_plateau_extra_penalty))
-
-    return {
-        "enabled": 1.0,
-        "current_value": float(payload.get("current_value", 0.0) or 0.0),
-        "best_value": float(payload.get("best_value", 0.0) or 0.0),
-        "center_period_score": float(payload.get("center_period_score", 0.0) or 0.0),
-        "best_period_score": float(payload.get("best_period_score", 0.0) or 0.0),
-        "center_gap": center_gap,
-        "score_span": score_span,
-        "drawdown_span": drawdown_span,
-        "current_is_best": 1.0 if current_is_best else 0.0,
-        "penalty_score": penalty_score,
-    }
+def _symmetric_positive_ratio(left: float, right: float, *, floor: float, offset: float = 0.0) -> float:
+    a = max(float(floor), max(0.0, float(left)) + float(offset))
+    b = max(float(floor), max(0.0, float(right)) + float(offset))
+    return max(a, b) / min(a, b)
 
 
 def _robustness_penalty_payload(
     *,
-    promotion_gap: float,
-    block_report: ValidationBlockReport,
+    train_window_scores: list[float] | tuple[float, ...],
+    validation_block_scores: list[float] | tuple[float, ...],
+    train_ulcer_pct: float,
+    validation_ulcer_pct: float,
     scoring: ScoringConfig,
-    train_sharpe_ratio: float | None = None,
-    validation_sharpe_ratio: float | None = None,
-    plateau_probe: Mapping[str, Any] | None = None,
 ) -> dict[str, float]:
-    positive_gap = max(0.0, float(promotion_gap))
-    blocks_enabled = int(block_report.used_block_count) >= 2
-    tail_gap = (
-        max(0.0, float(block_report.mean_score) - float(block_report.tail_score))
-        if blocks_enabled
-        else 0.0
-    )
-    sharpe_gap = 0.0
-    sharpe_penalties_enabled = train_sharpe_ratio is not None and validation_sharpe_ratio is not None
-    if sharpe_penalties_enabled:
-        sharpe_gap = abs(float(train_sharpe_ratio) - float(validation_sharpe_ratio))
-    plateau_payload = _plateau_penalty_payload(plateau_probe, scoring)
+    train_scores = _finite_float_values(tuple(train_window_scores))
+    validation_scores = _finite_float_values(tuple(validation_block_scores))
+    train_score_median = median(train_scores) if train_scores else 0.0
+    train_score_q25 = _quantile(train_scores, 0.25)
+    train_score_q75 = _quantile(train_scores, 0.75)
+    train_score_iqr_raw = max(0.0, train_score_q75 - train_score_q25)
+    train_score_iqr = max(0.10, train_score_iqr_raw)
+    train_score_std = _std(train_scores)
+    validation_score_median = median(validation_scores) if validation_scores else 0.0
+    validation_score_std = _std(validation_scores)
 
-    gap_penalty_score = _upper_band_penalty(
-        positive_gap,
-        warn_threshold=scoring.robustness_gap_warn_threshold,
-        fail_threshold=scoring.robustness_gap_fail_threshold,
-        warn_penalty=scoring.robustness_gap_warn_penalty,
-        fail_penalty=scoring.robustness_gap_fail_penalty,
+    if train_scores and validation_scores:
+        center_gap_units = abs(validation_score_median - train_score_median) / train_score_iqr
+        envelope_half_width = max(0.0, float(scoring.robustness_score_envelope_multiplier)) * train_score_iqr
+        envelope_low = train_score_median - envelope_half_width
+        envelope_high = train_score_median + envelope_half_width
+        envelope_overflow = max(
+            (
+                max(envelope_low - value, value - envelope_high, 0.0)
+                for value in validation_scores
+            ),
+            default=0.0,
+        )
+        envelope_overflow_units = envelope_overflow / train_score_iqr
+    else:
+        center_gap_units = 0.0
+        envelope_overflow_units = 0.0
+
+    if len(train_scores) >= 2 and len(validation_scores) >= 2:
+        spread_ratio = _symmetric_positive_ratio(train_score_std, validation_score_std, floor=0.10)
+    else:
+        spread_ratio = 1.0
+
+    ulcer_ratio = _symmetric_positive_ratio(
+        train_ulcer_pct,
+        validation_ulcer_pct,
+        floor=1e-6,
+        offset=1.0,
     )
-    block_std_penalty_score = 0.0
-    block_floor_penalty_score = 0.0
-    block_tail_penalty_score = 0.0
-    block_fail_penalty_score = 0.0
-    sharpe_gap_penalty_score = 0.0
-    if blocks_enabled:
-        block_std_penalty_score = _upper_band_penalty(
-            float(block_report.std_score),
-            warn_threshold=scoring.robustness_block_std_warn_threshold,
-            fail_threshold=scoring.robustness_block_std_fail_threshold,
-            warn_penalty=scoring.robustness_block_std_warn_penalty,
-            fail_penalty=scoring.robustness_block_std_fail_penalty,
-        )
-        block_floor_penalty_score = _lower_band_penalty(
-            float(block_report.min_score),
-            warn_threshold=scoring.robustness_block_floor_warn_threshold,
-            fail_threshold=scoring.robustness_block_floor_fail_threshold,
-            warn_penalty=scoring.robustness_block_floor_warn_penalty,
-            fail_penalty=scoring.robustness_block_floor_fail_penalty,
-        )
-        block_tail_penalty_score = _upper_band_penalty(
-            tail_gap,
-            warn_threshold=scoring.robustness_block_tail_warn_threshold,
-            fail_threshold=scoring.robustness_block_tail_fail_threshold,
-            warn_penalty=scoring.robustness_block_tail_warn_penalty,
-            fail_penalty=scoring.robustness_block_tail_fail_penalty,
-        )
-        block_fail_penalty_score = max(0.0, float(scoring.robustness_block_fail_penalty_per_block)) * min(
-            int(scoring.robustness_block_fail_penalty_cap_count),
-            max(0, int(block_report.fail_count)),
-        )
-    if sharpe_penalties_enabled:
-        sharpe_gap_penalty_score = _upper_band_penalty(
-            sharpe_gap,
-            warn_threshold=scoring.robustness_sharpe_gap_warn_threshold,
-            fail_threshold=scoring.robustness_sharpe_gap_fail_threshold,
-            warn_penalty=scoring.robustness_sharpe_gap_warn_penalty,
-            fail_penalty=scoring.robustness_sharpe_gap_fail_penalty,
-        )
+    score_center_penalty_score = _soft_threshold_penalty(
+        center_gap_units,
+        warn=scoring.robustness_score_center_warn_units,
+        fail=scoring.robustness_score_center_fail_units,
+        extreme=scoring.robustness_score_center_extreme_units,
+        max_penalty=scoring.robustness_score_center_penalty_max,
+    )
+    score_spread_penalty_score = _soft_threshold_penalty(
+        spread_ratio,
+        warn=scoring.robustness_score_spread_warn_ratio,
+        fail=scoring.robustness_score_spread_fail_ratio,
+        extreme=scoring.robustness_score_spread_extreme_ratio,
+        max_penalty=scoring.robustness_score_spread_penalty_max,
+    )
+    score_envelope_penalty_score = _soft_threshold_penalty(
+        envelope_overflow_units,
+        warn=0.0,
+        fail=scoring.robustness_score_envelope_fail_units,
+        extreme=scoring.robustness_score_envelope_extreme_units,
+        max_penalty=scoring.robustness_score_envelope_penalty_max,
+    )
+    ulcer_ratio_penalty_score = _soft_threshold_penalty(
+        ulcer_ratio,
+        warn=scoring.robustness_ulcer_warn_ratio,
+        fail=scoring.robustness_ulcer_fail_ratio,
+        extreme=scoring.robustness_ulcer_extreme_ratio,
+        max_penalty=scoring.robustness_ulcer_penalty_max,
+    )
     raw_penalty_score = (
-        gap_penalty_score
-        + block_std_penalty_score
-        + block_floor_penalty_score
-        + block_tail_penalty_score
-        + block_fail_penalty_score
-        + sharpe_gap_penalty_score
-        + plateau_payload["penalty_score"]
+        score_center_penalty_score
+        + score_spread_penalty_score
+        + score_envelope_penalty_score
+        + ulcer_ratio_penalty_score
     )
     penalty_score = min(max(0.0, float(scoring.robustness_penalty_cap)), raw_penalty_score)
     return {
-        "validation_block_tail_gap": tail_gap,
-        "train_val_sharpe_gap": sharpe_gap,
-        "gap_penalty_score": gap_penalty_score,
-        "block_std_penalty_score": block_std_penalty_score,
-        "block_floor_penalty_score": block_floor_penalty_score,
-        "block_tail_penalty_score": block_tail_penalty_score,
-        "block_fail_penalty_score": block_fail_penalty_score,
-        "sharpe_gap_penalty_score": sharpe_gap_penalty_score,
-        "plateau_penalty_score": plateau_payload["penalty_score"],
+        "robustness_train_score_median": train_score_median,
+        "robustness_train_score_iqr": train_score_iqr,
+        "robustness_train_score_std": train_score_std,
+        "robustness_validation_score_median": validation_score_median,
+        "robustness_validation_score_std": validation_score_std,
+        "robustness_score_center_gap_units": center_gap_units,
+        "robustness_score_spread_ratio": spread_ratio,
+        "robustness_score_envelope_overflow_units": envelope_overflow_units,
+        "robustness_ulcer_ratio": ulcer_ratio,
+        "score_center_penalty_score": score_center_penalty_score,
+        "score_spread_penalty_score": score_spread_penalty_score,
+        "score_envelope_penalty_score": score_envelope_penalty_score,
+        "ulcer_ratio_penalty_score": ulcer_ratio_penalty_score,
         "robustness_penalty_score_raw": raw_penalty_score,
         "robustness_penalty_score": penalty_score,
-        "plateau_probe_enabled": plateau_payload["enabled"],
-        "plateau_current_value": plateau_payload["current_value"],
-        "plateau_best_value": plateau_payload["best_value"],
-        "plateau_center_period_score": plateau_payload["center_period_score"],
-        "plateau_best_period_score": plateau_payload["best_period_score"],
-        "plateau_center_gap": plateau_payload["center_gap"],
-        "plateau_score_span": plateau_payload["score_span"],
-        "plateau_drawdown_span": plateau_payload["drawdown_span"],
-        "plateau_current_is_best": plateau_payload["current_is_best"],
     }
 
 

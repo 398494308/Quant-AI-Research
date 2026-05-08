@@ -34,7 +34,6 @@ from research_v2.charting import PerformanceChartPaths, charts_available, render
 from research_v2.config import GateConfig, ScoringConfig
 from research_v2.evaluation import (
     EvaluationReport,
-    ValidationBlockReport,
     _activity_adjusted_sharpe_score,
     _annualized_return_score,
     _collect_daily_path,
@@ -1136,67 +1135,125 @@ class EvaluationFixesTest(unittest.TestCase):
             fast_recovery_report.metrics["promotion_score"],
         )
 
-    def test_robustness_penalty_payload_caps_total_penalty_and_tracks_plateau(self):
-        block_report = ValidationBlockReport(
-            block_scores=(0.32, 0.18, -0.05),
-            mean_score=0.15,
-            std_score=0.25,
-            min_score=-0.05,
-            tail_score=-0.05,
-            fail_count=1,
-            used_block_count=3,
-        )
+    def test_robustness_penalty_payload_keeps_normal_distribution_unpenalized(self):
         payload = _robustness_penalty_payload(
-            promotion_gap=0.29,
-            block_report=block_report,
+            train_window_scores=(0.10, 0.20, 0.30, 0.40, 0.50),
+            validation_block_scores=(0.20, 0.30, 0.35, 0.40),
+            train_ulcer_pct=3.0,
+            validation_ulcer_pct=3.5,
             scoring=ScoringConfig(),
-            plateau_probe={
-                "enabled": True,
-                "param": "stop_max_loss_pct",
-                "values": [70.0, 82.0, 94.0],
-                "current_value": 82.0,
-                "best_value": 94.0,
-                "center_period_score": 0.41,
-                "best_period_score": 0.57,
-                "center_gap": 0.16,
-                "score_span": 0.14,
-                "drawdown_span": 9.2,
-                "current_is_best": False,
-            },
         )
 
-        self.assertAlmostEqual(payload["gap_penalty_score"], 0.10)
-        self.assertAlmostEqual(payload["block_std_penalty_score"], 0.03)
-        self.assertAlmostEqual(payload["block_floor_penalty_score"], 0.06)
-        self.assertAlmostEqual(payload["block_tail_penalty_score"], 0.03)
-        self.assertAlmostEqual(payload["block_fail_penalty_score"], 0.03)
-        self.assertAlmostEqual(payload["sharpe_gap_penalty_score"], 0.0)
-        self.assertAlmostEqual(payload["plateau_penalty_score"], 0.15)
-        self.assertAlmostEqual(payload["validation_block_tail_gap"], 0.20)
-        self.assertAlmostEqual(payload["robustness_penalty_score_raw"], 0.40)
-        self.assertAlmostEqual(payload["robustness_penalty_score"], 0.25)
-        self.assertEqual(payload["plateau_probe_enabled"], 1.0)
-        self.assertEqual(payload["plateau_current_is_best"], 0.0)
+        self.assertAlmostEqual(payload["robustness_penalty_score"], 0.0)
+        self.assertLess(payload["robustness_score_center_gap_units"], 2.0)
+        self.assertLess(payload["robustness_score_spread_ratio"], 3.0)
+        self.assertAlmostEqual(payload["robustness_score_envelope_overflow_units"], 0.0)
+        self.assertLess(payload["robustness_ulcer_ratio"], 3.0)
 
-    def test_robustness_penalty_payload_adds_train_val_sharpe_gap_penalty(self):
+    def test_robustness_center_penalty_is_symmetric_for_high_or_low_validation(self):
+        common = {
+            "train_window_scores": (0.00, 0.10, 0.20, 0.30, 0.40),
+            "train_ulcer_pct": 3.0,
+            "validation_ulcer_pct": 3.0,
+            "scoring": ScoringConfig(),
+        }
+
+        high_payload = _robustness_penalty_payload(
+            validation_block_scores=(1.20, 1.20, 1.20),
+            **common,
+        )
+        low_payload = _robustness_penalty_payload(
+            validation_block_scores=(-0.80, -0.80, -0.80),
+            **common,
+        )
+
+        self.assertAlmostEqual(
+            high_payload["score_center_penalty_score"],
+            low_payload["score_center_penalty_score"],
+        )
+        self.assertGreater(high_payload["score_center_penalty_score"], 0.0)
+        self.assertAlmostEqual(
+            high_payload["robustness_penalty_score"],
+            low_payload["robustness_penalty_score"],
+        )
+
+    def test_robustness_spread_ratio_warns_only_after_wide_ratio(self):
+        calm_payload = _robustness_penalty_payload(
+            train_window_scores=(0.00, 0.10, 0.20, 0.30),
+            validation_block_scores=(0.10, 0.15, 0.20, 0.25),
+            train_ulcer_pct=3.0,
+            validation_ulcer_pct=3.0,
+            scoring=ScoringConfig(),
+        )
+        volatile_payload = _robustness_penalty_payload(
+            train_window_scores=(0.00, 0.10, 0.20, 0.30),
+            validation_block_scores=(-0.80, 0.10, 0.20, 1.10),
+            train_ulcer_pct=3.0,
+            validation_ulcer_pct=3.0,
+            scoring=ScoringConfig(),
+        )
+
+        self.assertAlmostEqual(calm_payload["score_spread_penalty_score"], 0.0)
+        self.assertGreater(volatile_payload["robustness_score_spread_ratio"], 3.0)
+        self.assertGreater(volatile_payload["score_spread_penalty_score"], 0.0)
+
+    def test_robustness_envelope_overflow_penalty_can_hit_component_cap(self):
         payload = _robustness_penalty_payload(
-            promotion_gap=0.05,
-            block_report=ValidationBlockReport(
-                block_scores=(),
-                mean_score=0.0,
-                std_score=0.0,
-                min_score=0.0,
-                tail_score=0.0,
-                fail_count=0,
-                used_block_count=0,
+            train_window_scores=(0.00, 0.10, 0.20, 0.30, 0.40),
+            validation_block_scores=(-10.0, 10.0),
+            train_ulcer_pct=3.0,
+            validation_ulcer_pct=3.0,
+            scoring=ScoringConfig(
+                robustness_penalty_cap=1.0,
+                robustness_score_center_penalty_max=0.0,
+                robustness_score_spread_penalty_max=0.0,
+                robustness_ulcer_penalty_max=0.0,
             ),
-            scoring=ScoringConfig(),
-            train_sharpe_ratio=1.90,
-            validation_sharpe_ratio=0.80,
         )
 
-        self.assertAlmostEqual(payload["train_val_sharpe_gap"], 1.10)
-        self.assertAlmostEqual(payload["sharpe_gap_penalty_score"], 0.06)
+        self.assertAlmostEqual(
+            payload["score_envelope_penalty_score"],
+            ScoringConfig().robustness_score_envelope_penalty_max,
+        )
+        self.assertAlmostEqual(payload["robustness_penalty_score"], payload["score_envelope_penalty_score"])
+
+    def test_robustness_ulcer_ratio_is_symmetric_and_capped(self):
+        scoring = ScoringConfig(
+            robustness_penalty_cap=1.0,
+            robustness_score_center_penalty_max=0.0,
+            robustness_score_spread_penalty_max=0.0,
+            robustness_score_envelope_penalty_max=0.0,
+        )
+        high_val = _robustness_penalty_payload(
+            train_window_scores=(0.10, 0.20, 0.30, 0.40),
+            validation_block_scores=(0.10, 0.20, 0.30, 0.40),
+            train_ulcer_pct=1.0,
+            validation_ulcer_pct=40.0,
+            scoring=scoring,
+        )
+        high_train = _robustness_penalty_payload(
+            train_window_scores=(0.10, 0.20, 0.30, 0.40),
+            validation_block_scores=(0.10, 0.20, 0.30, 0.40),
+            train_ulcer_pct=40.0,
+            validation_ulcer_pct=1.0,
+            scoring=scoring,
+        )
+
+        self.assertAlmostEqual(high_val["ulcer_ratio_penalty_score"], scoring.robustness_ulcer_penalty_max)
+        self.assertAlmostEqual(high_train["ulcer_ratio_penalty_score"], scoring.robustness_ulcer_penalty_max)
+        self.assertAlmostEqual(high_val["robustness_penalty_score"], high_train["robustness_penalty_score"])
+
+    def test_robustness_total_penalty_respects_cap(self):
+        payload = _robustness_penalty_payload(
+            train_window_scores=(0.00, 0.10, 0.20, 0.30, 0.40),
+            validation_block_scores=(-10.0, 10.0),
+            train_ulcer_pct=1.0,
+            validation_ulcer_pct=40.0,
+            scoring=ScoringConfig(robustness_penalty_cap=0.02),
+        )
+
+        self.assertGreater(payload["robustness_penalty_score_raw"], 0.02)
+        self.assertAlmostEqual(payload["robustness_penalty_score"], 0.02)
 
     def test_summarize_evaluation_emits_funnel_without_low_activity_soft_signal(self):
         eval_window = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-10"})()
@@ -2162,7 +2219,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("train 180-270 / val 120-180", prompt)
         self.assertIn("最长无新开仓", prompt)
         self.assertIn("负分块最多 3 个", prompt)
-        self.assertIn("默认优先找更稳的平台", prompt)
+        self.assertIn("默认优先找更稳的泛化形态", prompt)
         self.assertNotIn("promotion_delta >", prompt)
         self.assertIn("当前回合任务", prompt)
         self.assertIn("卡片摘要（已展开，不需要再假设自己能读本地文件）", prompt)
@@ -6144,76 +6201,6 @@ class RejectedTestQueueTest(unittest.TestCase):
             research_script.RUNTIME = original_runtime
             research_script.rejected_test_futures = original_futures
             research_script.queued_rejected_test_round_dirs = original_queued
-
-
-class PlateauProbeIntegrationTest(unittest.TestCase):
-    def test_run_candidate_plateau_probe_uses_validation_triplet_and_keeps_candidate_read_only(self):
-        candidate = StrategyCandidate(
-            candidate_id="cand_plateau",
-            hypothesis="观察退出平台",
-            change_plan="只读扫描退出参数邻域",
-            closest_failed_cluster="",
-            novelty_proof="观察平台，不自动改代码",
-            change_tags=("stop",),
-            edited_regions=("EXIT_PARAMS",),
-            expected_effects=("确认 val 平台形态",),
-            core_factors=(),
-            strategy_code="def strategy():\n    return None\n",
-            exit_range_scan={"raw": "stop_max_loss_pct | 72,84,96 | probe"},
-        )
-
-        class FakeOutcome:
-            param = "stop_max_loss_pct"
-            values = (72.0, 84.0, 96.0)
-            center_period_score = 0.44
-            best_period_score = 0.53
-            center_gap = 0.09
-            score_span = 0.11
-            drawdown_span = 6.5
-
-            def to_dict(self):
-                return {
-                    "enabled": True,
-                    "param": self.param,
-                    "values": list(self.values),
-                    "current_value": 84.0,
-                    "best_value": 96.0,
-                    "center_period_score": self.center_period_score,
-                    "best_period_score": self.best_period_score,
-                    "center_gap": self.center_gap,
-                    "score_span": self.score_span,
-                    "drawdown_span": self.drawdown_span,
-                    "current_is_best": False,
-                    "summary": [],
-                    "reason": "probe",
-                }
-
-        captured = {}
-
-        def fake_run_plateau_probe(**kwargs):
-            captured["windows"] = kwargs["windows"]
-            captured["workers"] = kwargs["workers"]
-            captured["current_exit_params"] = dict(kwargs["current_exit_params"])
-            return FakeOutcome()
-
-        spec = type(
-            "Spec",
-            (),
-            {"param": "stop_max_loss_pct", "values": (72.0, 84.0, 96.0), "reason": "probe"},
-        )()
-
-        with mock.patch.object(research_script, "infer_exit_range_scan_spec", return_value=spec), \
-             mock.patch.object(research_script, "run_plateau_probe", side_effect=fake_run_plateau_probe), \
-             mock.patch.object(research_script, "active_exit_params", return_value={"stop_max_loss_pct": 84.0}):
-            strategy_before = candidate.strategy_code
-            payload = research_script._run_candidate_plateau_probe(candidate, base_source="base_source")
-
-        self.assertEqual(payload["param"], "stop_max_loss_pct")
-        self.assertEqual(len(captured["windows"]), 3)
-        self.assertTrue(all(window.group == "validation" for window in captured["windows"]))
-        self.assertEqual(captured["workers"], research_script.RUNTIME.exit_range_scan_workers)
-        self.assertEqual(captured["current_exit_params"]["stop_max_loss_pct"], 84.0)
-        self.assertEqual(candidate.strategy_code, strategy_before)
 
 
 class DiscordSummaryFormattingTest(unittest.TestCase):

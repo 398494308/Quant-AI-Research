@@ -1,115 +1,66 @@
 # MACD Aggressive Current State
 
-这份文档只描述当前这条主线现在怎么跑，不再保留 `test1 / test2` 或旧版双状态设计的历史说明。
+这份文档只描述当前主线的运行状态、评分口径和人工介入边界。
 
 ## 当前快照
 
-说明：`2026-05-07 09:15`（Asia/Shanghai）已按新的交易活跃度低频惩罚口径完成一次 `--reset-best` 基线重算，并把当前源码写成新的 active reference。`2026-05-08 10:54`（Asia/Shanghai）已重启研究器，让 `8588ae4 Scan mixed positions by side` 的混合持仓方向扫描补丁进入当前运行。下面这张表已经同步到最新 `state/research_macd_aggressive_v2_best.json` 的写回结果；评分公式与 gate 口径以下文为准。
-
-运行时只有一个 active reference。最新快照在：
+`2026-05-08 14:24:23`（Asia/Shanghai）已停机后重算当前 active reference，并按新评分写回 [state/research_macd_aggressive_v2_best.json](../state/research_macd_aggressive_v2_best.json)。当前策略源码同步在：
 
 - [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)
 - [backups/strategy_macd_aggressive_v2_best.py](../backups/strategy_macd_aggressive_v2_best.py)
-- [state/research_macd_aggressive_v2_best.json](../state/research_macd_aggressive_v2_best.json)
-
-历史 `champion` 快照现在会额外保存在：
-
-- `backups/champion_history/<timestamp>_i<iteration>_<candidate_id>_<codehash>/`
-
-每个快照目录至少会带：
-
-- `strategy_macd_aggressive.py`
-- `metadata.json`
-- 若当轮图表生成成功，还会带 `selection.png` 与 `validation.png`
+- [backups/strategy_macd_aggressive_v2_champion.py](../backups/strategy_macd_aggressive_v2_champion.py)
 
 当前关键指标：
 
 | 项目 | 数值 |
 | --- | --- |
-| 当前角色 | champion |
-| 当前 reference hash | a9e00568f7b28cf6f785cf39a98f60244695b578b20baacc73e70eec698021a8 |
-| 当前 reference stage 起点轮次 | 1 |
-| gate | 通过（研究 gate 已放宽：train walk-forward 只诊断，val命中率>=20%，val最差分块>=-0.10，val负分块<=3） |
-| score regime（保存态 / 仓库默认） | 研究器重启后按当前保存态重算 / trend_capture_v17_activity_adjusted_sharpe |
-| quality_score（train连续趋势分） | 0.1352 |
-| promotion_score（保存态） | -0.4401 |
-| capture_score / timed_return_score / activity_adjusted_sharpe_score / turn_protection_score | 保存态重算后更新 |
-| drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 0.3373 / 0.0675 / 0.1900 |
-| train/val连续抓取分 | 0.1352 / 0.2146 |
-| train+val期间收益 | 17.78% |
-| val期间收益 | 2.35% |
-| val平仓数 | 26 |
-| train+val多/空捕获 | 0.14 / 0.22 |
-| Sharpe(train / val / train+val) | 0.48 / 0.22 / 0.37 |
-| test收益 / Sharpe | - / - |
-| train/val非加仓开仓 | 28 / 26 |
-| train/val交易短缺率 / 低频惩罚 | 0.8444 / 0.7833 / 0.3128 |
-
-当前轮次留档除了 `journal` 与 `memory/raw` 外，还额外维护一条最小可复现链路：
-
-- `backups/research_v2_round_artifacts/sources/`：按 `code_hash` 去重保存策略源码
-- `backups/research_v2_round_artifacts/rounds/`：每轮一个目录，保留策略快照、关键评分、`test` 关键指标、`test` 异步状态，以及窗口/评分配置和数据/引擎指纹
-- 新 champion 轮次会在这份最小归档里额外引用 `champion_history` 和图表路径；`test` 结果只做留档，不会回灌给研究 prompt
+| active reference | champion |
+| reference hash | `3c1f59dbfe98f1702510e15f51680066346d01b9755453e74c73e0975e8f1bdd` |
+| score regime | `trend_capture_v17_activity_adjusted_sharpe` |
+| reference stage 起点轮次 | 9 |
+| gate | 通过 |
+| quality_score | 0.8406 |
+| promotion_score | -0.0709 |
+| capture_score / timed_return_score / activity_adjusted_sharpe_score | 0.7142 / 1.2663 / 0.6300 |
+| drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 1.6914 / 0.7797 / 0.0000 |
+| train/val 连续抓取分 | 0.8406 / 0.5878 |
+| train+val 期间收益 | 818.19% |
+| val 期间收益 | 115.30% |
+| val 多/空平仓数 | 100 / 96 |
+| train+val 多/空捕获 | 0.4913 / 0.4704 |
+| Sharpe(train / val / train+val) | 1.32 / 1.20 / 1.42 |
+| train/val 非加仓开仓 | 288 / 196 |
+| train/val 月非加仓开仓 | 15.94 / 16.34 |
+| 交易短缺惩罚 / 空窗惩罚 / 总活跃度惩罚 | 0.0000 / 0.1500 / 0.1500 |
+| val 分块均值/std/最差/负块数 | 0.6490 / 0.4246 / 0.1940 / 0 |
+| 鲁棒性 center/spread/envelope/ulcer 惩罚 | 0.0000 / 0.0000 / 0.0000 / 0.0000 |
+| test 收益 / Sharpe / 最大回撤 / 平仓数 | 5.74% / 0.63 / 54.76% / 33 |
 
 说明：
 
-- 上表按当前 [state/research_macd_aggressive_v2_best.json](../state/research_macd_aggressive_v2_best.json) 的最近保存态整理；切到 `v17` 后，保存态分数会由研究器启动流程按新公式重算。
-- 仓库默认评分已经切到 `trend_capture_v17_activity_adjusted_sharpe`；研究器重启后会按新口径重算 active reference。
-- 新口径下 `drawdown_risk_score` 仍是固定窗口 `Ulcer` 风格风险分；`promotion_score` 在分段回撤惩罚之外，又额外接了一层轻量鲁棒性软惩罚，当前更明确压 `val` 最差块、尾块和 `train/val` Sharpe gap。Sharpe 主分不再取弱侧，也不封顶，而是按 train/val 各 50% 后用月非加仓开仓频率折扣。
-- 当前人工方向已经从“继续补多头收益”切到“优先 `train/val` 稳定性、中频覆盖和弱侧修复”；长期软引导在 [config/research_v2_operator_focus.md](../config/research_v2_operator_focus.md)，人工观察卡仍在 [config/research_v2_champion_review.md](../config/research_v2_champion_review.md) 中按 hash 绑定，仅命中当前 hash 时生效。
-- `state/research_macd_aggressive_v2_best.json` 里如果还带旧字段，例如 `working_base`，那只是历史兼容读取入口；新状态写回只使用单一 active reference 语义。
-- 本次重启前已先把当前人工压缩版源码同步到 `backups/strategy_macd_aggressive_v2_best.py`，避免研究器启动时把旧保存态覆盖回主策略文件。
-- 当前运行状态以 [state/research_macd_aggressive_v2_heartbeat.json](../state/research_macd_aggressive_v2_heartbeat.json) 或 `./scripts/manage_research_macd_aggressive_v2.sh status` 为准；本文已同步 `v17` activity-adjusted Sharpe 口径和 `8588ae4` 混合持仓方向扫描补丁。
-- `real-money-test/` 这条执行壳子现在默认转为 `OKX Demo Trading`：策略必须先冻结为固定副本，`demo` 只认 `OKX_DEMO_*` 凭证，旧 `dry-run` 代码保留但不再默认使用，播报也切到 `demo` 卡口径。
-- 如果你想把 `demo` 账户里的更大余额压到固定测试规模，当前壳子支持通过 `OKX_DEMO_AVAILABLE_CAPITAL` 给 `freqtrade` 注入单 bot 资金上限；例如 `1000` 表示只按 `1000 USDT` 规模运行。
+- 当前 `promotion_score` 为负，主要不是 gate 问题，而是回撤惩罚和最长无新开仓惩罚仍重。
+- 当前交易频率已经在目标区间上沿附近；后续不需要继续刷交易数量，重点应转到收益质量、回撤和长空窗。
+- Funding 覆盖仍为 `0%`，这是数据源缺口；最终实盘前用长时间 demo run 兜底观察，不把它硬塞进当前研究评分。
 
 ## 数据与窗口
 
-当前默认数据源已经统一为 `OKX`。
-
-研究与评估窗口：
-
+- 标的：`OKX BTC-USDT-SWAP`
+- 事实层：`15m`
+- 确认层：`1h / 4h`，由 `15m` 聚合得到
+- 执行价：优先使用 `1m`
 - `train`：`2023-07-01` 到 `2024-12-31`
 - `val`：`2025-01-01` 到 `2025-12-31`
 - `test`：`2026-01-01` 到 `2026-04-20`
+- `train` 滚动窗口：`28` 天，步长 `21` 天
+- `val` 分块：`4` 个连续时间块
 
-当前默认配置：
-
-- `train` 滚动窗口长度：`28` 天
-- 滚动步长：`21` 天
-- `smoke` 窗口数：`5`
-- 主循环等待：`10s`
-- `test`：新 champion 同步运行；已完成完整评估但未保留的候选也会后台异步运行，只保留关键指标，不生成图片，也不参与晋升
-- provider 恢复等待：`90s`
-
-## 评分与晋升
+## 评分公式
 
 原始单段分数：
 
 `period_score = 0.70 * trend_capture_score + 0.30 * return_score`
 
-研究器主要看这些分：
-
-- `quality_score`
-  `train` 连续路径上的趋势抓取分
-- `capture_score`
-  `train/val` 连续趋势抓取混合分按 `5:5` 平均后的主分；每一侧内部都用“段等权均分 50% + 原权重均分 50%”
-- `timed_return_score`
-  `train/val` 按日收益路径年化分按 `5:5` 平均后的补充分
-- `activity_adjusted_sharpe_score`
-  `train` 与 `val` 的 Sharpe 各 50% 计入，先除以 `2.0` 保持量级，不封顶；再按各自月非加仓开仓频率折扣。`10-15` 笔/月较健康，`5` 笔/月以下基本不计 Sharpe。
-- `drawdown_risk_score`
-  `train/val` 固定窗口回撤风险分按 `5:5` 平均后的原始风险指标；窗口内用 `Ulcer` 风格回撤深度与持续时间衡量利润回吐压力
-- `drawdown_penalty_score`
-  由 `drawdown_risk_score` 映射出的分段惩罚项；先做基础扣分，超过拐点后按更陡斜率追加扣分
-- `robustness_penalty_score`
-  轻量鲁棒性软惩罚，只看 `train/val` 落差、`train/val` Sharpe gap、`val` 分块稳定性，以及退出参数邻域在 `val` 3 段上的平台形态；总扣分封顶 `0.30`
-- `turn_protection_score`
-  `train/val` 趋势掉头窗口保护分按 `5:5` 平均后的诊断分，不再直接进入晋级主公式
-- `promotion_score`
-  最终晋级分。以 `capture_score` 为主，加入 `timed_return_score` 和 `activity_adjusted_sharpe_score`，再减去 `drawdown_penalty_score`、`robustness_penalty_score` 和 `trade_activity_penalty`
-
-当前默认公式：
+连续趋势抓取主分：
 
 `train_capture_score = 0.50 * train_equal_capture_score + 0.50 * train_weighted_capture_score`
 
@@ -117,13 +68,31 @@
 
 `capture_score = 0.50 * train_capture_score + 0.50 * val_capture_score`
 
+收益补充分：
+
 `timed_return_score = 0.50 * train_timed_return_score + 0.50 * val_timed_return_score`
 
-`train_activity_discount = interpolate(train_monthly_entries, [(0,0.00),(5,0.05),(7,0.28),(9,0.62),(10,0.78),(12,0.90),(15,1.00)])`
+活动调整 Sharpe：
 
-`val_activity_discount = interpolate(validation_monthly_entries, [(0,0.00),(5,0.05),(7,0.28),(9,0.62),(10,0.78),(12,0.90),(15,1.00)])`
+`train_adjusted_sharpe = (train_sharpe_ratio / 2.0) * train_activity_discount`
 
-`activity_adjusted_sharpe_score = 0.50 * (train_sharpe_ratio / 2.0) * train_activity_discount + 0.50 * (val_sharpe_ratio / 2.0) * val_activity_discount`
+`val_adjusted_sharpe = (val_sharpe_ratio / 2.0) * val_activity_discount`
+
+`activity_adjusted_sharpe_score = 0.50 * train_adjusted_sharpe + 0.50 * val_adjusted_sharpe`
+
+其中月非加仓开仓频率折扣锚点为：
+
+`[(0,0.00),(5,0.05),(7,0.28),(9,0.62),(10,0.78),(12,0.90),(15,1.00)]`
+
+解释：
+
+- `10-15` 笔/月或更多是健康区间。
+- `8-9` 笔/月偏少。
+- `7` 笔/月以下明显负面。
+- `5` 笔/月以下几乎不计 Sharpe。
+- Sharpe 不封顶；如果真跑出高 Sharpe，会按折扣后进入评分。
+
+交易活跃度惩罚：
 
 `train_trade_activity_shortfall = clamp(max(180 - train_entry_trades, 0) / 180, 0.0, 1.0)`
 
@@ -135,281 +104,121 @@
 
 `trade_activity_penalty = trade_count_penalty + trade_idle_penalty`
 
-`drawdown_risk_score = 0.50 * train_drawdown_risk_score + 0.50 * val_drawdown_risk_score`
+交易数使用非加仓开仓数，不使用平仓数；加仓只改变已有 position 的规模，不计入活跃度，也不占用 `max_concurrent_positions`。`train` 非加仓开仓数来自 `train+val` 连续回测开仓数减去 `val` 连续回测开仓数。
 
-`turn_protection_score = 0.50 * train_turn_protection_score + 0.50 * val_turn_protection_score`
+回撤惩罚：
+
+`drawdown_risk_score = 0.50 * train_drawdown_risk_score + 0.50 * val_drawdown_risk_score`
 
 `drawdown_penalty_score = 0.20 * drawdown_risk_score + 1.00 * max(drawdown_risk_score - 1.25, 0.0)`
 
+`drawdown_risk_score` 复用已有日收益路径，按固定窗口计算 Ulcer 风格回撤深度和持续时间，不新增回测。
+
+晋级分：
+
 `promotion_score = 0.45 * capture_score + 0.30 * timed_return_score + 0.25 * activity_adjusted_sharpe_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
 
-这里特意把 `capture_score` 从“更像追最大段”拉回到“既看大段，也看整体覆盖”；同时把 Sharpe 从弱侧保底改成交易活跃度折扣，避免低频策略靠少量交易拿到完整 Sharpe 分。
+## 鲁棒性软惩罚
 
-`trade_activity_penalty` 不新增回测。`train` 交易数直接复用现有连续期结果：用 `train+val` 连续回测非加仓开仓数减去 `val` 连续回测非加仓开仓数，得到 `train` 两年的非加仓开仓数；`val` 交易数直接复用现有 `val` 连续回测结果。加仓只改变已有 position 的规模，不计入交易活跃度，也不占用 `max_concurrent_positions`。当前实现只在交易数低于下沿时扣分：`train` 下沿是 `180`，`val` 下沿是 `120`。高于这些下沿不加分也不扣分；区间上沿 `270 / 180` 主要用于研究提示和人工读数，不额外参与计算。回测会记录每笔交易的入场时间，并额外惩罚 `train/val` 中超过 `7` 天没有新开仓的长空窗。
+`robustness_penalty_score` 不做硬 gate，也不新增回测。它只复用已有结果：
 
-回测执行层允许多空在总仓位上限内并行持有。反向信号不再自动强平已有仓位；只要总独立 position 数低于 `max_concurrent_positions`，已有多仓时触发空信号也可以新开空仓，已有空仓时触发多信号也同理。混合持仓时，信号层的多头 pullback hold 和放量衰竭判断按方向扫描全部持仓，不再只读取 `positions[0]`。
+- `train_window_scores`：现有 train rolling window 的 `period_score`
+- `validation_block_scores`：现有 val 分块 `period_score`
+- `train_ulcer_pct / validation_ulcer_pct`：现有固定窗口回撤风险里的 blended Ulcer
 
-`drawdown_risk_score` 直接复用现有 `train/val` 日收益路径，不新增回测。两侧都按固定 `28` 天窗口滚动切分，再对每个窗口计算 `Ulcer` 风格回撤值，最后用 `median + P75` 的加权聚合成风险分。这样 `train` 的滚动窗口路径和 `val` 的整年路径会落到同一时间单位上比较，也不会被一次单日极端点完全主导。
+当前计算：
 
-`drawdown_penalty_score` 在此基础上再做一层分段映射：低于 `1.25` 时只按基础权重扣分，超过 `1.25` 后每增加一单位风险都按更陡斜率继续扣分。目的不是把所有回撤都打死，而是显著压低“收益爆炸但回撤也很深”的候选，让研究器更偏向收益仍强、但利润回吐更可控的方案。
+1. 取 `train_window_scores` 的 `median`、`IQR`、`std`。
+2. `IQR` 最小按 `0.10` 处理，避免 train 分布过窄导致过度敏感。
+3. 取 `validation_block_scores` 的 `median`、`std`。
+4. `center_gap_units = abs(val_median - train_median) / train_iqr`
+5. `spread_ratio = max(train_std, val_std, 0.10) / min(max(train_std, 0.10), max(val_std, 0.10))`
+6. `envelope_overflow_units`：把 `train_median ± 4 * train_iqr` 当宽包络，只看 val 分块跑出包络多少个 IQR。
+7. `ulcer_ratio = max(train_ulcer + 1, val_ulcer + 1) / min(train_ulcer + 1, val_ulcer + 1)`
 
-`robustness_penalty_score` 不引入新的硬 gate。它只作为软降权层，主要压低四类“看起来能赢、但泛化味道差”的候选：`train/val` 落差偏大、`train/val` Sharpe gap 过大、`val` 内部分块明显不稳，以及退出参数只在一个很尖的邻域点上有效。若本轮没有触发退出参数平台观察，则 `plateau` 相关部分记为 `0`。
+惩罚上限：
 
-`turn_protection_score` 仍复用现有主要趋势段，只在相邻趋势方向反转时切掉头保护窗口，衡量窗口内策略权益从运行高点到后续低点的最大回吐。它现在保留给诊断和人工复盘，不再直接进入晋级主公式。
+- 总上限：`0.15`
+- 中位偏离：`2 / 4 / 8` 个 IQR 开始、加重、封顶，组件最多 `0.05`
+- 波动比例：`3 / 6 / 10` 倍开始、加重、封顶，组件最多 `0.03`
+- 包络溢出：超过宽包络后按 `2 / 5` 个 IQR 加重、封顶，组件最多 `0.03`
+- Ulcer 比：`3 / 6 / 10` 倍开始、加重、封顶，组件最多 `0.04`
 
-晋升规则：
+这个设计刻意很宽：`train` 和 `val` 都可能包含不同行情，不要求两侧谁更好，只在差异非常离谱时软降权。
 
-- 先过 `gate`
-- 已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference 才能刷新；当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则
-- 刷新 champion 时会同步跑 `test`
-- 已完成完整评估但未保留的候选也会后台异步补跑 `test`
-- reject / duplicate_skipped 的 `test` 结果只进 round artifact、通知和人工观察，不参与 prompt、不参与晋升
+当前基底的鲁棒性诊断：
 
-`test` 只做验收，不参与 prompt，不参与当前轮次调参。
+- train 分数中位/IQR/std：`0.2999 / 0.6636 / 0.5704`
+- val 分数中位/std：`0.5368 / 0.4246`
+- 中位差 IQR 倍数：`0.3571`
+- 波动比：`1.3433`
+- 包络溢出：`0.0000`
+- Ulcer 比：`1.1672`
+- 最终鲁棒性惩罚：`0.0000`
 
 ## 当前 Gate
 
-当前真正参与 gate 的主条件是：
+当前真正参与 gate 的条件：
 
 - `val` 命中率至少 `0.20`
 - `val` 趋势捕获分至少 `0.05`
 - `train / val` 连续趋势抓取分差不超过 `0.30`
-- 手续费拖累不超过 `11.5%`
-- `val` 分成 `4` 块后，最差块至少 `-0.10`
-- `val` 负块数量最多 `3`
+- `val` 多头捕获至少 `0.00`
+- `val` 空头捕获至少 `0.00`
+- 平均手续费拖累不超过 `11.5%`
+- `val` 最差分块至少 `-0.10`
+- `val` 负分块最多 `3`
+- `train+val` 严重集中度过拟合直接 veto
 
-这组阈值是研究推进用 gate，不是实盘准入承诺。`train` walk-forward 均值和中位数仍保留在诊断里，但不再作为硬 gate；当前低频基底下，28 天滚动小窗太容易被空窗主导。上一版阈值（`train` 均值 `0.10`、`val` 命中率 `0.35`、`val` 最差块 `0.05`）在当前低频基底上过严：最近 35 个完整候选里，`train` 滚动均值最高约 `0.04`，导致明显改善的候选也无法成为下一轮基底。
+`train` rolling 均值和中位数只做诊断，不做硬 gate。收益率已经在 `timed_return_score` 中计分，不再在 gate 里重复强约束。
 
-交易活跃度不再是硬 gate；它已经进入 `promotion_score` 主公式，但现在是“低频 + 长空窗”惩罚：希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天。
+## 多空并行与仓位
 
-另外仍保留过拟合诊断。严重集中度会直接 veto，普通风险会进入 journal 和历史摘要。
+- `max_concurrent_positions = 4`，统计独立 position。
+- 加仓不新增独立 position，只改变已有 position 的规模。
+- 多空可以在总仓位上限内并行存在。
+- 现有空仓不会阻止新的多头信号；现有多仓也不会阻止新的空头信号。
+- 混合持仓时，信号层按方向扫描所有 position，不再只看 `positions[0]`。
 
-## 当前研究器结构
+## 研究器流程
 
-当前主结构是：
+当前链路：
 
-1. `planner`
-   复用当前 stage 的持久 session，只负责 draft round brief
-2. `reviewer`
-   每轮全新 short-lived 审稿 worker，只负责判定当前 draft brief 是 `PASS` 还是 `REVISE`
-3. `edit_worker`
-   短生命周期 worker，只负责修改 [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)
-4. `repair_worker`
-   只在同轮修错时出现，不保留长历史
-5. `summary_worker`
-   只根据最终真实 diff 回写最终候选元信息
-6. 主进程
-   负责 reviewer gating、真实 diff 检查、smoke、完整评估、gate、journal、Discord、memory 和 stage/session 管理
+1. `planner` 持久 session 写 draft brief。
+2. `reviewer` fresh session 审稿，只输出 `PASS / REVISE`。
+3. `edit_worker` 只改 [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)。
+4. 主进程检查 diff、smoke、behavioral noop。
+5. 可选 `exit_range_scan`：仅单个 `EXIT_PARAMS` 数值键，最多 3 点轻量预筛。
+6. 主进程跑完整 `train walk-forward + val`。
+7. gate 通过且 `promotion_score` 严格高于当前 active reference，才能刷新 champion。
+8. 新 champion 同步跑 `test`、图表、Discord 和 `champion_history` 归档，然后重置 stage/session。
 
-为了把大文件切薄但不改主流程，当前又补了 5 个实现层模块：
+评分阶段只使用已有 `train/val` 评估结果和轻量 `exit_range_scan` 预筛结果。
 
-- `src/research_v2/reference_state.py`
-- `src/research_v2/champion_artifacts.py`
-- `src/research_v2/round_artifacts.py`
-- `src/research_v2/backtest_window_runtime.py`
-- `src/research_v2/evaluation_summary.py`
-- `src/research_v2/journal_prompt_builder.py`
+## 运行与状态
 
-更直观的流程图见 [docs/agent_subagent_workflow.md](./agent_subagent_workflow.md)。
-
-当前不再存在这些自动行为：
-
-- 不再自动切 `factor_admission`
-- 不再自动切 `compaction lane`
-- 不再单独沉淀 `working_base`
-
-## Prompt 与 Session
-
-当前 prompt 分层：
-
-1. 仓库级 [AGENTS.md](../AGENTS.md)
-2. workspace 局部 `AGENTS.md`，只放共享长期规则
-3. planner system prompt
-4. reviewer system prompt
-5. edit / repair / summary 各自的 system prompt
-6. planner runtime prompt
-7. `config/research_v2_operator_focus.md`
-8. `config/research_v2_champion_review.md`
-9. `wiki/reviewer_summary_card.md`
-10. `wiki/direction_board.md`
-11. `wiki/latest_history_package.md`
-12. `wiki/failure_wiki.md`
-13. `wiki/duplicate_watchlist.md`
-
-其中第 6 层现在只保留精简前台记忆：
-
-- 当前 stage 执行摘要
-- 失败核聚合
-- 方向风险/过热簇
-- 最近轮次元信息
-
-不再把全量表格反复塞进 planner 主上下文。当前做法是：保持原来的 prompt 架构与角色边界，只压缩重复规则文本、人工卡摘要和前台记忆摘要。
-
-当前 planner 的顺序约束：
-
-- 先看当前 champion 人工观察卡；只有 `champion_code_hash` 命中时，这张卡才会进入 prompt。
-- 再看上一轮 `reviewer` 总结卡，先判断上一轮为什么失败。
-- 再看 `direction_board / duplicate_watchlist / failure_wiki`，确认当前主方向是否已经高热，以及这次是不是仍在同一热区横移。
-- planner 读取 wiki 时先看顶部摘要；只有方向高热、证据冲突或需要确认失败层时，才下钻更长表格。
-- 再看当前诊断，定位失败更像发生在 `outer_context / path / final_veto / routing / followthrough / exit / unknown` 的哪一层。
-- 先决定这轮继续同方向还是转向，再写 draft brief。
-- 最后才写 `hypothesis / change_plan / novelty_proof`。
-- `novelty_proof` 现在用于先说明“上一版被什么证据否掉”，再说明“这轮为什么继续或转向”，最后才补“这次换了哪一层真实触达路径或关键规则链”。
-
-当前 edit_worker 约束：
-
-- worker 仍然只改 [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)
-- 整份策略文件都允许修改，但改动必须克制、结构准确、添加有必要
-- 策略文件现在同时包含 `PARAMS` 和 `EXIT_PARAMS`；worker 可以调部分退出参数，也允许探索 `position_fraction` / `max_concurrent_positions`，但不能改固定的杠杆、仓位绝对上下限和金字塔骨架参数
-- 对单个连续型 `EXIT_PARAMS`，planner 可选给 `exit_range_scan`；主进程最多扫 3 个值、3 个轻量窗口、2 worker 预筛，只把最佳值送入完整评估
-- context cache 只跟数据准备相关的退出开关绑定，避免普通退出参数变化导致重复加载/聚合数据
-- early reject 只在 `10 / 18 / 26` 三个 eval milestone 做连续 snapshot；早停同时看趋势分、综合期段分和命中率
-- behavioral no-op 除成交指纹外，还会看 `outer_context / path / final_veto / filled_entries` 的关键漏斗变化
-- 交易数、`filled_entries` 和漏斗通过量只保留观察价值，不再作为下一轮方向的默认软触发
-- worker 会收到当前 gate、最弱维度和 val 多/空捕获/命中率的紧凑诊断，但不会收到完整历史包，也不重新做 planner 研究
-- 单轮改动预算只作为参考，不是硬 gate；超出小 diff 范围时必须服务于打通真实路径或删除旧冗余
-- 真正会进入 diff / smoke / full eval 的，是最终源码里的真实落地改动
-
-当前 reviewer 的职责：
-
-- reviewer 不负责提出新方向，只负责审稿
-- reviewer 只能输出 `PASS` 或 `REVISE`
-- reviewer 会把 `direction_board` 当成高优先级证据，但它只在命中高热方向时检查“有没有结构性差异”，不会把方向永久封死
-- reviewer 在 `PASS` 前会检查 draft 是否说明预计新增、删除或迁移哪类真实交易；如果完全没有交易路径变化说明，会打回让 planner 补清楚
-- 若 `REVISE`，必须指出当前 draft 仍落在哪个失败近邻，以及 planner 下一版至少要换哪一层
-- 未通过 reviewer 的 brief 不会进入 `edit_worker`
-
-
-人工观察卡：
-
-- `config/research_v2_champion_review.md` 只给 planner 看，是短人工直觉，不是硬 gate。
-- 内容应短尽短；适合写一句当前 champion 的图形直觉。
-- 卡内 `champion_code_hash` 必须命中当前 champion；刷新新 champion 后主进程自动忽略旧卡，避免旧直觉污染新阶段。
-
-当前 session 规则：
-
-- `planner` 在同一个 stage 内复用同一个 session
-- `reviewer / edit_worker / repair_worker / summary_worker` 都不复用 planner session
-- session scope 只绑定当前 active reference 的 `code_hash + stage`
-- 同一 stage 内，即使出现 reviewer 打回、`behavioral_noop`、同轮重生或方向切换，也不自动重置 planner session
-- 一旦手工重开 stage，或 champion 刷新，planner session 就会重置
-- DeepSeek planner 本地 session 默认只保留最近 `12` 条非 system 历史消息
-- `reasoning_content` 只保留在 `.deepseek_planner_trace_*.jsonl` 里做观测，不再回灌到 session history
-- `wiki/reviewer_summary_card.md` 只保留当前轮最后一次 reviewer 判定；如果同轮先 `REVISE` 后重写再 `PASS`，最终卡记录最后一次 `PASS`
-- 如果本轮没有刷新 champion，主进程会写回 `journal / wiki / reviewer_summary_card / direction_board`，然后沿用当前 stage / planner session 进入下一轮
-- 当前同一轮允许出现 `planner -> reviewer -> planner 重写 -> reviewer` 的短链，但只有 planner 复用持久 session
-
-当前 telemetry 也分成两层口径：
-
-- 原始 prompt：`prompt_chars / system_prompt_chars / estimated_prompt_tokens`
-- 真实发送上下文：`system_prompt_chars_sent / history_message_chars_sent / history_message_count_sent / total_message_chars_sent / estimated_prompt_tokens_sent`
-
-## 复杂度与手工瘦身
-
-复杂度现在只保留为只读诊断，不再自动驱动流程。
-
-系统仍会记录：
-
-- 每轮 diff 的复杂度变化
-- 当前 active reference 哪些 function / family 最紧
-- 哪些地方有明显膨胀风险
-
-但它不会再：
-
-- 自动拒绝“只是偏胖”的候选
-- 自动触发压缩任务
-- 自动切另一种因子准入模式
-- 把复杂度提示反复塞进 planner / reviewer prompt
-- 把复杂度状态发到 Discord 作为流程提示
-
-手工瘦身 SOP：
-
-1. 停掉研究器。
-2. 手工瘦身或手工替换 active reference。
-3. 执行 [scripts/reset_research_macd_aggressive_v2_stage.sh](../scripts/reset_research_macd_aggressive_v2_stage.sh)。
-4. 重新启动研究器，进入新 stage。
-
-这个脚本会保留 `memory/raw/*`，但会清空：
-
-- 当前 stage journal
-- prompt 摘要
-- wiki 前台文件
-- summaries
-- session 状态
-- agent workspace
-- heartbeat
-
-## 当前运行保护
-
-当前有效保护包括：
-
-- reviewer 审稿不通过时，本轮不会进入落码
-- 候选必须真的改出源码 diff
-- planner brief 缺关键字段会 fail fast
-- `smoke` 行为完全不变会记为 `behavioral_noop`
-- 重复 source、重复 hash、空 diff、非法输出会作为技术空转隔离
-- failure wiki 现在主要作为历史记忆与风险提示，不再做 exact-cut 硬拦截
-- complexity 诊断会被记录，但不再自动驱动流程
-- 连续 no-edit 到阈值时，研究器会自动停机，避免空耗算力
-
-## 当前目录与状态文件
-
-最常看的文件：
-
-- [state/research_macd_aggressive_v2_heartbeat.json](../state/research_macd_aggressive_v2_heartbeat.json)
-  当前轮次、phase、窗口、更新时间
-- [state/research_macd_aggressive_v2_journal.jsonl](../state/research_macd_aggressive_v2_journal.jsonl)
-  当前 stage 的正式轮次结果
-- `state/research_macd_aggressive_v2_memory/raw/`
-  全量未压缩历史
-- `state/research_macd_aggressive_v2_memory/wiki/`
-  当前 stage 的 reviewer 卡、重复/失败摘要
-- [logs/macd_aggressive_research_v2.log](../logs/macd_aggressive_research_v2.log)
-  研究器主日志
-- [logs/macd_aggressive_research_v2_model_calls.jsonl](../logs/macd_aggressive_research_v2_model_calls.jsonl)
-  模型调用大小、resume 情况、耗时和返回大小
-
-## 当前 Discord 播报
-
-当前主表只保留这些字段：
-
-- 数据范围
-- 本轮窗口
-- train+val期间收益
-- val期间收益
-- 新 champion 时的 test期间收益
-- `Sharpe(train / val / test)`
-- train+val交易数量
-- 新 champion 时的 test交易数量
-- val多/空捕获
-- train+val期间回撤/手续费拖累
-- 新 champion 时的 test期间回撤/手续费拖累
-
-另外：
-
-- 普通启动仍会发送 `📌 已加载 champion 参考` 播报。
-- 真正刷新 champion 时，仍会发送 `🚀 新 champion` 播报
-- 如果进程随后因承接这个新 champion 而重启，启动时那条 `📌 已加载 champion 参考` 不再重复播报
-
-## 安全评估当前策略
-
-如果你只是想安全评估当前 `src`，不要直接跑 `--no-optimize`。请用下面这段：
+查看状态：
 
 ```bash
-python3 - <<'PY'
-from pathlib import Path
-import importlib
-import sys
-
-sys.path.insert(0, str(Path('.').resolve()))
-sys.path.insert(0, str(Path('src').resolve()))
-
-import strategy_macd_aggressive as sm
-import scripts.research_macd_aggressive_v2 as rs
-
-importlib.reload(sm)
-rs.strategy_module = sm
-report = rs.evaluate_current_strategy()
-print(report.summary_text)
-PY
+bash scripts/manage_research_macd_aggressive_v2.sh status
 ```
+
+停止研究器：
+
+```bash
+bash scripts/manage_research_macd_aggressive_v2.sh stop
+```
+
+重开 stage/session：
+
+```bash
+bash scripts/reset_research_macd_aggressive_v2_stage.sh
+```
+
+启动研究器：
+
+```bash
+bash scripts/manage_research_macd_aggressive_v2.sh start
+```
+
+当前运行状态以 [state/research_macd_aggressive_v2_heartbeat.json](../state/research_macd_aggressive_v2_heartbeat.json) 和管理脚本输出为准。

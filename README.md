@@ -31,7 +31,7 @@
 - 事实层：`15m`
 - `1h / 4h` 由 `15m` 聚合得到，只做趋势和环境确认
 - 回测执行价优先使用 `1m`
-- 当前评分口径：`trend_capture_v16_equal_capture_midfreq_idle_penalty`
+- 当前评分口径：`trend_capture_v17_activity_adjusted_sharpe`
 
 时间窗口：
 
@@ -48,7 +48,7 @@
 - `activity_adjusted_sharpe_score` 用 `train/val` Sharpe 各 50% 计分，Sharpe 不封顶，但会按月非加仓开仓频率折扣；`10-15` 笔/月较健康，`5` 笔/月以下基本不计 Sharpe
 - `trade_activity_penalty` 是低频与长空窗惩罚：交易频率按非加仓开仓数计算，加仓不计入；希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天；低于交易数下沿或超过空窗上限才扣分，不单独做交易数硬 gate
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position
-- 鲁棒性软惩罚只看 `train/val` 落差、`val` 分块稳定性，以及退出参数邻域在 `val` 3 段上的平台形态；当前更明确压 `val` 最差块、尾块和 `train/val` Sharpe gap
+- 鲁棒性软惩罚不额外回测；它复用已有 `train` 滚动分数、`val` 分块分数和 `train/val` 固定窗口 Ulcer，检查 `val` 是否明显跑出 `train` 的宽分布包络，以及两侧波动或回撤结构是否严重不一致
 - `train` 滚动窗口均值/中位数只做诊断；`val` 分块稳定性和严重过拟合集中度继续用于 gate
 - `test` 对新 champion 同步运行；对已完成完整评估但未保留的候选会后台异步补跑关键指标，只做观察记录，不参与晋升，也不进入 prompt
 - 复杂度信息现在只做只读诊断，只写入 `journal / wiki` 供人工查看，不再进入 `planner / reviewer` prompt，也不再自动触发压缩任务
@@ -67,7 +67,7 @@
 - `planner` 是唯一持久 session，只负责想方向和写 `draft brief`。
 - `reviewer` 每轮 fresh，只判断 draft 是否值得落码，结论只有 `PASS / REVISE`。
 - `edit_worker` 只改 [src/strategy_macd_aggressive.py](src/strategy_macd_aggressive.py)。
-- 主进程负责 `diff / smoke / behavioral_noop / exit_range_scan / full eval / gate / 归档 / 播报`。
+- 主进程负责 `diff / smoke / behavioral_noop / exit_range_scan / full eval / gate / 归档 / 播报`；`exit_range_scan` 只做单参数 3 点轻量预筛。
 - 没有刷新 `champion` 时，结果写回 `journal / wiki / reviewer_summary_card / direction_board`；若该轮已完成 full eval，还会后台异步补跑 `test` 关键指标留档，然后继续同一 stage。
 - 同一 stage 内，即使出现 reviewer 打回、`behavioral_noop`、同轮重生或方向切换，`planner` 也不自动重置 session；只有手工重开 stage 或刷新 `champion` 才重置。
 - 刷新 `champion` 时，会同步跑 `test`、归档快照，然后重置 stage 和 planner session。
@@ -125,7 +125,7 @@ flowchart TB
 - `GPT` 更适合固定框架、规则严密、执行链稳定的角色，例如 `reviewer / edit_worker / repair_worker / summary_worker`
 - `DeepSeek` 在发散找方向、提出新假设、快速换研究层级这类 `planner` 任务里，当前表现更好
 
-这个结论只针对当前仓库、当前评分口径 `trend_capture_v16_equal_capture_midfreq_idle_penalty` 和当前这组实验流程成立，不把它外推成所有任务的一般结论。
+这个结论只针对当前仓库、当前评分口径 `trend_capture_v17_activity_adjusted_sharpe` 和当前这组实验流程成立，不把它外推成所有任务的一般结论。
 
 ### 为什么保留混合架构
 

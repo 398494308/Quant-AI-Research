@@ -132,18 +132,12 @@ def summarize_evaluation_impl(
     capture_drop = train_capture_score - validation_capture_score
     promotion_gap = capture_drop
     overfit_report = mod._overfit_risk_report(selection_trend_report, capture_drop)
-    plateau_probe_payload = (
-        dict(_kwargs.get("plateau_probe"))
-        if isinstance(_kwargs.get("plateau_probe"), dict)
-        else {}
-    )
     robustness_penalty_payload = mod._robustness_penalty_payload(
-        promotion_gap=promotion_gap,
-        block_report=validation_block_report,
+        train_window_scores=development_window_scores,
+        validation_block_scores=validation_block_report.block_scores,
+        train_ulcer_pct=train_drawdown_risk_report.blended_ulcer_pct,
+        validation_ulcer_pct=validation_drawdown_risk_report.blended_ulcer_pct,
         scoring=scoring,
-        train_sharpe_ratio=eval_sharpe_ratio,
-        validation_sharpe_ratio=validation_sharpe_ratio,
-        plateau_probe=plateau_probe_payload,
     )
     robustness_penalty_score = robustness_penalty_payload["robustness_penalty_score"]
     validation_long_trades, validation_short_trades = mod._trade_side_counts(validation_source)
@@ -351,12 +345,11 @@ def summarize_evaluation_impl(
         mod._format_funnel_line("val连续漏斗(short)", validation_funnel_counts["short"]),
         f"val短板: {validation_weakest_axis}",
         (
-            "val分块门控分(均值/std/最差/尾块/尾块gap/负分块): "
+            "val分块门控分(均值/std/最差/尾块/负分块): "
             f"{validation_block_report.mean_score:.2f} / "
             f"{validation_block_report.std_score:.2f} / "
             f"{validation_block_report.min_score:.2f} / "
             f"{validation_block_report.tail_score:.2f} / "
-            f"{robustness_penalty_payload['validation_block_tail_gap']:.2f} / "
             f"{validation_block_report.fail_count}"
             + (
                 f" (分块数={validation_block_report.used_block_count})"
@@ -364,16 +357,25 @@ def summarize_evaluation_impl(
             )
         ),
         (
-            "鲁棒性软惩罚(capture_gap/block_std/block_floor/tail/fail/sharpe_gap/plateau/raw/cap后): "
-            f"{robustness_penalty_payload['gap_penalty_score']:.2f} / "
-            f"{robustness_penalty_payload['block_std_penalty_score']:.2f} / "
-            f"{robustness_penalty_payload['block_floor_penalty_score']:.2f} / "
-            f"{robustness_penalty_payload['block_tail_penalty_score']:.2f} / "
-            f"{robustness_penalty_payload['block_fail_penalty_score']:.2f} / "
-            f"{robustness_penalty_payload['sharpe_gap_penalty_score']:.2f} / "
-            f"{robustness_penalty_payload['plateau_penalty_score']:.2f} / "
+            "鲁棒性软惩罚(center/spread/envelope/ulcer/raw/cap后): "
+            f"{robustness_penalty_payload['score_center_penalty_score']:.2f} / "
+            f"{robustness_penalty_payload['score_spread_penalty_score']:.2f} / "
+            f"{robustness_penalty_payload['score_envelope_penalty_score']:.2f} / "
+            f"{robustness_penalty_payload['ulcer_ratio_penalty_score']:.2f} / "
             f"{robustness_penalty_payload['robustness_penalty_score_raw']:.2f} / "
             f"{robustness_penalty_score:.2f}"
+        ),
+        (
+            "鲁棒性分布诊断(train中位/IQR/std, val中位/std, 中位差IQR倍数/波动比/包络溢出IQR倍数/Ulcer比): "
+            f"{robustness_penalty_payload['robustness_train_score_median']:.2f} / "
+            f"{robustness_penalty_payload['robustness_train_score_iqr']:.2f} / "
+            f"{robustness_penalty_payload['robustness_train_score_std']:.2f} | "
+            f"{robustness_penalty_payload['robustness_validation_score_median']:.2f} / "
+            f"{robustness_penalty_payload['robustness_validation_score_std']:.2f} | "
+            f"{robustness_penalty_payload['robustness_score_center_gap_units']:.2f} / "
+            f"{robustness_penalty_payload['robustness_score_spread_ratio']:.2f} / "
+            f"{robustness_penalty_payload['robustness_score_envelope_overflow_units']:.2f} / "
+            f"{robustness_penalty_payload['robustness_ulcer_ratio']:.2f}"
         ),
         (
             "train+val集中度诊断: "
@@ -389,7 +391,6 @@ def summarize_evaluation_impl(
         f"train+val连续多头 / 空头捕获: {selection_trend_report.bull_score:.2f} / {selection_trend_report.bear_score:.2f}",
         f"train+val期间收益 / 路径收益: {selection_total_return:.2f}% / {selection_trend_report.path_return_pct:.2f}%",
         f"Sharpe(train / val / train+val): {eval_sharpe_ratio:.2f} / {validation_sharpe_ratio:.2f} / {selection_sharpe_ratio:.2f}",
-        f"train/val Sharpe gap: {robustness_penalty_payload['train_val_sharpe_gap']:.2f}",
         f"train窗口收益均值 / 中位 / P25 / 最差: {eval_avg_return:.2f}% / {eval_median_return:.2f}% / {eval_p25_return:.2f}% / {eval_worst_return:.2f}%",
         f"val窗口收益均值 / 最差: {validation_avg_return:.2f}% / {validation_worst_return:.2f}%",
         f"train/val趋势抓取落差: {promotion_gap:.2f}",
@@ -408,17 +409,6 @@ def summarize_evaluation_impl(
         "窗口明细:",
         *mod._build_window_lines(results, include_validation=True),
     ]
-    if plateau_probe_payload.get("enabled"):
-        summary_lines.append(
-            "val平台观察(只读): "
-            f"{plateau_probe_payload.get('param', '-')} current={robustness_penalty_payload['plateau_current_value']:.4f}, "
-            f"best={robustness_penalty_payload['plateau_best_value']:.4f}, "
-            f"center={robustness_penalty_payload['plateau_center_period_score']:.2f}, "
-            f"best_score={robustness_penalty_payload['plateau_best_period_score']:.2f}, "
-            f"gap={robustness_penalty_payload['plateau_center_gap']:.2f}, "
-            f"score_span={robustness_penalty_payload['plateau_score_span']:.2f}, "
-            f"dd_span={robustness_penalty_payload['plateau_drawdown_span']:.2f}"
-        )
     if low_activity_payload["lines"]:
         summary_lines.extend(["", *low_activity_payload["lines"]])
     if weakest_signals:
@@ -469,8 +459,14 @@ def summarize_evaluation_impl(
             f"回撤罚分={drawdown_penalty_score:.2f}，鲁棒性软惩罚={robustness_penalty_score:.2f}"
         ),
         (
-            f"- train/val Sharpe 平衡: Sharpe={eval_sharpe_ratio:.2f}/{validation_sharpe_ratio:.2f}，"
-            f"gap={robustness_penalty_payload['train_val_sharpe_gap']:.2f}"
+            f"- 鲁棒性分布: train分数中位/IQR={robustness_penalty_payload['robustness_train_score_median']:.2f}/"
+            f"{robustness_penalty_payload['robustness_train_score_iqr']:.2f}，"
+            f"val分数中位/std={robustness_penalty_payload['robustness_validation_score_median']:.2f}/"
+            f"{robustness_penalty_payload['robustness_validation_score_std']:.2f}，"
+            f"中位差IQR倍数={robustness_penalty_payload['robustness_score_center_gap_units']:.2f}，"
+            f"波动比={robustness_penalty_payload['robustness_score_spread_ratio']:.2f}，"
+            f"包络溢出IQR倍数={robustness_penalty_payload['robustness_score_envelope_overflow_units']:.2f}，"
+            f"Ulcer比={robustness_penalty_payload['robustness_ulcer_ratio']:.2f}"
         ),
         (
             f"- train+val 状态: 趋势分/收益分={selection_trend_report.trend_score:.2f}/"
@@ -484,8 +480,7 @@ def summarize_evaluation_impl(
             f"窗口 Ulcer(train/val blended)="
             f"{train_drawdown_risk_report.blended_ulcer_pct:.2f}/{validation_drawdown_risk_report.blended_ulcer_pct:.2f}%，"
             f"手续费拖累={avg_fee_drag:.2f}%，"
-            f"train/val 抓取分差={promotion_gap:.2f}，"
-            f"val尾块gap={robustness_penalty_payload['validation_block_tail_gap']:.2f}"
+            f"train/val 抓取分差={promotion_gap:.2f}"
         ),
         (
             f"- 集中度诊断: {overfit_report.risk_level}({overfit_report.risk_score:.0f})，"
@@ -494,15 +489,6 @@ def summarize_evaluation_impl(
             f"处置={mod.overfit_reference_action(overfit_report.risk_score, overfit_report.hard_fail)}"
         ),
     ]
-    if plateau_probe_payload.get("enabled"):
-        prompt_lines.append(
-            f"- val平台观察: {plateau_probe_payload.get('param', '-')} "
-            f"center/best={robustness_penalty_payload['plateau_center_period_score']:.2f}/"
-            f"{robustness_penalty_payload['plateau_best_period_score']:.2f}，"
-            f"gap={robustness_penalty_payload['plateau_center_gap']:.2f}，"
-            f"score_span={robustness_penalty_payload['plateau_score_span']:.2f}，"
-            f"dd_span={robustness_penalty_payload['plateau_drawdown_span']:.2f}"
-        )
     if low_activity_payload["prompt_line"]:
         prompt_lines.append(low_activity_payload["prompt_line"])
     if weakest_signals:
@@ -639,7 +625,6 @@ def summarize_evaluation_impl(
         "eval_sharpe_ratio": eval_sharpe_ratio,
         "validation_sharpe_ratio": validation_sharpe_ratio,
         "selection_sharpe_ratio": selection_sharpe_ratio,
-        "train_val_sharpe_gap": robustness_penalty_payload["train_val_sharpe_gap"],
         "train_monthly_entries": train_monthly_entries,
         "validation_monthly_entries": validation_monthly_entries,
         "train_sharpe_activity_discount": train_sharpe_activity_discount,
@@ -654,27 +639,23 @@ def summarize_evaluation_impl(
         "validation_block_score_std": validation_block_report.std_score,
         "validation_block_score_min": validation_block_report.min_score,
         "validation_block_tail_score": validation_block_report.tail_score,
-        "validation_block_tail_gap": robustness_penalty_payload["validation_block_tail_gap"],
         "validation_block_fail_count": float(validation_block_report.fail_count),
         "validation_block_count_used": float(validation_block_report.used_block_count),
-        "gap_penalty_score": robustness_penalty_payload["gap_penalty_score"],
-        "block_std_penalty_score": robustness_penalty_payload["block_std_penalty_score"],
-        "block_floor_penalty_score": robustness_penalty_payload["block_floor_penalty_score"],
-        "block_tail_penalty_score": robustness_penalty_payload["block_tail_penalty_score"],
-        "block_fail_penalty_score": robustness_penalty_payload["block_fail_penalty_score"],
-        "sharpe_gap_penalty_score": robustness_penalty_payload["sharpe_gap_penalty_score"],
-        "plateau_penalty_score": robustness_penalty_payload["plateau_penalty_score"],
+        "robustness_train_score_median": robustness_penalty_payload["robustness_train_score_median"],
+        "robustness_train_score_iqr": robustness_penalty_payload["robustness_train_score_iqr"],
+        "robustness_train_score_std": robustness_penalty_payload["robustness_train_score_std"],
+        "robustness_validation_score_median": robustness_penalty_payload["robustness_validation_score_median"],
+        "robustness_validation_score_std": robustness_penalty_payload["robustness_validation_score_std"],
+        "robustness_score_center_gap_units": robustness_penalty_payload["robustness_score_center_gap_units"],
+        "robustness_score_spread_ratio": robustness_penalty_payload["robustness_score_spread_ratio"],
+        "robustness_score_envelope_overflow_units": robustness_penalty_payload["robustness_score_envelope_overflow_units"],
+        "robustness_ulcer_ratio": robustness_penalty_payload["robustness_ulcer_ratio"],
+        "score_center_penalty_score": robustness_penalty_payload["score_center_penalty_score"],
+        "score_spread_penalty_score": robustness_penalty_payload["score_spread_penalty_score"],
+        "score_envelope_penalty_score": robustness_penalty_payload["score_envelope_penalty_score"],
+        "ulcer_ratio_penalty_score": robustness_penalty_payload["ulcer_ratio_penalty_score"],
         "robustness_penalty_score_raw": robustness_penalty_payload["robustness_penalty_score_raw"],
         "robustness_penalty_score": robustness_penalty_score,
-        "plateau_probe_enabled": robustness_penalty_payload["plateau_probe_enabled"],
-        "plateau_current_value": robustness_penalty_payload["plateau_current_value"],
-        "plateau_best_value": robustness_penalty_payload["plateau_best_value"],
-        "plateau_center_period_score": robustness_penalty_payload["plateau_center_period_score"],
-        "plateau_best_period_score": robustness_penalty_payload["plateau_best_period_score"],
-        "plateau_center_gap": robustness_penalty_payload["plateau_center_gap"],
-        "plateau_score_span": robustness_penalty_payload["plateau_score_span"],
-        "plateau_drawdown_span": robustness_penalty_payload["plateau_drawdown_span"],
-        "plateau_current_is_best": robustness_penalty_payload["plateau_current_is_best"],
         "overfit_risk_score": overfit_report.risk_score,
         "overfit_top1_positive_share": overfit_report.top1_positive_share,
         "overfit_chain_positive_share": overfit_report.max_chain_positive_share,
@@ -698,7 +679,5 @@ def summarize_evaluation_impl(
         gate_reason=gate_reason,
         summary_text="\n".join(summary_lines),
         prompt_summary_text="\n".join(prompt_lines),
-        artifacts={
-            "plateau_probe": plateau_probe_payload,
-        },
+        artifacts={},
     )

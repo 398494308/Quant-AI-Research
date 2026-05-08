@@ -325,27 +325,4 @@ def build_discord_summary_message(
             _render_markdown_table(scan_rows),
             "```",
         ])
-    plateau_result = getattr(candidate, "plateau_probe_result", None) if candidate is not None else None
-    if isinstance(plateau_result, dict) and plateau_result.get("enabled"):
-        plateau_rows = [
-            ("参数", str(plateau_result.get("param", "-"))),
-            ("观察值", " / ".join(str(item) for item in plateau_result.get("values", [])[:5]) or "-"),
-            (
-                "center/best",
-                f"{float(plateau_result.get('center_period_score', 0.0)):.2f} / "
-                f"{float(plateau_result.get('best_period_score', 0.0)):.2f}",
-            ),
-            (
-                "gap/span/dd_span",
-                f"{float(plateau_result.get('center_gap', 0.0)):.2f} / "
-                f"{float(plateau_result.get('score_span', 0.0)):.2f} / "
-                f"{float(plateau_result.get('drawdown_span', 0.0)):.2f}",
-            ),
-        ]
-        parts.extend([
-            "Plateau Probe：",
-            "```text",
-            _render_markdown_table(plateau_rows),
-            "```",
-        ])
     return "\n".join(parts)

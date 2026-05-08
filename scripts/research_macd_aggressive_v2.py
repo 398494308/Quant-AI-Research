@@ -23,7 +23,7 @@ import sys
 import time
 import traceback
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +56,6 @@ from research_v2.exit_range_scan import (
     infer_exit_range_scan_spec,
     replace_exit_param_value,
     run_exit_range_scan,
-    run_plateau_probe,
 )
 from research_v2.evaluation import (
     EvaluationReport,
@@ -1536,12 +1535,7 @@ def _generate_new_champion_charts(
     )
 
 
-def evaluate_current_strategy(
-    allow_early_reject: bool = False,
-    *,
-    plateau_probe_candidate: StrategyCandidate | None = None,
-    plateau_probe_base_source: str = "",
-) -> EvaluationReport:
+def evaluate_current_strategy(allow_early_reject: bool = False) -> EvaluationReport:
     prepared_context = _prepare_backtest_context()
     base_results = _run_base_backtests(
         allow_early_reject=allow_early_reject,
@@ -1552,19 +1546,12 @@ def evaluate_current_strategy(
         None,
     )
     selection_period_result = _run_selection_period_backtest(prepared_context)
-    plateau_probe_result: dict[str, Any] | None = None
-    if plateau_probe_candidate is not None and plateau_probe_base_source:
-        plateau_probe_result = _run_candidate_plateau_probe(
-            plateau_probe_candidate,
-            base_source=plateau_probe_base_source,
-        )
     return summarize_evaluation(
         base_results,
         RUNTIME.gates,
         selection_period_result=selection_period_result,
         validation_continuous_result=validation_continuous_result,
         scoring=RUNTIME.scoring,
-        plateau_probe=plateau_probe_result,
     )
 
 
@@ -3259,8 +3246,6 @@ def _build_model_round_brief(
         promotion_trade_activity_penalty_weight=RUNTIME.scoring.promotion_trade_activity_penalty_weight,
         trade_idle_penalty_weight=RUNTIME.scoring.trade_idle_penalty_weight,
         max_trade_idle_days=RUNTIME.scoring.max_trade_idle_days,
-        robustness_sharpe_gap_warn_threshold=RUNTIME.scoring.robustness_sharpe_gap_warn_threshold,
-        robustness_sharpe_gap_fail_threshold=RUNTIME.scoring.robustness_sharpe_gap_fail_threshold,
     )
     round_brief = _request_validated_round_brief(
         base_source=base_source,
@@ -3988,7 +3973,6 @@ def _build_journal_entry(
         ],
         "exit_range_scan": candidate.exit_range_scan or {},
         "exit_range_scan_result": candidate.exit_range_scan_result or {},
-        "plateau_probe": candidate.plateau_probe_result or {},
         "cluster_key": str(candidate_signature.get("cluster_key", "")).strip()
         or cluster_key_for_components("", candidate.change_tags),
         "quality_score": quality_score,
@@ -4289,18 +4273,10 @@ def _smoke_candidate(candidate: StrategyCandidate) -> list[dict[str, Any]]:
         raise CandidateRuntimeFailure("smoke_test", exc) from exc
 
 
-def _evaluate_candidate(
-    candidate: StrategyCandidate,
-    base_source: str | None = None,
-) -> EvaluationReport:
+def _evaluate_candidate(candidate: StrategyCandidate) -> EvaluationReport:
     _activate_candidate(candidate)
-    resolved_base_source = base_source if base_source is not None else best_source
     try:
-        return evaluate_current_strategy(
-            allow_early_reject=True,
-            plateau_probe_candidate=candidate,
-            plateau_probe_base_source=resolved_base_source,
-        )
+        return evaluate_current_strategy(allow_early_reject=True)
     except EarlyRejection:
         raise
     except Exception as exc:
@@ -4321,94 +4297,6 @@ def _format_exit_range_scan_log(result: dict[str, Any]) -> str:
             f"fee={float(row.get('mean_fee_drag', 0.0)):.2f}%"
         )
     return "; ".join(compact)
-
-
-def _split_window_evenly(window: ResearchWindow, *, parts: int, label_prefix: str) -> list[ResearchWindow]:
-    start_dt = datetime.strptime(window.start_date, "%Y-%m-%d")
-    end_dt = datetime.strptime(window.end_date, "%Y-%m-%d")
-    total_days = (end_dt - start_dt).days + 1
-    actual_parts = max(1, min(int(parts), total_days))
-    base_size, remainder = divmod(total_days, actual_parts)
-    windows: list[ResearchWindow] = []
-    cursor = start_dt
-    for index in range(actual_parts):
-        window_days = base_size + (1 if index < remainder else 0)
-        part_end = cursor + timedelta(days=window_days - 1)
-        windows.append(
-            ResearchWindow(
-                group=window.group,
-                label=f"{label_prefix}{index + 1}",
-                start_date=cursor.strftime("%Y-%m-%d"),
-                end_date=part_end.strftime("%Y-%m-%d"),
-                weight=window.weight,
-            )
-        )
-        cursor = part_end + timedelta(days=1)
-    return windows
-
-
-def _plateau_probe_windows() -> list[ResearchWindow]:
-    return _split_window_evenly(_validation_window(), parts=3, label_prefix="val_probe")
-
-
-def _format_plateau_probe_log(result: dict[str, Any]) -> str:
-    rows = result.get("summary", []) if isinstance(result, dict) else []
-    compact = []
-    for row in rows[:5]:
-        compact.append(
-            f"{row.get('value')}=>score={float(row.get('mean_period_score', 0.0)):.2f},"
-            f"ret={float(row.get('mean_return', 0.0)):.2f}%,"
-            f"dd={float(row.get('max_drawdown', 0.0)):.2f}%"
-        )
-    return "; ".join(compact)
-
-
-def _run_candidate_plateau_probe(
-    candidate: StrategyCandidate,
-    *,
-    base_source: str,
-) -> dict[str, Any]:
-    if not RUNTIME.plateau_probe_enabled:
-        return {
-            "enabled": False,
-            "skipped_reason": "plateau_probe_disabled",
-        }
-    spec = infer_exit_range_scan_spec(
-        base_source,
-        candidate.strategy_code,
-        candidate.exit_range_scan,
-        max_values=RUNTIME.exit_range_scan_max_values,
-    )
-    if spec is None:
-        return {
-            "enabled": False,
-            "skipped_reason": "no_exit_param_probe_target",
-        }
-
-    probe_windows = _plateau_probe_windows()
-    write_heartbeat(
-        "plateau_probing",
-        message=f"iteration {iteration_counter} plateau probe",
-        phase="plateau_probe",
-        current_window=spec.param,
-        window_index=0,
-        window_count=len(probe_windows),
-    )
-    outcome = run_plateau_probe(
-        repo_root=REPO_ROOT,
-        spec=spec,
-        current_exit_params=active_exit_params(),
-        windows=probe_windows,
-        workers=RUNTIME.exit_range_scan_workers,
-    )
-    result_payload = outcome.to_dict()
-    log_info(
-        f"plateau probe: param={outcome.param}, values={list(outcome.values)}, "
-        f"center={outcome.center_period_score:.2f}, best={outcome.best_period_score:.2f}, "
-        f"gap={outcome.center_gap:.2f}, score_span={outcome.score_span:.2f}, "
-        f"dd_span={outcome.drawdown_span:.2f}; {_format_plateau_probe_log(result_payload)}"
-    )
-    return result_payload
 
 
 def _maybe_apply_exit_range_scan(candidate: StrategyCandidate, *, base_source: str) -> StrategyCandidate:
@@ -4501,13 +4389,6 @@ def _candidate_with_repair(
                 raise CandidateBehavioralNoop(current, behavior_diff)
             current = _maybe_apply_exit_range_scan(current, base_source=base_source)
             report = _evaluate_candidate(current)
-            plateau_probe_result = {}
-            if isinstance(report.artifacts, dict):
-                raw_plateau_probe = report.artifacts.get("plateau_probe")
-                if isinstance(raw_plateau_probe, dict):
-                    plateau_probe_result = dict(raw_plateau_probe)
-            if plateau_probe_result:
-                current = replace(current, plateau_probe_result=plateau_probe_result)
             return current, report
         except CandidateRuntimeFailure as exc:
             error_message = "".join(

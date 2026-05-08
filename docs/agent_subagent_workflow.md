@@ -26,8 +26,7 @@ flowchart TB
     K -- 是 --> M[主进程判卷<br/>diff / smoke / behavioral_noop]
     M --> N[可选 exit_range_scan<br/>单参数 3 点轻量预筛]
     N --> O[full eval<br/>train walk-forward + val]
-    O --> P[可选 plateau_probe<br/>只读观察 val 3 段平台]
-    P --> Q[gate + promotion_score]
+    O --> Q[gate + promotion_score]
     Q --> R[summary_worker<br/>按真实 diff 回写摘要]
     R --> S{刷新 champion?}
 
@@ -67,7 +66,7 @@ flowchart TB
 - `trade_activity_penalty` 是低频与长空窗惩罚：交易频率按非加仓开仓数计算，加仓不计入；希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天；当前只在主评分里减分，不再做硬 gate。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - 交易数、`filled_entries` 和漏斗通过量只保留观察价值，不再作为下一轮方向的默认软触发。
-- 鲁棒性软惩罚只看 `train/val` 落差、`val` 分块稳定性，以及退出参数邻域在 `val` 3 段上的平台形态；当前更明确压 `val` 最差块、尾块和 `train/val` Sharpe gap。
+- 鲁棒性软惩罚不额外回测；它复用已有 `train` 滚动分数、`val` 分块分数和 `train/val` 固定窗口 Ulcer，检查 `val` 是否明显跑出 `train` 的宽分布包络，以及两侧波动或回撤结构是否严重不一致。
 - `test` 只做只读观察；reject / duplicate_skipped 的异步 `test` 只进留档，不进 prompt、不进晋升。
 
 ## 每一轮怎么跑
@@ -81,7 +80,7 @@ flowchart TB
 7. 若出现 no-edit、语法错误、缺 helper、校验失败等技术问题，`repair_worker` 只修技术错误。
 8. 主进程检查真实 diff、重复源码、smoke 行为和关键漏斗变化。
 9. 如果 brief 指定单个连续型 `EXIT_PARAMS` 的 `exit_range_scan`，主进程最多扫 3 个值，只做轻量预筛。
-10. 主进程跑完整 `train walk-forward + val`；若本轮动了允许观察的退出参数，再额外做一次只读 `plateau_probe`，只看 `val` 3 段平台，不改代码、不改基底。
+10. 主进程跑完整 `train walk-forward + val`；评分阶段只使用已有评估结果和轻量预筛结果。
 11. 主进程执行 gate 与 promotion 判断。
 12. `summary_worker` 按最终真实 diff 回写候选摘要。
 13. 没有刷新 champion：写回 `journal / wiki / reviewer_summary_card / direction_board`；若该轮已完成 full eval，则后台异步补跑 `test` 关键指标留档，然后进入下一轮。

@@ -411,8 +411,6 @@ def build_strategy_research_prompt(
     promotion_trade_activity_penalty_weight: float = 0.20,
     trade_idle_penalty_weight: float = 0.15,
     max_trade_idle_days: float = 7.0,
-    robustness_sharpe_gap_warn_threshold: float = 0.15,
-    robustness_sharpe_gap_fail_threshold: float = 0.30,
 ) -> str:
     _ = (
         current_complexity_headroom_text,
@@ -467,7 +465,7 @@ def build_strategy_research_prompt(
 - `promotion_score` 现在以 `capture_score / timed_return_score / activity_adjusted_sharpe_score = 0.45 / 0.30 / 0.25` 为主体；再额外减去 `trade_activity_penalty`。Sharpe 不封顶，train/val 各 50%，但会按月非加仓开仓频率折扣：10-15 笔/月较健康，8-9 笔/月偏少，7 笔/月以下明显负面，5 笔/月以下基本不计 Sharpe。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，空窗惩罚权重是 `{trade_idle_penalty_weight:.2f}`。`timed_return_score` 仍是按日收益年化补分，再减去分段回撤惩罚和轻量鲁棒性软惩罚。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓不占这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - `capture_score` 不再只偏向少数最大趋势段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
-- 鲁棒性重点看 `train/val` 抓取落差、`train/val` Sharpe 平衡、`val` 分块稳定性，以及退出参数邻域在 `val` 分段上的平台形态。
+- 鲁棒性只做轻量软惩罚：用已有 `train` 滚动分数的 median/IQR/std 和 `val` 分块分数比较分布是否离谱，再轻查 `train/val` Ulcer 比；不额外回测。
 - `train` 滚动窗口均值/中位数只做诊断；严重过拟合集中度仍保留为 gate；二者都不直接进入 `promotion_score` 主公式。
 - `test` 只做只读观察，不参与晋升，也不能作为下一轮 prompt 的证据源。
 
@@ -503,7 +501,6 @@ def build_strategy_research_prompt(
 - train 与 val 分数落差 <= {max_dev_validation_gap:.2f}
 - val 多头捕获 >= 0.00，val 空头捕获 >= 0.00
 - val 会再切成 {validation_block_count} 个连续时间分块：最差分块 >= {min_validation_block_floor:.2f}，负分块最多 {max_validation_block_failures} 个
-- `train/val` Sharpe gap 在 {robustness_sharpe_gap_warn_threshold:.2f} 开始告警，在 {robustness_sharpe_gap_fail_threshold:.2f} 进入更强惩罚
 - 晋升要求是 `gate` 通过，且 `promotion_score` 严格高于当前 active reference；已取消的是额外晋级边际，不是“低分也可替换”
 - 手续费拖累 <= 11.5%
 - train+val 严重集中度过拟合会直接淘汰
@@ -514,8 +511,8 @@ def build_strategy_research_prompt(
 {build_candidate_response_format_instructions()}
 - 主进程还会把这份 `draft` 交给 `reviewer` 审稿；若 reviewer 打回，本轮必须先吸收反馈再重写。
 - `primary_direction` 只写本轮主动施力方向；`change_plan` 必须具体到规则块、阈值或最终放行链。
-- 默认优先找更稳的平台：先改善 `val` 最差块、尾块和 `train/val` Sharpe 平衡，再决定补哪一侧；若一个方案主要让强的一侧更强，却不能改善这些稳定性指标，默认降权。
-- 如果本轮主要改 `EXIT_PARAMS` 里的连续数值，可以用 `exit_range_scan` 给一个 3 点小范围；系统 full eval 后会额外做只读 `plateau_probe`，不会自动改代码。
+- 默认优先找更稳的泛化形态：先改善 `val` 最差块、`train/val` 分布离群度和交易活跃度，再决定补哪一侧；若一个方案主要让强的一侧更强，却不能改善这些稳定性指标，默认降权。
+- 如果本轮主要改 `EXIT_PARAMS` 里的连续数值，可以用 `exit_range_scan` 给一个 3 点小范围；系统只在预筛阶段做这次轻量扫描。
 - `novelty_proof` 不是自我辩护。{_novelty_proof_rule()}
 - 不允许把“未执行代码改动”“blocked”“no_edit”“no_change”这类占位回复当成完成。
 - 如果辅助记忆缺失，就直接基于当前源码做单假设判断，不要停在解释阶段。

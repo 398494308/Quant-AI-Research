@@ -33,22 +33,22 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
                         "MACD_V2_TRADE_ACTIVITY_VALIDATION_RANGE_LOW=120",
                         "MACD_V2_TRADE_ACTIVITY_VALIDATION_RANGE_HIGH=180",
                         "MACD_V2_ROBUSTNESS_PENALTY_CAP=0.31",
-                        "MACD_V2_ROBUSTNESS_GAP_WARN_THRESHOLD=0.17",
-                        "MACD_V2_ROBUSTNESS_GAP_FAIL_THRESHOLD=0.23",
-                        "MACD_V2_ROBUSTNESS_GAP_WARN_PENALTY=0.04",
-                        "MACD_V2_ROBUSTNESS_GAP_FAIL_PENALTY=0.09",
-                        "MACD_V2_ROBUSTNESS_BLOCK_STD_WARN_THRESHOLD=0.19",
-                        "MACD_V2_ROBUSTNESS_BLOCK_STD_FAIL_THRESHOLD=0.27",
-                        "MACD_V2_ROBUSTNESS_BLOCK_STD_WARN_PENALTY=0.05",
-                        "MACD_V2_ROBUSTNESS_BLOCK_STD_FAIL_PENALTY=0.08",
-                        "MACD_V2_ROBUSTNESS_BLOCK_FLOOR_WARN_THRESHOLD=0.21",
-                        "MACD_V2_ROBUSTNESS_BLOCK_FLOOR_FAIL_THRESHOLD=0.07",
-                        "MACD_V2_ROBUSTNESS_BLOCK_FLOOR_WARN_PENALTY=0.04",
-                        "MACD_V2_ROBUSTNESS_BLOCK_FLOOR_FAIL_PENALTY=0.09",
-                        "MACD_V2_ROBUSTNESS_BLOCK_TAIL_WARN_THRESHOLD=0.11",
-                        "MACD_V2_ROBUSTNESS_BLOCK_TAIL_FAIL_THRESHOLD=0.19",
-                        "MACD_V2_ROBUSTNESS_BLOCK_TAIL_WARN_PENALTY=0.05",
-                        "MACD_V2_ROBUSTNESS_BLOCK_TAIL_FAIL_PENALTY=0.11",
+                        "MACD_V2_ROBUSTNESS_SCORE_CENTER_WARN_UNITS=2.5",
+                        "MACD_V2_ROBUSTNESS_SCORE_CENTER_FAIL_UNITS=4.5",
+                        "MACD_V2_ROBUSTNESS_SCORE_CENTER_EXTREME_UNITS=8.5",
+                        "MACD_V2_ROBUSTNESS_SCORE_CENTER_PENALTY_MAX=0.06",
+                        "MACD_V2_ROBUSTNESS_SCORE_SPREAD_WARN_RATIO=3.5",
+                        "MACD_V2_ROBUSTNESS_SCORE_SPREAD_FAIL_RATIO=6.5",
+                        "MACD_V2_ROBUSTNESS_SCORE_SPREAD_EXTREME_RATIO=10.5",
+                        "MACD_V2_ROBUSTNESS_SCORE_SPREAD_PENALTY_MAX=0.04",
+                        "MACD_V2_ROBUSTNESS_SCORE_ENVELOPE_MULTIPLIER=4.5",
+                        "MACD_V2_ROBUSTNESS_SCORE_ENVELOPE_FAIL_UNITS=2.5",
+                        "MACD_V2_ROBUSTNESS_SCORE_ENVELOPE_EXTREME_UNITS=5.5",
+                        "MACD_V2_ROBUSTNESS_SCORE_ENVELOPE_PENALTY_MAX=0.05",
+                        "MACD_V2_ROBUSTNESS_ULCER_WARN_RATIO=3.2",
+                        "MACD_V2_ROBUSTNESS_ULCER_FAIL_RATIO=6.2",
+                        "MACD_V2_ROBUSTNESS_ULCER_EXTREME_RATIO=10.2",
+                        "MACD_V2_ROBUSTNESS_ULCER_PENALTY_MAX=0.07",
                     ]
                 ),
                 encoding="utf-8",
@@ -75,22 +75,22 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
             self.assertEqual(runtime.scoring.trade_activity_validation_range_low, 120)
             self.assertEqual(runtime.scoring.trade_activity_validation_range_high, 180)
             self.assertAlmostEqual(runtime.scoring.robustness_penalty_cap, 0.31)
-            self.assertAlmostEqual(runtime.scoring.robustness_gap_warn_threshold, 0.17)
-            self.assertAlmostEqual(runtime.scoring.robustness_gap_fail_threshold, 0.23)
-            self.assertAlmostEqual(runtime.scoring.robustness_gap_warn_penalty, 0.04)
-            self.assertAlmostEqual(runtime.scoring.robustness_gap_fail_penalty, 0.09)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_std_warn_threshold, 0.19)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_std_fail_threshold, 0.27)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_std_warn_penalty, 0.05)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_std_fail_penalty, 0.08)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_floor_warn_threshold, 0.21)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_floor_fail_threshold, 0.07)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_floor_warn_penalty, 0.04)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_floor_fail_penalty, 0.09)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_tail_warn_threshold, 0.11)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_tail_fail_threshold, 0.19)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_tail_warn_penalty, 0.05)
-            self.assertAlmostEqual(runtime.scoring.robustness_block_tail_fail_penalty, 0.11)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_center_warn_units, 2.5)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_center_fail_units, 4.5)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_center_extreme_units, 8.5)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_center_penalty_max, 0.06)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_spread_warn_ratio, 3.5)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_spread_fail_ratio, 6.5)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_spread_extreme_ratio, 10.5)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_spread_penalty_max, 0.04)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_envelope_multiplier, 4.5)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_envelope_fail_units, 2.5)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_envelope_extreme_units, 5.5)
+            self.assertAlmostEqual(runtime.scoring.robustness_score_envelope_penalty_max, 0.05)
+            self.assertAlmostEqual(runtime.scoring.robustness_ulcer_warn_ratio, 3.2)
+            self.assertAlmostEqual(runtime.scoring.robustness_ulcer_fail_ratio, 6.2)
+            self.assertAlmostEqual(runtime.scoring.robustness_ulcer_extreme_ratio, 10.2)
+            self.assertAlmostEqual(runtime.scoring.robustness_ulcer_penalty_max, 0.07)
 
 
 if __name__ == "__main__":
