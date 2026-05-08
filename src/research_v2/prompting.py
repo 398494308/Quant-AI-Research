@@ -384,7 +384,7 @@ def build_strategy_research_prompt(
     reference_metrics: dict[str, Any] | None = None,
     benchmark_label: str = "champion",
     current_base_role: str = "champion",
-    score_regime: str = "trend_capture_v17_activity_adjusted_sharpe",
+    score_regime: str = "trend_capture_v18_continuous_no_sharpe",
     current_complexity_headroom_text: str = "",
     session_mode: str = "resume",
     operator_focus_text: str = "",
@@ -462,7 +462,7 @@ def build_strategy_research_prompt(
 - 围绕一个可证伪假设先写 round brief，交给后续 edit worker 落码。
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
 - 当前评分口径是 `{score_regime}`；候选必须先过 `gate`，且 `promotion_score` 严格高于当前 active reference，才有资格刷新 champion；当前不再要求额外晋级边际。
-- `promotion_score` 现在以 `capture_score / timed_return_score / activity_adjusted_sharpe_score = 0.45 / 0.30 / 0.25` 为主体；再额外减去 `trade_activity_penalty`。Sharpe 不封顶，train/val 各 50%，但会按月非加仓开仓频率折扣：10-15 笔/月较健康，8-9 笔/月偏少，7 笔/月以下明显负面，5 笔/月以下基本不计 Sharpe。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，空窗惩罚权重是 `{trade_idle_penalty_weight:.2f}`。`timed_return_score` 仍是按日收益年化补分，再减去分段回撤惩罚和轻量鲁棒性软惩罚。
+- `promotion_score` 现在以 `capture_score / timed_return_score = 0.60 / 0.40` 为主体；再额外减去 `trade_activity_penalty`。Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，空窗惩罚权重是 `{trade_idle_penalty_weight:.2f}`。`timed_return_score` 仍是按日收益年化补分，再减去分段回撤惩罚和轻量鲁棒性软惩罚。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓不占这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - `capture_score` 不再只偏向少数最大趋势段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
 - 鲁棒性只做轻量软惩罚：用已有 `train` 滚动分数的 median/IQR/std 和 `val` 分块分数比较分布是否离谱，再轻查 `train/val` Ulcer 比；不额外回测。
@@ -497,7 +497,7 @@ def build_strategy_research_prompt(
 当前口径的 gate / 评分提醒：
 - val 趋势段命中率 >= {min_validation_hit_rate:.0%}
 - val 趋势捕获分 >= 0.05
-- 交易活跃度现在既会单独惩罚低频与长空窗，也会折扣 Sharpe：希望区间约是 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`；最长无新开仓约束是 `{max_trade_idle_days:.1f}` 天；超过 15 笔/月不额外加分，不要为了刷交易数制造无收益短交易
+- 交易活跃度现在会单独惩罚低频与长空窗：希望区间约是 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`；最长无新开仓约束是 `{max_trade_idle_days:.1f}` 天；超过 15 笔/月不额外加分，不要为了刷交易数制造无收益短交易
 - train 与 val 分数落差 <= {max_dev_validation_gap:.2f}
 - val 多头捕获 >= 0.00，val 空头捕获 >= 0.00
 - val 会再切成 {validation_block_count} 个连续时间分块：最差分块 >= {min_validation_block_floor:.2f}，负分块最多 {max_validation_block_failures} 个

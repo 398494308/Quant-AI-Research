@@ -4,7 +4,7 @@
 
 ## 当前快照
 
-`2026-05-08 14:24:23`（Asia/Shanghai）已停机后重算当前 active reference，并按新评分写回 [state/research_macd_aggressive_v2_best.json](../state/research_macd_aggressive_v2_best.json)。当前策略源码同步在：
+`2026-05-08 21:41:04`（Asia/Shanghai）已重算当前 active reference，并按新评分写回 [state/research_macd_aggressive_v2_best.json](../state/research_macd_aggressive_v2_best.json)。当前策略源码同步在：
 
 - [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)
 - [backups/strategy_macd_aggressive_v2_best.py](../backups/strategy_macd_aggressive_v2_best.py)
@@ -15,31 +15,31 @@
 | 项目 | 数值 |
 | --- | --- |
 | active reference | champion |
-| reference hash | `3c1f59dbfe98f1702510e15f51680066346d01b9755453e74c73e0975e8f1bdd` |
-| score regime | `trend_capture_v17_activity_adjusted_sharpe` |
-| reference stage 起点轮次 | 9 |
+| reference hash | `928e86b8e8ed5916932986077ebe655b7678b06b3e61cb0d545ffbf6527ce415` |
+| score regime | `trend_capture_v18_continuous_no_sharpe` |
+| reference stage 起点轮次 | 24 |
 | gate | 通过 |
-| quality_score | 0.8406 |
-| promotion_score | -0.0709 |
-| capture_score / timed_return_score / activity_adjusted_sharpe_score | 0.7142 / 1.2663 / 0.6300 |
-| drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 1.6914 / 0.7797 / 0.0000 |
-| train/val 连续抓取分 | 0.8406 / 0.5878 |
-| train+val 期间收益 | 818.19% |
-| val 期间收益 | 115.30% |
-| val 多/空平仓数 | 100 / 96 |
-| train+val 多/空捕获 | 0.4913 / 0.4704 |
-| Sharpe(train / val / train+val) | 1.32 / 1.20 / 1.42 |
-| train/val 非加仓开仓 | 288 / 196 |
-| train/val 月非加仓开仓 | 15.94 / 16.34 |
+| quality_score | 0.5890 |
+| promotion_score | 0.7249 |
+| capture_score / timed_return_score | 0.5622 / 1.8837 |
+| drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 1.0793 / 0.2159 / 0.0000 |
+| train/val 连续抓取分 | 0.5890 / 0.5354 |
+| train+val 期间收益 | 989.16% |
+| val 期间收益 | 297.70% |
+| val 多/空平仓数 | 91 / 69 |
+| train+val 多/空捕获 | 0.4911 / 0.4729 |
+| Sharpe(train / val / train+val) | 1.66 / 1.85 / 1.54 |
+| train/val 非加仓开仓 | 246 / 160 |
+| train/val 月非加仓开仓 | 13.61 / 13.34 |
 | 交易短缺惩罚 / 空窗惩罚 / 总活跃度惩罚 | 0.0000 / 0.1500 / 0.1500 |
-| val 分块均值/std/最差/负块数 | 0.6490 / 0.4246 / 0.1940 / 0 |
+| val 分块均值/std/最差/负块数 | 0.6905 / 0.4009 / 0.1776 / 0 |
 | 鲁棒性 center/spread/envelope/ulcer 惩罚 | 0.0000 / 0.0000 / 0.0000 / 0.0000 |
-| test 收益 / Sharpe / 最大回撤 / 平仓数 | 5.74% / 0.63 / 54.76% / 33 |
+| test 收益 / Sharpe / 最大回撤 / 平仓数 | -15.38% / -0.48 / 47.30% / 15 |
 
 说明：
 
-- 当前 `promotion_score` 为负，主要不是 gate 问题，而是回撤惩罚和最长无新开仓惩罚仍重。
-- 当前交易频率已经在目标区间上沿附近；后续不需要继续刷交易数量，重点应转到收益质量、回撤和长空窗。
+- 当前 `promotion_score` 已按新口径重算为正；Sharpe 不再贡献主评分，分数主要来自趋势抓取、按日收益补分、回撤惩罚和活跃度惩罚。
+- 当前交易频率在目标区间内；后续不需要继续刷交易数量，重点应转到收益质量、回撤、长空窗和 `test` 外推表现。
 - Funding 覆盖仍为 `0%`，这是数据源缺口；最终实盘前用长时间 demo run 兜底观察，不把它硬塞进当前研究评分。
 
 ## 数据与窗口
@@ -68,29 +68,15 @@
 
 `capture_score = 0.50 * train_capture_score + 0.50 * val_capture_score`
 
+主评分使用连续 `train / val` 数据源：`train` 从已有 `train+val` 连续回测按 `val` 起点切出，`val` 使用连续 validation 结果。`train` walk-forward 仍保留用于窗口诊断、鲁棒性和早停。
+
 收益补充分：
 
 `timed_return_score = 0.50 * train_timed_return_score + 0.50 * val_timed_return_score`
 
-活动调整 Sharpe：
+Sharpe：
 
-`train_adjusted_sharpe = (train_sharpe_ratio / 2.0) * train_activity_discount`
-
-`val_adjusted_sharpe = (val_sharpe_ratio / 2.0) * val_activity_discount`
-
-`activity_adjusted_sharpe_score = 0.50 * train_adjusted_sharpe + 0.50 * val_adjusted_sharpe`
-
-其中月非加仓开仓频率折扣锚点为：
-
-`[(0,0.00),(5,0.05),(7,0.28),(9,0.62),(10,0.78),(12,0.90),(15,1.00)]`
-
-解释：
-
-- `10-15` 笔/月或更多是健康区间。
-- `8-9` 笔/月偏少。
-- `7` 笔/月以下明显负面。
-- `5` 笔/月以下几乎不计 Sharpe。
-- Sharpe 不封顶；如果真跑出高 Sharpe，会按折扣后进入评分。
+Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数值，供人工筛选和复核使用。
 
 交易活跃度惩罚：
 
@@ -116,7 +102,7 @@
 
 晋级分：
 
-`promotion_score = 0.45 * capture_score + 0.30 * timed_return_score + 0.25 * activity_adjusted_sharpe_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
+`promotion_score = 0.60 * capture_score + 0.40 * timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
 
 ## 鲁棒性软惩罚
 
@@ -148,12 +134,12 @@
 
 当前基底的鲁棒性诊断：
 
-- train 分数中位/IQR/std：`0.2999 / 0.6636 / 0.5704`
-- val 分数中位/std：`0.5368 / 0.4246`
-- 中位差 IQR 倍数：`0.3571`
-- 波动比：`1.3433`
+- train 分数中位/IQR/std：`0.2827 / 0.7034 / 0.5666`
+- val 分数中位/std：`0.6410 / 0.4009`
+- 中位差 IQR 倍数：`0.5094`
+- 波动比：`1.4134`
 - 包络溢出：`0.0000`
-- Ulcer 比：`1.1672`
+- Ulcer 比：`1.0548`
 - 最终鲁棒性惩罚：`0.0000`
 
 ## 当前 Gate

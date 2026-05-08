@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from research_v2 import evaluation as mod
@@ -10,6 +11,65 @@ from research_v2 import evaluation as mod
 
 def _equal_segment_score(report: mod.TrendScoreReport) -> float:
     return mod._mean([detail.score for detail in report.segment_details])
+
+
+def _capture_score_from_report(report: mod.TrendScoreReport) -> float:
+    return 0.50 * _equal_segment_score(report) + 0.50 * report.trend_score
+
+
+def _hit_segment_count(report: mod.TrendScoreReport) -> int:
+    return sum(1 for detail in report.segment_details if detail.score >= mod.HIT_SCORE_THRESHOLD)
+
+
+def _timestamp_to_beijing_date(timestamp_ms: int | None) -> str:
+    if timestamp_ms is None:
+        return ""
+    try:
+        timestamp = int(timestamp_ms)
+    except (TypeError, ValueError):
+        return ""
+    dt = datetime.fromtimestamp(timestamp / 1000.0, tz=UTC) + timedelta(hours=8)
+    return dt.date().isoformat()
+
+
+def _validation_start_timestamp(validation_source: dict[str, Any]) -> int | None:
+    start_timestamp, _ = mod._result_period_timestamps(validation_source)
+    if start_timestamp is not None:
+        return start_timestamp
+    validation_points = mod._result_trend_capture_points(validation_source)
+    if validation_points:
+        return int(validation_points[0]["timestamp"])
+    return None
+
+
+def _selection_train_trend_points(
+    selection_source: dict[str, Any],
+    validation_source: dict[str, Any],
+) -> list[dict[str, Any]]:
+    validation_start = _validation_start_timestamp(validation_source)
+    if validation_start is None:
+        return []
+    selection_points = mod._normalize_trend_points(mod._result_trend_capture_points(selection_source))
+    return [
+        point
+        for point in selection_points
+        if int(point.get("timestamp", 0)) < validation_start
+    ]
+
+
+def _selection_train_daily_returns(
+    selection_source: dict[str, Any],
+    validation_source: dict[str, Any],
+) -> list[float]:
+    validation_start_date = _timestamp_to_beijing_date(_validation_start_timestamp(validation_source))
+    if not validation_start_date:
+        return []
+    returns: list[float] = []
+    for point in selection_source.get("daily_return_points", []):
+        day = str(point.get("date", "")).strip()
+        if day and day < validation_start_date:
+            returns.append(float(point.get("return", 0.0)))
+    return returns
 
 
 def summarize_evaluation_impl(
@@ -57,10 +117,16 @@ def summarize_evaluation_impl(
 
     eval_daily_path = mod._collect_daily_path(results, "eval")
     validation_daily_path = mod._collect_daily_path(results, "validation")
-    eval_sharpe_ratio = mod._annualized_sharpe(eval_daily_path.returns)
-    validation_sharpe_ratio = mod._annualized_sharpe(validation_daily_path.returns)
     eval_path = mod._collect_trend_path(results, "eval")
     validation_path = mod._collect_trend_path(results, "validation")
+    selection_train_points = _selection_train_trend_points(selection_source, validation_source)
+    train_capture_source = "selection切分连续train" if selection_train_points else "rolling拼接回退"
+    train_score_points = selection_train_points or eval_path.points
+    selection_train_daily_returns = _selection_train_daily_returns(selection_source, validation_source)
+    train_daily_return_source = "selection切分连续train" if selection_train_daily_returns else "rolling拼接回退"
+    train_daily_returns = selection_train_daily_returns or eval_daily_path.returns
+    eval_sharpe_ratio = mod._annualized_sharpe(train_daily_returns)
+    validation_sharpe_ratio = mod._annualized_sharpe(validation_daily_path.returns)
 
     development_window_reports = [
         mod._trend_report_from_result(item["result"])
@@ -80,7 +146,7 @@ def summarize_evaluation_impl(
     development_mean_hit_rate = mod._mean([report.hit_rate for report in development_window_reports])
     development_mean_segment_count = mod._mean([float(report.segment_count) for report in development_window_reports])
 
-    train_continuous_trend_report = mod._trend_score_report(eval_path.points)
+    train_continuous_trend_report = mod._trend_score_report(train_score_points)
     validation_trend_report = (
         mod._trend_score_report(validation_path.points)
         if validation_path.points
@@ -92,22 +158,19 @@ def summarize_evaluation_impl(
     validation_capture_equal_score = _equal_segment_score(validation_trend_report)
     train_capture_weighted_score = train_continuous_trend_report.trend_score
     validation_capture_weighted_score = validation_trend_report.trend_score
-    train_capture_score = 0.50 * train_capture_equal_score + 0.50 * train_capture_weighted_score
-    validation_capture_score = (
-        0.50 * validation_capture_equal_score
-        + 0.50 * validation_capture_weighted_score
-    )
+    train_capture_score = _capture_score_from_report(train_continuous_trend_report)
+    validation_capture_score = _capture_score_from_report(validation_trend_report)
     capture_score = (
         mod.TRAIN_VAL_SCORE_WEIGHT * train_capture_score
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_capture_score
     )
-    train_timed_return_score = mod._annualized_return_score(eval_daily_path.returns)
+    train_timed_return_score = mod._annualized_return_score(train_daily_returns)
     validation_timed_return_score = mod._annualized_return_score(validation_daily_path.returns)
     timed_return_score = (
         mod.TRAIN_VAL_SCORE_WEIGHT * train_timed_return_score
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_timed_return_score
     )
-    train_drawdown_risk_report = mod._drawdown_risk_side_report(eval_daily_path.returns, scoring)
+    train_drawdown_risk_report = mod._drawdown_risk_side_report(train_daily_returns, scoring)
     validation_drawdown_risk_report = mod._drawdown_risk_side_report(validation_daily_path.returns, scoring)
     train_drawdown_risk_score = train_drawdown_risk_report.risk_score
     validation_drawdown_risk_score = validation_drawdown_risk_report.risk_score
@@ -203,18 +266,9 @@ def summarize_evaluation_impl(
     validation_months = mod._period_months_from_timestamps(validation_start_ts, validation_end_ts)
     train_monthly_entries = mod._monthly_trade_rate(train_entry_trades, train_months)
     validation_monthly_entries = mod._monthly_trade_rate(validation_entry_trades, validation_months)
-    train_sharpe_activity_discount = mod._sharpe_activity_discount(train_monthly_entries)
-    validation_sharpe_activity_discount = mod._sharpe_activity_discount(validation_monthly_entries)
-    activity_adjusted_sharpe_score = mod._activity_adjusted_sharpe_score(
-        train_sharpe_ratio=eval_sharpe_ratio,
-        validation_sharpe_ratio=validation_sharpe_ratio,
-        train_activity_discount=train_sharpe_activity_discount,
-        validation_activity_discount=validation_sharpe_activity_discount,
-    )
     promotion_score = (
         scoring.promotion_capture_weight * capture_score
         + scoring.promotion_timed_return_weight * timed_return_score
-        + scoring.promotion_activity_adjusted_sharpe_weight * activity_adjusted_sharpe_score
         - drawdown_penalty_score
         - robustness_penalty_score
         - trade_activity_penalty
@@ -287,6 +341,18 @@ def summarize_evaluation_impl(
             f"{train_capture_weighted_score:.2f}/{validation_capture_weighted_score:.2f}"
         ),
         (
+            "train/val趋势段(总/多/空/命中): "
+            f"{train_continuous_trend_report.segment_count}/"
+            f"{train_continuous_trend_report.bull_segment_count}/"
+            f"{train_continuous_trend_report.bear_segment_count}/"
+            f"{_hit_segment_count(train_continuous_trend_report)} | "
+            f"{validation_trend_report.segment_count}/"
+            f"{validation_trend_report.bull_segment_count}/"
+            f"{validation_trend_report.bear_segment_count}/"
+            f"{_hit_segment_count(validation_trend_report)}"
+        ),
+        f"主评分数据源(train capture / train return): {train_capture_source} / {train_daily_return_source}",
+        (
             "train/val按日收益年化分 / 收益补充分 / 固定窗口回撤风险分 / 回撤罚分 / 晋级分: "
             f"{train_timed_return_score:.2f} / {validation_timed_return_score:.2f} / "
             f"{timed_return_score:.2f} / {drawdown_risk_score:.2f} / {drawdown_penalty_score:.2f} / {promotion_score:.2f}"
@@ -306,12 +372,7 @@ def summarize_evaluation_impl(
             f"{train_trade_idle_shortfall:.2f} / {validation_trade_idle_shortfall:.2f} / "
             f"{trade_idle_penalty:.2f}"
         ),
-        (
-            "train/val月非加仓开仓频率 / Sharpe活动折扣 / 活动调整Sharpe分: "
-            f"{train_monthly_entries:.2f} / {validation_monthly_entries:.2f} | "
-            f"{train_sharpe_activity_discount:.2f} / {validation_sharpe_activity_discount:.2f} | "
-            f"{activity_adjusted_sharpe_score:.2f}"
-        ),
+        f"train/val月非加仓开仓频率: {train_monthly_entries:.2f} / {validation_monthly_entries:.2f}",
         (
             "train/val回撤风险分(窗口数): "
             f"{train_drawdown_risk_score:.2f}({train_drawdown_risk_report.window_count}) / "
@@ -447,14 +508,23 @@ def summarize_evaluation_impl(
         ),
         (
             f"- 当前评分组成: train/val 连续趋势抓取混合分={train_capture_score:.2f}/{validation_capture_score:.2f}，"
+            f"数据源={train_capture_source}/{train_daily_return_source}，"
+            f"趋势段(train总/多/空/命中)="
+            f"{train_continuous_trend_report.segment_count}/"
+            f"{train_continuous_trend_report.bull_segment_count}/"
+            f"{train_continuous_trend_report.bear_segment_count}/"
+            f"{_hit_segment_count(train_continuous_trend_report)}，"
+            f"趋势段(val总/多/空/命中)="
+            f"{validation_trend_report.segment_count}/"
+            f"{validation_trend_report.bull_segment_count}/"
+            f"{validation_trend_report.bear_segment_count}/"
+            f"{_hit_segment_count(validation_trend_report)}，"
             f"train/val 按日收益年化分={train_timed_return_score:.2f}/{validation_timed_return_score:.2f}，"
             f"train/val 非加仓开仓={train_entry_trades}/{validation_entry_trades}，"
             f"短缺率={train_trade_activity_shortfall:.2f}/{validation_trade_activity_shortfall:.2f}，"
             f"月频={train_monthly_entries:.2f}/{validation_monthly_entries:.2f}，"
-            f"Sharpe活动折扣={train_sharpe_activity_discount:.2f}/{validation_sharpe_activity_discount:.2f}，"
             f"最长无新开仓={train_max_trade_idle_days:.1f}/{validation_max_trade_idle_days:.1f}天，"
             f"频率惩罚={trade_activity_penalty:.2f}，"
-            f"活动调整Sharpe分={activity_adjusted_sharpe_score:.2f}，"
             f"train/val 固定窗口回撤风险分={train_drawdown_risk_score:.2f}/{validation_drawdown_risk_score:.2f}，"
             f"回撤罚分={drawdown_penalty_score:.2f}，鲁棒性软惩罚={robustness_penalty_score:.2f}"
         ),
@@ -552,6 +622,8 @@ def summarize_evaluation_impl(
         "turn_protection_score": turn_protection_score,
         "train_turn_protection_event_count": float(train_continuous_trend_report.turn_protection_event_count),
         "validation_turn_protection_event_count": float(validation_trend_report.turn_protection_event_count),
+        "train_capture_source_selection_split": 1.0 if selection_train_points else 0.0,
+        "train_return_source_selection_split": 1.0 if selection_train_daily_returns else 0.0,
         "eval_trend_capture_score": development_mean_trend_score,
         "eval_return_score": development_mean_return_score,
         "eval_segment_hit_rate": development_mean_hit_rate,
@@ -582,9 +654,15 @@ def summarize_evaluation_impl(
         "bull_capture_score": selection_trend_report.bull_score,
         "bear_capture_score": selection_trend_report.bear_score,
         "validation_segment_hit_rate": validation_trend_report.hit_rate,
+        "train_segment_hit_rate": train_continuous_trend_report.hit_rate,
         "selection_segment_hit_rate": selection_trend_report.hit_rate,
         "segment_hit_rate": selection_trend_report.hit_rate,
         "full_period_segment_hit_rate": selection_trend_report.hit_rate,
+        "train_major_segment_count": float(train_continuous_trend_report.segment_count),
+        "train_bull_segment_count": float(train_continuous_trend_report.bull_segment_count),
+        "train_bear_segment_count": float(train_continuous_trend_report.bear_segment_count),
+        "train_hit_segment_count": float(_hit_segment_count(train_continuous_trend_report)),
+        "validation_hit_segment_count": float(_hit_segment_count(validation_trend_report)),
         "validation_major_segment_count": float(validation_trend_report.segment_count),
         "selection_major_segment_count": float(selection_trend_report.segment_count),
         "major_segment_count": float(selection_trend_report.segment_count),
@@ -627,9 +705,6 @@ def summarize_evaluation_impl(
         "selection_sharpe_ratio": selection_sharpe_ratio,
         "train_monthly_entries": train_monthly_entries,
         "validation_monthly_entries": validation_monthly_entries,
-        "train_sharpe_activity_discount": train_sharpe_activity_discount,
-        "validation_sharpe_activity_discount": validation_sharpe_activity_discount,
-        "activity_adjusted_sharpe_score": activity_adjusted_sharpe_score,
         "combined_path_return_pct": selection_trend_report.path_return_pct,
         "full_period_return_pct": selection_total_return,
         "capture_drop": capture_drop,

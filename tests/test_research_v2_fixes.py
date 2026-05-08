@@ -34,7 +34,6 @@ from research_v2.charting import PerformanceChartPaths, charts_available, render
 from research_v2.config import GateConfig, ScoringConfig
 from research_v2.evaluation import (
     EvaluationReport,
-    _activity_adjusted_sharpe_score,
     _annualized_return_score,
     _collect_daily_path,
     _collect_trend_path,
@@ -42,7 +41,6 @@ from research_v2.evaluation import (
     _max_trade_idle_days_from_timestamps,
     _period_months_from_timestamps,
     _robustness_penalty_payload,
-    _sharpe_activity_discount,
     _trade_activity_shortfall,
     _trade_idle_shortfall,
     _trend_score_report,
@@ -689,9 +687,8 @@ class EvaluationFixesTest(unittest.TestCase):
             + 1.00 * max(report.metrics["drawdown_risk_score"] - 1.25, 0.0)
         )
         expected_promotion_score = (
-            0.45 * report.metrics["capture_score"]
-            + 0.30 * report.metrics["timed_return_score"]
-            + 0.25 * report.metrics["activity_adjusted_sharpe_score"]
+            0.60 * report.metrics["capture_score"]
+            + 0.40 * report.metrics["timed_return_score"]
             - expected_drawdown_penalty
             - report.metrics["robustness_penalty_score"]
             - report.metrics["trade_activity_penalty"]
@@ -709,6 +706,127 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(report.metrics["combined_path_return_pct"], expected_full_period_report.path_return_pct)
         self.assertTrue(report.gate_passed)
         self.assertEqual(report.gate_reason, "通过")
+
+    def test_main_train_capture_and_return_use_selection_split_when_available(self):
+        boundary = 2 * 24 * 60 * 60 * 1000
+        eval_window = type("Window", (), {"group": "eval", "label": "train1", "start_date": "1970-01-01", "end_date": "1970-01-02"})()
+        validation_window = type("Window", (), {"group": "validation", "label": "val1", "start_date": "1970-01-03", "end_date": "1970-01-04"})()
+
+        rolling_points = [
+            {"timestamp": idx, "label": f"r{idx}", "market_close": close, "atr_ratio": 0.01, "strategy_equity": equity}
+            for idx, close, equity in [
+                (1, 100.0, 100000.0),
+                (2, 105.0, 99000.0),
+                (3, 112.0, 98000.0),
+                (4, 120.0, 97000.0),
+                (5, 130.0, 96000.0),
+                (6, 126.0, 95500.0),
+                (7, 118.0, 95000.0),
+                (8, 105.0, 94500.0),
+                (9, 95.0, 94000.0),
+                (10, 90.0, 93500.0),
+                (11, 94.0, 93000.0),
+                (12, 100.0, 92500.0),
+            ]
+        ]
+        selection_train_points = [
+            {"timestamp": idx, "label": f"s{idx}", "market_close": close, "atr_ratio": 0.01, "strategy_equity": equity}
+            for idx, close, equity in [
+                (1, 100.0, 100000.0),
+                (2, 105.0, 110000.0),
+                (3, 112.0, 125000.0),
+                (4, 120.0, 145000.0),
+                (5, 130.0, 170000.0),
+                (6, 126.0, 172000.0),
+                (7, 118.0, 185000.0),
+                (8, 105.0, 210000.0),
+                (9, 95.0, 240000.0),
+                (10, 90.0, 270000.0),
+                (11, 94.0, 265000.0),
+                (12, 100.0, 260000.0),
+            ]
+        ]
+        validation_points = [
+            {"timestamp": boundary + idx, "label": f"v{idx}", "market_close": close, "atr_ratio": 0.01, "strategy_equity": equity}
+            for idx, close, equity in [
+                (1, 107.0, 180000.0),
+                (2, 116.0, 187000.0),
+                (3, 125.0, 194000.0),
+                (4, 118.0, 193000.0),
+                (5, 104.0, 202000.0),
+                (6, 95.0, 212000.0),
+            ]
+        ]
+        results = [
+            {
+                "window": eval_window,
+                "result": {
+                    "return": -1.0,
+                    "max_drawdown": 2.0,
+                    "daily_returns": [-0.01, -0.01],
+                    "trades": 1,
+                    "fee_drag_pct": 0.0,
+                    "liquidations": 0,
+                    "trend_capture_points": rolling_points,
+                },
+            },
+            {
+                "window": validation_window,
+                "result": {
+                    "return": 3.0,
+                    "max_drawdown": 2.0,
+                    "daily_returns": [0.01, 0.01],
+                    "trades": 1,
+                    "fee_drag_pct": 0.0,
+                    "liquidations": 0,
+                    "trend_capture_points": validation_points,
+                },
+            },
+        ]
+        validation_continuous_result = {
+            "return": 3.0,
+            "max_drawdown": 2.0,
+            "trades": 1,
+            "period_start_timestamp": boundary,
+            "period_end_timestamp": boundary * 2,
+            "trend_capture_points": validation_points,
+            "daily_return_points": [{"date": "1970-01-03", "return": 0.01}],
+        }
+        full_period_result = {
+            "return": 20.0,
+            "max_drawdown": 3.0,
+            "trades": 2,
+            "period_start_timestamp": 0,
+            "period_end_timestamp": boundary * 2,
+            "trend_capture_points": selection_train_points + validation_points,
+            "daily_return_points": [
+                {"date": "1970-01-01", "return": 0.05},
+                {"date": "1970-01-02", "return": 0.02},
+                {"date": "1970-01-03", "return": 0.01},
+            ],
+        }
+
+        report = summarize_evaluation(
+            results,
+            make_gate_config(),
+            validation_continuous_result=validation_continuous_result,
+            full_period_result=full_period_result,
+        )
+        expected_train_report = _trend_score_report(
+            _collect_trend_path([{"window": eval_window, "result": {"trend_capture_points": selection_train_points}}], "eval").points
+        )
+        rolling_train_report = _trend_score_report(
+            _collect_trend_path([{"window": eval_window, "result": {"trend_capture_points": rolling_points}}], "eval").points
+        )
+
+        self.assertEqual(report.metrics["train_capture_source_selection_split"], 1.0)
+        self.assertEqual(report.metrics["train_return_source_selection_split"], 1.0)
+        self.assertAlmostEqual(report.metrics["train_capture_weighted_score"], expected_train_report.trend_score)
+        self.assertNotAlmostEqual(report.metrics["train_capture_weighted_score"], rolling_train_report.trend_score)
+        self.assertAlmostEqual(
+            report.metrics["train_timed_return_score"],
+            _annualized_return_score([0.05, 0.02]),
+        )
 
     def test_summarize_evaluation_rejects_large_quality_promotion_gap(self):
         eval_window = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-12"})()
@@ -877,9 +995,8 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(
             report.metrics["promotion_score"],
             (
-                0.45 * report.metrics["capture_score"]
-                + 0.30 * report.metrics["timed_return_score"]
-                + 0.25 * report.metrics["activity_adjusted_sharpe_score"]
+                0.60 * report.metrics["capture_score"]
+                + 0.40 * report.metrics["timed_return_score"]
                 - expected_drawdown_penalty
                 - report.metrics["robustness_penalty_score"]
                 - report.metrics["trade_activity_penalty"]
@@ -982,46 +1099,6 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(report.metrics["train_monthly_entries"], 30.0)
         self.assertAlmostEqual(report.metrics["validation_monthly_entries"], 15.0)
         self.assertNotIn("train_monthly_closed_trades", report.metrics)
-
-    def test_sharpe_activity_discount_uses_monthly_trade_anchors(self):
-        self.assertAlmostEqual(_sharpe_activity_discount(4.0), 0.04)
-        self.assertAlmostEqual(_sharpe_activity_discount(5.0), 0.05)
-        self.assertAlmostEqual(_sharpe_activity_discount(7.0), 0.28)
-        self.assertAlmostEqual(_sharpe_activity_discount(8.0), 0.45)
-        self.assertAlmostEqual(_sharpe_activity_discount(9.0), 0.62)
-        self.assertAlmostEqual(_sharpe_activity_discount(10.0), 0.78)
-        self.assertAlmostEqual(_sharpe_activity_discount(12.0), 0.90)
-        self.assertAlmostEqual(_sharpe_activity_discount(15.0), 1.00)
-        self.assertAlmostEqual(_sharpe_activity_discount(20.0), 1.00)
-
-    def test_activity_adjusted_sharpe_score_is_unbounded_and_even_weighted(self):
-        self.assertAlmostEqual(
-            _activity_adjusted_sharpe_score(
-                train_sharpe_ratio=5.0,
-                validation_sharpe_ratio=5.0,
-                train_activity_discount=1.0,
-                validation_activity_discount=1.0,
-            ),
-            2.5,
-        )
-        self.assertAlmostEqual(
-            _activity_adjusted_sharpe_score(
-                train_sharpe_ratio=5.0,
-                validation_sharpe_ratio=1.0,
-                train_activity_discount=1.0,
-                validation_activity_discount=1.0,
-            ),
-            1.5,
-        )
-        self.assertAlmostEqual(
-            _activity_adjusted_sharpe_score(
-                train_sharpe_ratio=-2.0,
-                validation_sharpe_ratio=1.0,
-                train_activity_discount=1.0,
-                validation_activity_discount=1.0,
-            ),
-            -0.25,
-        )
 
     def test_period_months_from_timestamps_uses_average_calendar_month(self):
         self.assertAlmostEqual(
@@ -2209,10 +2286,10 @@ class JournalPromptFixesTest(unittest.TestCase):
         )
 
         self.assertIn("promotion_score` 严格高于当前 active reference", prompt)
-        self.assertIn("0.45 / 0.30 / 0.25", prompt)
+        self.assertIn("0.60 / 0.40", prompt)
         self.assertIn("按日收益年化补分", prompt)
-        self.assertIn("activity_adjusted_sharpe_score", prompt)
-        self.assertIn("5 笔/月以下基本不计 Sharpe", prompt)
+        self.assertIn("Sharpe 只作为人工筛选", prompt)
+        self.assertNotIn("activity_adjusted_sharpe_score", prompt)
         self.assertIn("分段回撤惩罚", prompt)
         self.assertIn("鲁棒性软惩罚", prompt)
         self.assertIn("单独惩罚低频与长空窗", prompt)

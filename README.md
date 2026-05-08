@@ -31,7 +31,7 @@
 - 事实层：`15m`
 - `1h / 4h` 由 `15m` 聚合得到，只做趋势和环境确认
 - 回测执行价优先使用 `1m`
-- 当前评分口径：`trend_capture_v17_activity_adjusted_sharpe`
+- 当前评分口径：`trend_capture_v18_continuous_no_sharpe`
 
 时间窗口：
 
@@ -43,9 +43,9 @@
 
 - 候选必须先过 `gate`
 - 已有 champion 时，候选还必须 `promotion_score` 严格高于当前 active reference 才能刷新；当前取消的是额外晋级边际，不是“过 gate 就替换”
-- `promotion_score = 0.45 * capture_score + 0.30 * timed_return_score + 0.25 * activity_adjusted_sharpe_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
-- `capture_score` 不再只由最大趋势段主导；`train/val` 连续趋势抓取分改为“段等权均分 50% + 原权重均分 50%”的混合方式
-- `activity_adjusted_sharpe_score` 用 `train/val` Sharpe 各 50% 计分，Sharpe 不封顶，但会按月非加仓开仓频率折扣；`10-15` 笔/月较健康，`5` 笔/月以下基本不计 Sharpe
+- `promotion_score = 0.60 * capture_score + 0.40 * timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
+- `capture_score` 不再只由最大趋势段主导；主评分使用连续 `train / val` 数据源，`train` 从已有 `train+val` 连续回测按 `val` 起点切出，不新增回测；每侧趋势抓取分仍是“段等权均分 50% + 原权重均分 50%”的混合方式
+- Sharpe 不进入主评分，只保留为人工筛选和通知展示指标
 - `trade_activity_penalty` 是低频与长空窗惩罚：交易频率按非加仓开仓数计算，加仓不计入；希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天；低于交易数下沿或超过空窗上限才扣分，不单独做交易数硬 gate
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position
 - 鲁棒性软惩罚不额外回测；它复用已有 `train` 滚动分数、`val` 分块分数和 `train/val` 固定窗口 Ulcer，检查 `val` 是否明显跑出 `train` 的宽分布包络，以及两侧波动或回撤结构是否严重不一致
@@ -125,7 +125,7 @@ flowchart TB
 - `GPT` 更适合固定框架、规则严密、执行链稳定的角色，例如 `reviewer / edit_worker / repair_worker / summary_worker`
 - `DeepSeek` 在发散找方向、提出新假设、快速换研究层级这类 `planner` 任务里，当前表现更好
 
-这个结论只针对当前仓库、当前评分口径 `trend_capture_v17_activity_adjusted_sharpe` 和当前这组实验流程成立，不把它外推成所有任务的一般结论。
+这个结论只针对当前仓库、当前评分口径 `trend_capture_v18_continuous_no_sharpe` 和当前这组实验流程成立，不把它外推成所有任务的一般结论。
 
 ### 为什么保留混合架构
 

@@ -55,14 +55,15 @@ flowchart TB
 - 标的：`BTC-USDT-SWAP`，策略按 `20x` 合约研究。
 - 事实层：`15m`；`1h / 4h` 由 `15m` 聚合，只做确认层。
 - 执行层：优先使用 `1m` 回测成交。
-- 评分口径：`trend_capture_v17_activity_adjusted_sharpe`。
+- 评分口径：`trend_capture_v18_continuous_no_sharpe`。
 - `train`：`2023-07-01` 到 `2024-12-31`。
 - `val`：`2025-01-01` 到 `2025-12-31`。
 - `test`：`2026-01-01` 到 `2026-04-20`。
 - 晋升条件：候选先过 `gate`；已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference。当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则。
-- `promotion_score = 0.45 * capture_score + 0.30 * timed_return_score + 0.25 * activity_adjusted_sharpe_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`。
+- `promotion_score = 0.60 * capture_score + 0.40 * timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`。
+- 主评分使用连续 `train / val` 数据源；`train` 从已有 `train+val` 连续回测按 `val` 起点切出，walk-forward 继续用于诊断、鲁棒性和早停。
 - `capture_score` 现在使用“段等权均分 50% + 原权重均分 50%”的混合方式，减少少数最大趋势段的主导。
-- `activity_adjusted_sharpe_score` 用 `train/val` Sharpe 各 50% 计分，Sharpe 不封顶，但会按月非加仓开仓频率折扣；`10-15` 笔/月较健康，`5` 笔/月以下基本不计 Sharpe。
+- Sharpe 不进入主评分，只保留为人工筛选和通知展示指标。
 - `trade_activity_penalty` 是低频与长空窗惩罚：交易频率按非加仓开仓数计算，加仓不计入；希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天；当前只在主评分里减分，不再做硬 gate。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - 交易数、`filled_entries` 和漏斗通过量只保留观察价值，不再作为下一轮方向的默认软触发。

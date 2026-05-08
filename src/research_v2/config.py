@@ -108,12 +108,8 @@ def _load_scoring_config(windows: "WindowConfig") -> "ScoringConfig":
         _env_int("MACD_V2_TRADE_ACTIVITY_VALIDATION_RANGE_HIGH", _monthly_trade_count(validation_days, 15.0)),
     )
     return ScoringConfig(
-        promotion_capture_weight=_env_float("MACD_V2_PROMOTION_CAPTURE_WEIGHT", 0.45),
-        promotion_timed_return_weight=_env_float("MACD_V2_PROMOTION_TIMED_RETURN_WEIGHT", 0.30),
-        promotion_activity_adjusted_sharpe_weight=_env_float(
-            "MACD_V2_PROMOTION_ACTIVITY_ADJUSTED_SHARPE_WEIGHT",
-            0.25,
-        ),
+        promotion_capture_weight=_env_float("MACD_V2_PROMOTION_CAPTURE_WEIGHT", 0.60),
+        promotion_timed_return_weight=_env_float("MACD_V2_PROMOTION_TIMED_RETURN_WEIGHT", 0.40),
         promotion_trade_activity_penalty_weight=_env_float_any(
             (
                 "MACD_V2_PROMOTION_TRADE_ACTIVITY_PENALTY_WEIGHT",
@@ -210,9 +206,8 @@ class GateConfig:
 
 @dataclass(frozen=True)
 class ScoringConfig:
-    promotion_capture_weight: float = 0.45
-    promotion_timed_return_weight: float = 0.30
-    promotion_activity_adjusted_sharpe_weight: float = 0.25
+    promotion_capture_weight: float = 0.60
+    promotion_timed_return_weight: float = 0.40
     promotion_trade_activity_penalty_weight: float = 0.20
     trade_idle_penalty_weight: float = 0.15
     max_trade_idle_days: float = 7.0

@@ -22,9 +22,8 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
                 "\n".join(
                         [
                         "MACD_V2_MIN_VALIDATION_CLOSED_TRADES=0",
-                        "MACD_V2_PROMOTION_CAPTURE_WEIGHT=0.45",
-                        "MACD_V2_PROMOTION_TIMED_RETURN_WEIGHT=0.30",
-                        "MACD_V2_PROMOTION_ACTIVITY_ADJUSTED_SHARPE_WEIGHT=0.25",
+                        "MACD_V2_PROMOTION_CAPTURE_WEIGHT=0.60",
+                        "MACD_V2_PROMOTION_TIMED_RETURN_WEIGHT=0.40",
                         "MACD_V2_PROMOTION_TRADE_ACTIVITY_PENALTY_WEIGHT=0.20",
                         "MACD_V2_TRADE_IDLE_PENALTY_WEIGHT=0.15",
                         "MACD_V2_MAX_TRADE_IDLE_DAYS=7.0",
@@ -64,9 +63,8 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
             self.assertEqual(runtime.gates.validation_block_count, 4)
             self.assertAlmostEqual(runtime.gates.min_validation_block_floor, -0.10)
             self.assertEqual(runtime.gates.max_validation_block_failures, 3)
-            self.assertAlmostEqual(runtime.scoring.promotion_capture_weight, 0.45)
-            self.assertAlmostEqual(runtime.scoring.promotion_timed_return_weight, 0.30)
-            self.assertAlmostEqual(runtime.scoring.promotion_activity_adjusted_sharpe_weight, 0.25)
+            self.assertAlmostEqual(runtime.scoring.promotion_capture_weight, 0.60)
+            self.assertAlmostEqual(runtime.scoring.promotion_timed_return_weight, 0.40)
             self.assertAlmostEqual(runtime.scoring.promotion_trade_activity_penalty_weight, 0.20)
             self.assertAlmostEqual(runtime.scoring.trade_idle_penalty_weight, 0.15)
             self.assertAlmostEqual(runtime.scoring.max_trade_idle_days, 7.0)
