@@ -146,12 +146,6 @@ def summarize_evaluation_impl(
         plateau_probe=plateau_probe_payload,
     )
     robustness_penalty_score = robustness_penalty_payload["robustness_penalty_score"]
-    robustness_penalty_score = max(
-        0.0,
-        robustness_penalty_score - robustness_penalty_payload["sharpe_floor_penalty_score"],
-    )
-    train_val_sharpe_floor = robustness_penalty_payload["train_val_sharpe_floor"]
-    sharpe_floor_score = mod._clamp(train_val_sharpe_floor / 2.0, 0.0, 1.0)
     validation_long_trades, validation_short_trades = mod._trade_side_counts(validation_source)
     selection_long_trades, selection_short_trades = mod._trade_side_counts(selection_source)
     validation_closed_trades = int(validation_source.get("trades", validation_long_trades + validation_short_trades))
@@ -206,10 +200,22 @@ def summarize_evaluation_impl(
     trade_count_penalty = scoring.promotion_trade_activity_penalty_weight * trade_activity_shortfall
     trade_idle_penalty = scoring.trade_idle_penalty_weight * trade_idle_shortfall
     trade_activity_penalty = trade_count_penalty + trade_idle_penalty
+    train_months = mod._period_months_from_timestamps(selection_start_ts, validation_start_ts)
+    validation_months = mod._period_months_from_timestamps(validation_start_ts, validation_end_ts)
+    train_monthly_closed_trades = mod._monthly_trade_rate(train_closed_trades, train_months)
+    validation_monthly_closed_trades = mod._monthly_trade_rate(validation_closed_trades, validation_months)
+    train_sharpe_activity_discount = mod._sharpe_activity_discount(train_monthly_closed_trades)
+    validation_sharpe_activity_discount = mod._sharpe_activity_discount(validation_monthly_closed_trades)
+    activity_adjusted_sharpe_score = mod._activity_adjusted_sharpe_score(
+        train_sharpe_ratio=eval_sharpe_ratio,
+        validation_sharpe_ratio=validation_sharpe_ratio,
+        train_activity_discount=train_sharpe_activity_discount,
+        validation_activity_discount=validation_sharpe_activity_discount,
+    )
     promotion_score = (
         scoring.promotion_capture_weight * capture_score
         + scoring.promotion_timed_return_weight * timed_return_score
-        + scoring.promotion_sharpe_floor_weight * sharpe_floor_score
+        + scoring.promotion_activity_adjusted_sharpe_weight * activity_adjusted_sharpe_score
         - drawdown_penalty_score
         - robustness_penalty_score
         - trade_activity_penalty
@@ -301,7 +307,12 @@ def summarize_evaluation_impl(
             f"{train_trade_idle_shortfall:.2f} / {validation_trade_idle_shortfall:.2f} / "
             f"{trade_idle_penalty:.2f}"
         ),
-        f"train/val Sharpe floor / 归一化分: {train_val_sharpe_floor:.2f} / {sharpe_floor_score:.2f}",
+        (
+            "train/val月交易频率 / Sharpe活动折扣 / 活动调整Sharpe分: "
+            f"{train_monthly_closed_trades:.2f} / {validation_monthly_closed_trades:.2f} | "
+            f"{train_sharpe_activity_discount:.2f} / {validation_sharpe_activity_discount:.2f} | "
+            f"{activity_adjusted_sharpe_score:.2f}"
+        ),
         (
             "train/val回撤风险分(窗口数): "
             f"{train_drawdown_risk_score:.2f}({train_drawdown_risk_report.window_count}) / "
@@ -347,7 +358,7 @@ def summarize_evaluation_impl(
             )
         ),
         (
-            "鲁棒性软惩罚(capture_gap/std/floor/tail/fail/sharpe_gap/plateau/raw/cap后): "
+            "鲁棒性软惩罚(capture_gap/block_std/block_floor/tail/fail/sharpe_gap/plateau/raw/cap后): "
             f"{robustness_penalty_payload['gap_penalty_score']:.2f} / "
             f"{robustness_penalty_payload['block_std_penalty_score']:.2f} / "
             f"{robustness_penalty_payload['block_floor_penalty_score']:.2f} / "
@@ -372,11 +383,7 @@ def summarize_evaluation_impl(
         f"train+val连续多头 / 空头捕获: {selection_trend_report.bull_score:.2f} / {selection_trend_report.bear_score:.2f}",
         f"train+val期间收益 / 路径收益: {selection_total_return:.2f}% / {selection_trend_report.path_return_pct:.2f}%",
         f"Sharpe(train / val / train+val): {eval_sharpe_ratio:.2f} / {validation_sharpe_ratio:.2f} / {selection_sharpe_ratio:.2f}",
-        (
-            "train/val Sharpe 平衡(gap / weaker_side): "
-            f"{robustness_penalty_payload['train_val_sharpe_gap']:.2f} / "
-            f"{robustness_penalty_payload['train_val_sharpe_floor']:.2f}"
-        ),
+        f"train/val Sharpe gap: {robustness_penalty_payload['train_val_sharpe_gap']:.2f}",
         f"train窗口收益均值 / 中位 / P25 / 最差: {eval_avg_return:.2f}% / {eval_median_return:.2f}% / {eval_p25_return:.2f}% / {eval_worst_return:.2f}%",
         f"val窗口收益均值 / 最差: {validation_avg_return:.2f}% / {validation_worst_return:.2f}%",
         f"train/val趋势抓取落差: {promotion_gap:.2f}",
@@ -442,16 +449,17 @@ def summarize_evaluation_impl(
             f"train/val 按日收益年化分={train_timed_return_score:.2f}/{validation_timed_return_score:.2f}，"
             f"train/val 连续交易={train_closed_trades}/{validation_closed_trades}，"
             f"短缺率={train_trade_activity_shortfall:.2f}/{validation_trade_activity_shortfall:.2f}，"
+            f"月频={train_monthly_closed_trades:.2f}/{validation_monthly_closed_trades:.2f}，"
+            f"Sharpe活动折扣={train_sharpe_activity_discount:.2f}/{validation_sharpe_activity_discount:.2f}，"
             f"最长无新开仓={train_max_trade_idle_days:.1f}/{validation_max_trade_idle_days:.1f}天，"
             f"频率惩罚={trade_activity_penalty:.2f}，"
-            f"Sharpe floor归一化分={sharpe_floor_score:.2f}，"
+            f"活动调整Sharpe分={activity_adjusted_sharpe_score:.2f}，"
             f"train/val 固定窗口回撤风险分={train_drawdown_risk_score:.2f}/{validation_drawdown_risk_score:.2f}，"
             f"回撤罚分={drawdown_penalty_score:.2f}，鲁棒性软惩罚={robustness_penalty_score:.2f}"
         ),
         (
             f"- train/val Sharpe 平衡: Sharpe={eval_sharpe_ratio:.2f}/{validation_sharpe_ratio:.2f}，"
-            f"gap={robustness_penalty_payload['train_val_sharpe_gap']:.2f}，"
-            f"弱侧={robustness_penalty_payload['train_val_sharpe_floor']:.2f}"
+            f"gap={robustness_penalty_payload['train_val_sharpe_gap']:.2f}"
         ),
         (
             f"- train+val 状态: 趋势分/收益分={selection_trend_report.trend_score:.2f}/"
@@ -614,8 +622,11 @@ def summarize_evaluation_impl(
         "validation_sharpe_ratio": validation_sharpe_ratio,
         "selection_sharpe_ratio": selection_sharpe_ratio,
         "train_val_sharpe_gap": robustness_penalty_payload["train_val_sharpe_gap"],
-        "train_val_sharpe_floor": robustness_penalty_payload["train_val_sharpe_floor"],
-        "sharpe_floor_score": sharpe_floor_score,
+        "train_monthly_closed_trades": train_monthly_closed_trades,
+        "validation_monthly_closed_trades": validation_monthly_closed_trades,
+        "train_sharpe_activity_discount": train_sharpe_activity_discount,
+        "validation_sharpe_activity_discount": validation_sharpe_activity_discount,
+        "activity_adjusted_sharpe_score": activity_adjusted_sharpe_score,
         "combined_path_return_pct": selection_trend_report.path_return_pct,
         "full_period_return_pct": selection_total_return,
         "capture_drop": capture_drop,
@@ -634,7 +645,6 @@ def summarize_evaluation_impl(
         "block_tail_penalty_score": robustness_penalty_payload["block_tail_penalty_score"],
         "block_fail_penalty_score": robustness_penalty_payload["block_fail_penalty_score"],
         "sharpe_gap_penalty_score": robustness_penalty_payload["sharpe_gap_penalty_score"],
-        "sharpe_floor_penalty_score": robustness_penalty_payload["sharpe_floor_penalty_score"],
         "plateau_penalty_score": robustness_penalty_payload["plateau_penalty_score"],
         "robustness_penalty_score_raw": robustness_penalty_payload["robustness_penalty_score_raw"],
         "robustness_penalty_score": robustness_penalty_score,

@@ -35,11 +35,14 @@ from research_v2.config import GateConfig, ScoringConfig
 from research_v2.evaluation import (
     EvaluationReport,
     ValidationBlockReport,
+    _activity_adjusted_sharpe_score,
     _annualized_return_score,
     _collect_daily_path,
     _collect_trend_path,
     _max_trade_idle_days_from_timestamps,
+    _period_months_from_timestamps,
     _robustness_penalty_payload,
+    _sharpe_activity_discount,
     _trade_activity_shortfall,
     _trade_idle_shortfall,
     _trend_score_report,
@@ -568,7 +571,7 @@ class EvaluationFixesTest(unittest.TestCase):
         expected_promotion_score = (
             0.45 * report.metrics["capture_score"]
             + 0.30 * report.metrics["timed_return_score"]
-            + 0.25 * report.metrics["sharpe_floor_score"]
+            + 0.25 * report.metrics["activity_adjusted_sharpe_score"]
             - expected_drawdown_penalty
             - report.metrics["robustness_penalty_score"]
             - report.metrics["trade_activity_penalty"]
@@ -756,7 +759,7 @@ class EvaluationFixesTest(unittest.TestCase):
             (
                 0.45 * report.metrics["capture_score"]
                 + 0.30 * report.metrics["timed_return_score"]
-                + 0.25 * report.metrics["sharpe_floor_score"]
+                + 0.25 * report.metrics["activity_adjusted_sharpe_score"]
                 - expected_drawdown_penalty
                 - report.metrics["robustness_penalty_score"]
                 - report.metrics["trade_activity_penalty"]
@@ -768,6 +771,52 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(_trade_activity_shortfall(270, 270), 0.0)
         self.assertAlmostEqual(_trade_activity_shortfall(180, 270), 90.0 / 270.0)
         self.assertAlmostEqual(_trade_activity_shortfall(0, 180), 1.0)
+
+    def test_sharpe_activity_discount_uses_monthly_trade_anchors(self):
+        self.assertAlmostEqual(_sharpe_activity_discount(4.0), 0.04)
+        self.assertAlmostEqual(_sharpe_activity_discount(5.0), 0.05)
+        self.assertAlmostEqual(_sharpe_activity_discount(7.0), 0.28)
+        self.assertAlmostEqual(_sharpe_activity_discount(8.0), 0.45)
+        self.assertAlmostEqual(_sharpe_activity_discount(9.0), 0.62)
+        self.assertAlmostEqual(_sharpe_activity_discount(10.0), 0.78)
+        self.assertAlmostEqual(_sharpe_activity_discount(12.0), 0.90)
+        self.assertAlmostEqual(_sharpe_activity_discount(15.0), 1.00)
+        self.assertAlmostEqual(_sharpe_activity_discount(20.0), 1.00)
+
+    def test_activity_adjusted_sharpe_score_is_unbounded_and_even_weighted(self):
+        self.assertAlmostEqual(
+            _activity_adjusted_sharpe_score(
+                train_sharpe_ratio=5.0,
+                validation_sharpe_ratio=5.0,
+                train_activity_discount=1.0,
+                validation_activity_discount=1.0,
+            ),
+            2.5,
+        )
+        self.assertAlmostEqual(
+            _activity_adjusted_sharpe_score(
+                train_sharpe_ratio=5.0,
+                validation_sharpe_ratio=1.0,
+                train_activity_discount=1.0,
+                validation_activity_discount=1.0,
+            ),
+            1.5,
+        )
+        self.assertAlmostEqual(
+            _activity_adjusted_sharpe_score(
+                train_sharpe_ratio=-2.0,
+                validation_sharpe_ratio=1.0,
+                train_activity_discount=1.0,
+                validation_activity_discount=1.0,
+            ),
+            -0.25,
+        )
+
+    def test_period_months_from_timestamps_uses_average_calendar_month(self):
+        self.assertAlmostEqual(
+            _period_months_from_timestamps(0, 30 * 24 * 60 * 60 * 1000),
+            30 / 30.4375,
+        )
 
     def test_trade_idle_shortfall_penalizes_long_no_entry_gap(self):
         day_ms = 24 * 60 * 60 * 1000
@@ -910,7 +959,6 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(payload["block_tail_penalty_score"], 0.03)
         self.assertAlmostEqual(payload["block_fail_penalty_score"], 0.03)
         self.assertAlmostEqual(payload["sharpe_gap_penalty_score"], 0.0)
-        self.assertAlmostEqual(payload["sharpe_floor_penalty_score"], 0.0)
         self.assertAlmostEqual(payload["plateau_penalty_score"], 0.15)
         self.assertAlmostEqual(payload["validation_block_tail_gap"], 0.20)
         self.assertAlmostEqual(payload["robustness_penalty_score_raw"], 0.40)
@@ -918,7 +966,7 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertEqual(payload["plateau_probe_enabled"], 1.0)
         self.assertEqual(payload["plateau_current_is_best"], 0.0)
 
-    def test_robustness_penalty_payload_adds_train_val_sharpe_balance_penalties(self):
+    def test_robustness_penalty_payload_adds_train_val_sharpe_gap_penalty(self):
         payload = _robustness_penalty_payload(
             promotion_gap=0.05,
             block_report=ValidationBlockReport(
@@ -936,9 +984,7 @@ class EvaluationFixesTest(unittest.TestCase):
         )
 
         self.assertAlmostEqual(payload["train_val_sharpe_gap"], 1.10)
-        self.assertAlmostEqual(payload["train_val_sharpe_floor"], 0.80)
         self.assertAlmostEqual(payload["sharpe_gap_penalty_score"], 0.06)
-        self.assertAlmostEqual(payload["sharpe_floor_penalty_score"], 0.03)
 
     def test_summarize_evaluation_emits_funnel_without_low_activity_soft_signal(self):
         eval_window = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-10"})()
@@ -1181,6 +1227,10 @@ class StrategyValidationFixesTest(unittest.TestCase):
             "ready": True,
             "current": {"open": 99.5, "high": 100.5, "close": 100.0, "volume": 100.0},
             "recent_volume_avg": 100.0,
+            "atr_ratio": 0.01,
+            "recent_pullback_depth_pct": 0.01,
+            "recent_three_low": 99.0,
+            "prior_three_low": 98.0,
         }
         with mock.patch.object(strategy_module, "_build_signal_context", return_value=strategy_context):
             with mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False):
@@ -1228,6 +1278,10 @@ class StrategyValidationFixesTest(unittest.TestCase):
             "ready": True,
             "current": {"open": 99.5, "high": 100.5, "close": 100.0, "volume": 100.0},
             "recent_volume_avg": 100.0,
+            "atr_ratio": 0.01,
+            "recent_pullback_depth_pct": 0.01,
+            "recent_three_low": 99.0,
+            "prior_three_low": 98.0,
         }
         with mock.patch.object(strategy_module, "_build_signal_context", return_value=strategy_context):
             with mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False):
@@ -1805,13 +1859,14 @@ class JournalPromptFixesTest(unittest.TestCase):
             previous_best_score=1.23,
         )
 
-        self.assertIn("过 `gate` 即可刷新 active reference", prompt)
+        self.assertIn("promotion_score` 严格高于当前 active reference", prompt)
         self.assertIn("0.45 / 0.30 / 0.25", prompt)
         self.assertIn("按日收益年化补分", prompt)
-        self.assertIn("Sharpe floor", prompt)
+        self.assertIn("activity_adjusted_sharpe_score", prompt)
+        self.assertIn("5 笔/月以下基本不计 Sharpe", prompt)
         self.assertIn("分段回撤惩罚", prompt)
         self.assertIn("鲁棒性软惩罚", prompt)
-        self.assertIn("低频 + 长空窗", prompt)
+        self.assertIn("单独惩罚低频与长空窗", prompt)
         self.assertIn("train 180-270 / val 120-180", prompt)
         self.assertIn("最长无新开仓", prompt)
         self.assertIn("负分块最多 3 个", prompt)
@@ -5024,7 +5079,7 @@ class ReferenceStateFixesTest(unittest.TestCase):
         self.assertTrue(accepted)
         self.assertIn("首个 gate-passed champion", reason)
 
-    def test_promotion_acceptance_accepts_any_gate_passed_candidate(self):
+    def test_promotion_acceptance_accepts_higher_promotion_candidate(self):
         baseline_report = EvaluationReport(
             metrics={"promotion_score": 0.40, "quality_score": 0.33},
             gate_passed=True,
@@ -5052,9 +5107,9 @@ class ReferenceStateFixesTest(unittest.TestCase):
             research_script.RUNTIME = original_runtime
 
         self.assertTrue(accepted)
-        self.assertEqual("通过(gate-passed refresh)", reason)
+        self.assertEqual("通过(promotion提升 0.42 > 0.40)", reason)
 
-    def test_promotion_acceptance_allows_score_and_quality_drop_after_gate_pass(self):
+    def test_promotion_acceptance_rejects_score_drop_after_gate_pass(self):
         baseline_report = EvaluationReport(
             metrics={"promotion_score": 0.40, "quality_score": 0.33},
             gate_passed=True,
@@ -5081,8 +5136,8 @@ class ReferenceStateFixesTest(unittest.TestCase):
             research_script.champion_report = original_champion
             research_script.RUNTIME = original_runtime
 
-        self.assertTrue(accepted)
-        self.assertEqual("通过(gate-passed refresh)", reason)
+        self.assertFalse(accepted)
+        self.assertEqual("未超过当前champion晋级分(0.35 <= 0.40)", reason)
 
     def test_promotion_acceptance_rejects_only_when_gate_fails(self):
         baseline_report = EvaluationReport(

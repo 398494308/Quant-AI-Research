@@ -143,7 +143,7 @@ DISCORD_CONFIG = load_discord_config()
 EVAL_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "eval")
 VALIDATION_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "validation")
 TEST_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "test")
-SCORE_REGIME = "trend_capture_v16_equal_capture_midfreq_idle_penalty"
+SCORE_REGIME = "trend_capture_v17_activity_adjusted_sharpe"
 MODEL_WORKSPACE_STRATEGY_PATH = Path("src/strategy_macd_aggressive.py")
 PRIMARY_DIRECTION_DOMAINS = frozenset({"long", "short", "mixed", "structure"})
 PLANNER_BRIEF_REQUIRED_FIELDS = ("primary_direction", "hypothesis", "change_plan", "novelty_proof", "change_tags")
@@ -3246,8 +3246,6 @@ def _build_model_round_brief(
         champion_review_path="config/research_v2_champion_review.md",
         champion_review_code_hash=active_reference_code_hash,
         reviewer_summary_text=_load_reviewer_summary_text(),
-        promotion_accept_margin=RUNTIME.promotion_accept_margin,
-        promotion_accept_quality_drop_margin=RUNTIME.promotion_accept_quality_drop_margin,
         validation_block_count=RUNTIME.gates.validation_block_count,
         min_validation_hit_rate=RUNTIME.gates.min_validation_hit_rate,
         min_validation_block_floor=RUNTIME.gates.min_validation_block_floor,
@@ -4058,7 +4056,18 @@ def _promotion_acceptance_decision(report: EvaluationReport) -> tuple[bool, str]
 
     if not best_report.gate_passed:
         return True, "通过(首个 gate-passed champion)"
-    return True, "通过(gate-passed refresh)"
+
+    candidate_promotion = float(report.metrics.get("promotion_score", float("-inf")))
+    current_promotion = float(best_report.metrics.get("promotion_score", float("-inf")))
+    if candidate_promotion > current_promotion:
+        return (
+            True,
+            f"通过(promotion提升 {candidate_promotion:.2f} > {current_promotion:.2f})",
+        )
+    return (
+        False,
+        f"未超过当前champion晋级分({candidate_promotion:.2f} <= {current_promotion:.2f})",
+    )
 
 
 def _record_duplicate_skip(

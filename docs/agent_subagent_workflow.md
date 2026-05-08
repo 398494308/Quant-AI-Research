@@ -56,16 +56,17 @@ flowchart TB
 - 标的：`BTC-USDT-SWAP`，策略按 `20x` 合约研究。
 - 事实层：`15m`；`1h / 4h` 由 `15m` 聚合，只做确认层。
 - 执行层：优先使用 `1m` 回测成交。
-- 评分口径：`trend_capture_v16_equal_capture_midfreq_idle_penalty`。
+- 评分口径：`trend_capture_v17_activity_adjusted_sharpe`。
 - `train`：`2023-07-01` 到 `2024-12-31`。
 - `val`：`2025-01-01` 到 `2025-12-31`。
 - `test`：`2026-01-01` 到 `2026-04-20`。
-- 晋升条件：候选先过 `gate`；过 gate 后即可刷新 active reference。`promotion_score` 只用于排序、诊断和人工复盘，不再作为替换硬门。
-- `promotion_score = 0.45 * capture_score + 0.30 * timed_return_score + 0.25 * sharpe_floor_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`。
+- 晋升条件：候选先过 `gate`；已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference。当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则。
+- `promotion_score = 0.45 * capture_score + 0.30 * timed_return_score + 0.25 * activity_adjusted_sharpe_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`。
 - `capture_score` 现在使用“段等权均分 50% + 原权重均分 50%”的混合方式，减少少数最大趋势段的主导。
+- `activity_adjusted_sharpe_score` 用 `train/val` Sharpe 各 50% 计分，Sharpe 不封顶，但会按月交易频率折扣；`10-15` 笔/月较健康，`5` 笔/月以下基本不计 Sharpe。
 - `trade_activity_penalty` 是低频与长空窗惩罚：希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天；当前只在主评分里减分，不再做硬 gate。
 - 交易数、`filled_entries` 和漏斗通过量只保留观察价值，不再作为下一轮方向的默认软触发。
-- 鲁棒性软惩罚只看 `train/val` 落差、`val` 分块稳定性，以及退出参数邻域在 `val` 3 段上的平台形态；当前更明确压 `val` 最差块、尾块和 `train/val` Sharpe gap，弱侧 Sharpe 通过 `sharpe_floor_score` 进入主分。
+- 鲁棒性软惩罚只看 `train/val` 落差、`val` 分块稳定性，以及退出参数邻域在 `val` 3 段上的平台形态；当前更明确压 `val` 最差块、尾块和 `train/val` Sharpe gap。
 - `test` 只做只读观察；reject / duplicate_skipped 的异步 `test` 只进留档，不进 prompt、不进晋升。
 
 ## 每一轮怎么跑

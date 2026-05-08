@@ -30,10 +30,10 @@
 | 当前 reference hash | a9e00568f7b28cf6f785cf39a98f60244695b578b20baacc73e70eec698021a8 |
 | 当前 reference stage 起点轮次 | 1 |
 | gate | 通过（研究 gate 已放宽：train walk-forward 只诊断，val命中率>=20%，val最差分块>=-0.10，val负分块<=3） |
-| score regime（保存态 / 仓库默认） | trend_capture_v16_equal_capture_midfreq_idle_penalty / trend_capture_v16_equal_capture_midfreq_idle_penalty |
+| score regime（保存态 / 仓库默认） | 研究器重启后按当前保存态重算 / trend_capture_v17_activity_adjusted_sharpe |
 | quality_score（train连续趋势分） | 0.1352 |
 | promotion_score（保存态） | -0.4401 |
-| capture_score / timed_return_score / sharpe_floor_score / turn_protection_score | 0.1749 / 0.0786 / 0.1113 / 0.9475 |
+| capture_score / timed_return_score / activity_adjusted_sharpe_score / turn_protection_score | 保存态重算后更新 |
 | drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 0.3373 / 0.0675 / 0.1900 |
 | train/val连续抓取分 | 0.1352 / 0.2146 |
 | train+val期间收益 | 17.78% |
@@ -53,13 +53,13 @@
 
 说明：
 
-- 上表按当前 [state/research_macd_aggressive_v2_best.json](../state/research_macd_aggressive_v2_best.json) 的最近保存态整理；当前 best 写回时间是 `2026-05-07T01:15:20Z`，当前 active reference 是按 `v16` 重新评估出来的 `champion`。
-- 仓库默认评分已经切到 `trend_capture_v16_equal_capture_midfreq_idle_penalty`；当前保存态也已完成同口径重算。
-- 新口径下 `drawdown_risk_score` 仍是固定窗口 `Ulcer` 风格风险分；`promotion_score` 在分段回撤惩罚之外，又额外接了一层轻量鲁棒性软惩罚，当前更明确压 `val` 最差块、尾块和 `train/val` Sharpe gap，弱侧 Sharpe 通过 `sharpe_floor_score` 进入主分。
+- 上表按当前 [state/research_macd_aggressive_v2_best.json](../state/research_macd_aggressive_v2_best.json) 的最近保存态整理；切到 `v17` 后，保存态分数会由研究器启动流程按新公式重算。
+- 仓库默认评分已经切到 `trend_capture_v17_activity_adjusted_sharpe`；研究器重启后会按新口径重算 active reference。
+- 新口径下 `drawdown_risk_score` 仍是固定窗口 `Ulcer` 风格风险分；`promotion_score` 在分段回撤惩罚之外，又额外接了一层轻量鲁棒性软惩罚，当前更明确压 `val` 最差块、尾块和 `train/val` Sharpe gap。Sharpe 主分不再取弱侧，也不封顶，而是按 train/val 各 50% 后用月交易频率折扣。
 - 当前人工方向已经从“继续补多头收益”切到“优先 `train/val` 稳定性、中频覆盖和弱侧修复”；长期软引导在 [config/research_v2_operator_focus.md](../config/research_v2_operator_focus.md)，人工观察卡仍在 [config/research_v2_champion_review.md](../config/research_v2_champion_review.md) 中按 hash 绑定，仅命中当前 hash 时生效。
 - `state/research_macd_aggressive_v2_best.json` 里如果还带旧字段，例如 `working_base`，那只是历史兼容读取入口；新状态写回只使用单一 active reference 语义。
 - 本次重启前已先把当前人工压缩版源码同步到 `backups/strategy_macd_aggressive_v2_best.py`，避免研究器启动时把旧保存态覆盖回主策略文件。
-- 当前运行状态以 [state/research_macd_aggressive_v2_heartbeat.json](../state/research_macd_aggressive_v2_heartbeat.json) 或 `./scripts/manage_research_macd_aggressive_v2.sh status` 为准；本文更新时研究器已按新口径重启，并正在重新加载这份 `v15` baseline。
+- 当前运行状态以 [state/research_macd_aggressive_v2_heartbeat.json](../state/research_macd_aggressive_v2_heartbeat.json) 或 `./scripts/manage_research_macd_aggressive_v2.sh status` 为准；本文已同步 `v17` activity-adjusted Sharpe 口径。
 - `real-money-test/` 这条执行壳子现在默认转为 `OKX Demo Trading`：策略必须先冻结为固定副本，`demo` 只认 `OKX_DEMO_*` 凭证，旧 `dry-run` 代码保留但不再默认使用，播报也切到 `demo` 卡口径。
 - 如果你想把 `demo` 账户里的更大余额压到固定测试规模，当前壳子支持通过 `OKX_DEMO_AVAILABLE_CAPITAL` 给 `freqtrade` 注入单 bot 资金上限；例如 `1000` 表示只按 `1000 USDT` 规模运行。
 
@@ -96,8 +96,8 @@
   `train/val` 连续趋势抓取混合分按 `5:5` 平均后的主分；每一侧内部都用“段等权均分 50% + 原权重均分 50%”
 - `timed_return_score`
   `train/val` 按日收益路径年化分按 `5:5` 平均后的补充分
-- `sharpe_floor_score`
-  `train` 与 `val` 的 Sharpe 先取较弱一侧，再做轻量归一化；它不是追高 Sharpe，而是避免一边很好、另一边很差
+- `activity_adjusted_sharpe_score`
+  `train` 与 `val` 的 Sharpe 各 50% 计入，先除以 `2.0` 保持量级，不封顶；再按各自月交易频率折扣。`10-15` 笔/月较健康，`5` 笔/月以下基本不计 Sharpe。
 - `drawdown_risk_score`
   `train/val` 固定窗口回撤风险分按 `5:5` 平均后的原始风险指标；窗口内用 `Ulcer` 风格回撤深度与持续时间衡量利润回吐压力
 - `drawdown_penalty_score`
@@ -107,7 +107,7 @@
 - `turn_protection_score`
   `train/val` 趋势掉头窗口保护分按 `5:5` 平均后的诊断分，不再直接进入晋级主公式
 - `promotion_score`
-  最终晋级分。以 `capture_score` 为主，加入 `timed_return_score` 和 `sharpe_floor_score`，再减去 `drawdown_penalty_score`、`robustness_penalty_score` 和 `trade_activity_penalty`
+  最终晋级分。以 `capture_score` 为主，加入 `timed_return_score` 和 `activity_adjusted_sharpe_score`，再减去 `drawdown_penalty_score`、`robustness_penalty_score` 和 `trade_activity_penalty`
 
 当前默认公式：
 
@@ -119,7 +119,11 @@
 
 `timed_return_score = 0.50 * train_timed_return_score + 0.50 * val_timed_return_score`
 
-`sharpe_floor_score = clamp(min(train_sharpe_ratio, val_sharpe_ratio) / 2.0, 0.0, 1.0)`
+`train_activity_discount = interpolate(train_monthly_closed_trades, [(0,0.00),(5,0.05),(7,0.28),(9,0.62),(10,0.78),(12,0.90),(15,1.00)])`
+
+`val_activity_discount = interpolate(validation_monthly_closed_trades, [(0,0.00),(5,0.05),(7,0.28),(9,0.62),(10,0.78),(12,0.90),(15,1.00)])`
+
+`activity_adjusted_sharpe_score = 0.50 * (train_sharpe_ratio / 2.0) * train_activity_discount + 0.50 * (val_sharpe_ratio / 2.0) * val_activity_discount`
 
 `train_trade_activity_shortfall = clamp(max(180 - train_closed_trades, 0) / 180, 0.0, 1.0)`
 
@@ -137,9 +141,9 @@
 
 `drawdown_penalty_score = 0.20 * drawdown_risk_score + 1.00 * max(drawdown_risk_score - 1.25, 0.0)`
 
-`promotion_score = 0.45 * capture_score + 0.30 * timed_return_score + 0.25 * sharpe_floor_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
+`promotion_score = 0.45 * capture_score + 0.30 * timed_return_score + 0.25 * activity_adjusted_sharpe_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
 
-这里特意把 `capture_score` 从“更像追最大段”拉回到“既看大段，也看整体覆盖”；同时把 Sharpe 只用作弱侧保底，不再让它通过软惩罚和主分双重影响总分。
+这里特意把 `capture_score` 从“更像追最大段”拉回到“既看大段，也看整体覆盖”；同时把 Sharpe 从弱侧保底改成交易活跃度折扣，避免低频策略靠少量交易拿到完整 Sharpe 分。
 
 `trade_activity_penalty` 不新增回测。`train` 交易数直接复用现有连续期结果：用 `train+val` 连续回测总交易数减去 `val` 连续回测交易数，得到 `train` 两年的连续交易数；`val` 交易数直接复用现有 `val` 连续回测结果。当前实现只在交易数低于下沿时扣分：`train` 下沿是 `180`，`val` 下沿是 `120`。高于这些下沿不加分也不扣分；区间上沿 `270 / 180` 主要用于研究提示和人工读数，不额外参与计算。回测会记录每笔交易的入场时间，并额外惩罚 `train/val` 中超过 `7` 天没有新开仓的长空窗。
 
@@ -154,7 +158,7 @@
 晋升规则：
 
 - 先过 `gate`
-- 过 `gate` 后即可刷新 active reference；`promotion_score` 只用于排序、诊断和人工复盘，不再作为替换硬门
+- 已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference 才能刷新；当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则
 - 刷新 champion 时会同步跑 `test`
 - 已完成完整评估但未保留的候选也会后台异步补跑 `test`
 - reject / duplicate_skipped 的 `test` 结果只进 round artifact、通知和人工观察，不参与 prompt、不参与晋升

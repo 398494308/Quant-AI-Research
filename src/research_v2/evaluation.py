@@ -148,6 +148,16 @@ TURN_PROTECTION_DD_STEP_PCT = 6.0
 TURN_PROTECTION_SCORE_MIN = -1.0
 TURN_PROTECTION_SCORE_MAX = 1.0
 DAY_MS = 24 * 60 * 60 * 1000
+MONTH_DAYS = 30.4375
+SHARPE_ACTIVITY_DISCOUNT_ANCHORS = (
+    (0.0, 0.00),
+    (5.0, 0.05),
+    (7.0, 0.28),
+    (9.0, 0.62),
+    (10.0, 0.78),
+    (12.0, 0.90),
+    (15.0, 1.00),
+)
 
 
 # ==================== 基础统计 ====================
@@ -471,6 +481,45 @@ def _trade_activity_shortfall(actual: int, preferred_min: int) -> float:
     floor = max(1, int(preferred_min))
     trades = max(0, int(actual))
     return _clamp(max(floor - trades, 0) / floor, 0.0, 1.0)
+
+
+def _period_months_from_timestamps(start_timestamp: int | None, end_timestamp: int | None) -> float:
+    if start_timestamp is None or end_timestamp is None or end_timestamp <= start_timestamp:
+        return 0.0
+    return (end_timestamp - start_timestamp) / DAY_MS / MONTH_DAYS
+
+
+def _monthly_trade_rate(closed_trades: int, months: float) -> float:
+    if months <= 0.0:
+        return 0.0
+    return max(0, int(closed_trades)) / months
+
+
+def _sharpe_activity_discount(monthly_trades: float) -> float:
+    value = max(0.0, float(monthly_trades))
+    anchors = SHARPE_ACTIVITY_DISCOUNT_ANCHORS
+    if value <= anchors[0][0]:
+        return anchors[0][1]
+    for (left_x, left_y), (right_x, right_y) in zip(anchors, anchors[1:]):
+        if value <= right_x:
+            span = right_x - left_x
+            if span <= 0.0:
+                return right_y
+            ratio = (value - left_x) / span
+            return left_y + ratio * (right_y - left_y)
+    return anchors[-1][1]
+
+
+def _activity_adjusted_sharpe_score(
+    *,
+    train_sharpe_ratio: float,
+    validation_sharpe_ratio: float,
+    train_activity_discount: float,
+    validation_activity_discount: float,
+) -> float:
+    train_adjusted = (float(train_sharpe_ratio) / 2.0) * float(train_activity_discount)
+    validation_adjusted = (float(validation_sharpe_ratio) / 2.0) * float(validation_activity_discount)
+    return TRAIN_VAL_SCORE_WEIGHT * train_adjusted + TRAIN_VAL_SCORE_WEIGHT * validation_adjusted
 
 
 def _timestamp_value(value: Any) -> int | None:
@@ -969,11 +1018,9 @@ def _robustness_penalty_payload(
         else 0.0
     )
     sharpe_gap = 0.0
-    sharpe_floor = 0.0
     sharpe_penalties_enabled = train_sharpe_ratio is not None and validation_sharpe_ratio is not None
     if sharpe_penalties_enabled:
         sharpe_gap = abs(float(train_sharpe_ratio) - float(validation_sharpe_ratio))
-        sharpe_floor = min(float(train_sharpe_ratio), float(validation_sharpe_ratio))
     plateau_payload = _plateau_penalty_payload(plateau_probe, scoring)
 
     gap_penalty_score = _upper_band_penalty(
@@ -988,7 +1035,6 @@ def _robustness_penalty_payload(
     block_tail_penalty_score = 0.0
     block_fail_penalty_score = 0.0
     sharpe_gap_penalty_score = 0.0
-    sharpe_floor_penalty_score = 0.0
     if blocks_enabled:
         block_std_penalty_score = _upper_band_penalty(
             float(block_report.std_score),
@@ -1023,13 +1069,6 @@ def _robustness_penalty_payload(
             warn_penalty=scoring.robustness_sharpe_gap_warn_penalty,
             fail_penalty=scoring.robustness_sharpe_gap_fail_penalty,
         )
-        sharpe_floor_penalty_score = _lower_band_penalty(
-            sharpe_floor,
-            warn_threshold=scoring.robustness_sharpe_floor_warn_threshold,
-            fail_threshold=scoring.robustness_sharpe_floor_fail_threshold,
-            warn_penalty=scoring.robustness_sharpe_floor_warn_penalty,
-            fail_penalty=scoring.robustness_sharpe_floor_fail_penalty,
-        )
     raw_penalty_score = (
         gap_penalty_score
         + block_std_penalty_score
@@ -1037,21 +1076,18 @@ def _robustness_penalty_payload(
         + block_tail_penalty_score
         + block_fail_penalty_score
         + sharpe_gap_penalty_score
-        + sharpe_floor_penalty_score
         + plateau_payload["penalty_score"]
     )
     penalty_score = min(max(0.0, float(scoring.robustness_penalty_cap)), raw_penalty_score)
     return {
         "validation_block_tail_gap": tail_gap,
         "train_val_sharpe_gap": sharpe_gap,
-        "train_val_sharpe_floor": sharpe_floor,
         "gap_penalty_score": gap_penalty_score,
         "block_std_penalty_score": block_std_penalty_score,
         "block_floor_penalty_score": block_floor_penalty_score,
         "block_tail_penalty_score": block_tail_penalty_score,
         "block_fail_penalty_score": block_fail_penalty_score,
         "sharpe_gap_penalty_score": sharpe_gap_penalty_score,
-        "sharpe_floor_penalty_score": sharpe_floor_penalty_score,
         "plateau_penalty_score": plateau_payload["penalty_score"],
         "robustness_penalty_score_raw": raw_penalty_score,
         "robustness_penalty_score": penalty_score,

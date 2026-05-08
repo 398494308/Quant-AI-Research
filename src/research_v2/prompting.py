@@ -384,7 +384,7 @@ def build_strategy_research_prompt(
     reference_metrics: dict[str, Any] | None = None,
     benchmark_label: str = "champion",
     current_base_role: str = "champion",
-    score_regime: str = "trend_capture_v16_equal_capture_midfreq_idle_penalty",
+    score_regime: str = "trend_capture_v17_activity_adjusted_sharpe",
     current_complexity_headroom_text: str = "",
     session_mode: str = "resume",
     operator_focus_text: str = "",
@@ -398,8 +398,6 @@ def build_strategy_research_prompt(
     history_package_path: str = "wiki/latest_history_package.md",
     failure_wiki_path: str = "wiki/failure_wiki.md",
     duplicate_watchlist_path: str = "wiki/duplicate_watchlist.md",
-    promotion_accept_margin: float = 0.02,
-    promotion_accept_quality_drop_margin: float = 0.03,
     validation_block_count: int = 4,
     min_validation_hit_rate: float = 0.20,
     min_validation_block_floor: float = -0.10,
@@ -419,8 +417,6 @@ def build_strategy_research_prompt(
     _ = (
         current_complexity_headroom_text,
         min_validation_closed_trades,
-        promotion_accept_margin,
-        promotion_accept_quality_drop_margin,
     )
     side_bias_guidance = _side_bias_guidance(reference_metrics)
     side_bias_block = f"\n{side_bias_guidance}\n" if side_bias_guidance else ""
@@ -467,8 +463,8 @@ def build_strategy_research_prompt(
 - session 状态：`{session_label}`；先复盘最近结构化失败证据，再决定继续还是转向。
 - 围绕一个可证伪假设先写 round brief，交给后续 edit worker 落码。
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
-- 当前评分口径是 `{score_regime}`；候选只要 `gate` 通过，就有资格刷新当前 active reference，`promotion_score` 只用于排序和诊断。
-- `promotion_score` 现在以 `capture_score / timed_return_score / Sharpe floor score = 0.45 / 0.30 / 0.25` 为主体；再额外减去 `trade_activity_penalty`。交易数低频惩罚权重是 `{promotion_trade_activity_penalty_weight:.2f}`：希望区间约是 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}` 笔。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，空窗惩罚权重是 `{trade_idle_penalty_weight:.2f}`。`timed_return_score` 仍是按日收益年化补分，再减去分段回撤惩罚和轻量鲁棒性软惩罚。
+- 当前评分口径是 `{score_regime}`；候选必须先过 `gate`，且 `promotion_score` 严格高于当前 active reference，才有资格刷新 champion；当前不再要求额外晋级边际。
+- `promotion_score` 现在以 `capture_score / timed_return_score / activity_adjusted_sharpe_score = 0.45 / 0.30 / 0.25` 为主体；再额外减去 `trade_activity_penalty`。Sharpe 不封顶，train/val 各 50%，但会按月交易频率折扣：10-15 笔/月较健康，8-9 笔/月偏少，7 笔/月以下明显负面，5 笔/月以下基本不计 Sharpe。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，空窗惩罚权重是 `{trade_idle_penalty_weight:.2f}`。`timed_return_score` 仍是按日收益年化补分，再减去分段回撤惩罚和轻量鲁棒性软惩罚。
 - `capture_score` 不再只偏向少数最大趋势段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
 - 鲁棒性重点看 `train/val` 抓取落差、`train/val` Sharpe 平衡、`val` 分块稳定性，以及退出参数邻域在 `val` 分段上的平台形态。
 - `train` 滚动窗口均值/中位数只做诊断；严重过拟合集中度仍保留为 gate；二者都不直接进入 `promotion_score` 主公式。
@@ -502,12 +498,12 @@ def build_strategy_research_prompt(
 当前口径的 gate / 评分提醒：
 - val 趋势段命中率 >= {min_validation_hit_rate:.0%}
 - val 趋势捕获分 >= 0.05
-- 交易活跃度现在是“低频 + 长空窗”惩罚：希望区间约是 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`；最长无新开仓约束是 `{max_trade_idle_days:.1f}` 天
+- 交易活跃度现在既会单独惩罚低频与长空窗，也会折扣 Sharpe：希望区间约是 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`；最长无新开仓约束是 `{max_trade_idle_days:.1f}` 天；超过 15 笔/月不额外加分，不要为了刷交易数制造无收益短交易
 - train 与 val 分数落差 <= {max_dev_validation_gap:.2f}
 - val 多头捕获 >= 0.00，val 空头捕获 >= 0.00
 - val 会再切成 {validation_block_count} 个连续时间分块：最差分块 >= {min_validation_block_floor:.2f}，负分块最多 {max_validation_block_failures} 个
 - `train/val` Sharpe gap 在 {robustness_sharpe_gap_warn_threshold:.2f} 开始告警，在 {robustness_sharpe_gap_fail_threshold:.2f} 进入更强惩罚
-- 当前已取消 `promotion_score` 晋级边际硬门；过 `gate` 即可刷新 active reference
+- 晋升要求是 `gate` 通过，且 `promotion_score` 严格高于当前 active reference；已取消的是额外晋级边际，不是“低分也可替换”
 - 手续费拖累 <= 11.5%
 - train+val 严重集中度过拟合会直接淘汰
 

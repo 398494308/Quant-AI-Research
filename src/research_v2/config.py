@@ -110,7 +110,10 @@ def _load_scoring_config(windows: "WindowConfig") -> "ScoringConfig":
     return ScoringConfig(
         promotion_capture_weight=_env_float("MACD_V2_PROMOTION_CAPTURE_WEIGHT", 0.45),
         promotion_timed_return_weight=_env_float("MACD_V2_PROMOTION_TIMED_RETURN_WEIGHT", 0.30),
-        promotion_sharpe_floor_weight=_env_float("MACD_V2_PROMOTION_SHARPE_FLOOR_WEIGHT", 0.25),
+        promotion_activity_adjusted_sharpe_weight=_env_float(
+            "MACD_V2_PROMOTION_ACTIVITY_ADJUSTED_SHARPE_WEIGHT",
+            0.25,
+        ),
         promotion_trade_activity_penalty_weight=_env_float_any(
             (
                 "MACD_V2_PROMOTION_TRADE_ACTIVITY_PENALTY_WEIGHT",
@@ -146,10 +149,6 @@ def _load_scoring_config(windows: "WindowConfig") -> "ScoringConfig":
         robustness_sharpe_gap_fail_threshold=_env_float("MACD_V2_ROBUSTNESS_SHARPE_GAP_FAIL_THRESHOLD", 0.60),
         robustness_sharpe_gap_warn_penalty=_env_float("MACD_V2_ROBUSTNESS_SHARPE_GAP_WARN_PENALTY", 0.03),
         robustness_sharpe_gap_fail_penalty=_env_float("MACD_V2_ROBUSTNESS_SHARPE_GAP_FAIL_PENALTY", 0.06),
-        robustness_sharpe_floor_warn_threshold=_env_float("MACD_V2_ROBUSTNESS_SHARPE_FLOOR_WARN_THRESHOLD", 1.00),
-        robustness_sharpe_floor_fail_threshold=_env_float("MACD_V2_ROBUSTNESS_SHARPE_FLOOR_FAIL_THRESHOLD", 0.75),
-        robustness_sharpe_floor_warn_penalty=_env_float("MACD_V2_ROBUSTNESS_SHARPE_FLOOR_WARN_PENALTY", 0.03),
-        robustness_sharpe_floor_fail_penalty=_env_float("MACD_V2_ROBUSTNESS_SHARPE_FLOOR_FAIL_PENALTY", 0.06),
         robustness_plateau_center_gap_warn_threshold=_env_float("MACD_V2_ROBUSTNESS_PLATEAU_CENTER_GAP_WARN_THRESHOLD", 0.05),
         robustness_plateau_center_gap_fail_threshold=_env_float("MACD_V2_ROBUSTNESS_PLATEAU_CENTER_GAP_FAIL_THRESHOLD", 0.10),
         robustness_plateau_center_gap_warn_penalty=_env_float("MACD_V2_ROBUSTNESS_PLATEAU_CENTER_GAP_WARN_PENALTY", 0.03),
@@ -226,7 +225,7 @@ class GateConfig:
 class ScoringConfig:
     promotion_capture_weight: float = 0.45
     promotion_timed_return_weight: float = 0.30
-    promotion_sharpe_floor_weight: float = 0.25
+    promotion_activity_adjusted_sharpe_weight: float = 0.25
     promotion_trade_activity_penalty_weight: float = 0.20
     trade_idle_penalty_weight: float = 0.15
     max_trade_idle_days: float = 7.0
@@ -256,10 +255,6 @@ class ScoringConfig:
     robustness_sharpe_gap_fail_threshold: float = 0.60
     robustness_sharpe_gap_warn_penalty: float = 0.03
     robustness_sharpe_gap_fail_penalty: float = 0.06
-    robustness_sharpe_floor_warn_threshold: float = 1.00
-    robustness_sharpe_floor_fail_threshold: float = 0.75
-    robustness_sharpe_floor_warn_penalty: float = 0.03
-    robustness_sharpe_floor_fail_penalty: float = 0.06
     robustness_plateau_center_gap_warn_threshold: float = 0.05
     robustness_plateau_center_gap_fail_threshold: float = 0.10
     robustness_plateau_center_gap_warn_penalty: float = 0.03
@@ -284,8 +279,6 @@ class ResearchRuntimeConfig:
     windows: WindowConfig
     gates: GateConfig
     scoring: ScoringConfig
-    promotion_accept_margin: float
-    promotion_accept_quality_drop_margin: float
     loop_interval_seconds: int
     provider_recovery_wait_seconds: int
     failure_cooldown_seconds: int
@@ -368,11 +361,6 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         windows=windows,
         gates=gates,
         scoring=scoring,
-        promotion_accept_margin=_env_float("MACD_V2_PROMOTION_ACCEPT_MARGIN", 0.02),
-        promotion_accept_quality_drop_margin=_env_float(
-            "MACD_V2_PROMOTION_ACCEPT_QUALITY_DROP_MARGIN",
-            0.03,
-        ),
         loop_interval_seconds=_env_int("MACD_V2_LOOP_INTERVAL_SECONDS", 10),
         provider_recovery_wait_seconds=_env_int("MACD_V2_PROVIDER_RECOVERY_WAIT_SECONDS", 90),
         failure_cooldown_seconds=_env_int("MACD_V2_FAILURE_COOLDOWN_SECONDS", 10),
