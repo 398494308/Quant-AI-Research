@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
+.codex/
+.deepseek_planner_session_*.json
+.deepseek_planner_trace_*.jsonl
 config/secrets.env
 logs/*.log
 logs/*.out
@@ -7,6 +10,7 @@ logs/*model_calls.jsonl
 backups/*.py
 backups/champion_history/
 backups/interrupted_candidates/
+backups/manual_baseline_replacements/
 backups/research_v2_round_artifacts/
 backups/research_macd_aggressive_v2_resets/
 backups/research_macd_aggressive_v2_stage_resets/
@@ -18,6 +22,7 @@ state/*.pid
 state/*.lock
 state/*.stop
 reports/*.csv
+reports/r46_manual_variants/
 reports/research_v2_charts/
 data/price/*.csv
 data/index/*.csv
