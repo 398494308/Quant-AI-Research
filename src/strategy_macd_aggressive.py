@@ -633,17 +633,19 @@ def _position_side(position):
 def _long_pullback_hold_active(positions):
     if not positions:
         return False
-    lead_position = positions[0]
-    if _position_side(lead_position) != "long":
-        return False
-    path_tag = str(
-        lead_position.get("entry_path_tag")
-        or lead_position.get("entry_path_key")
-        or lead_position.get("entry_signal")
-        or ""
-    ).strip()
-    normalized_tag = ENTRY_PATH_TAGS.get(path_tag, path_tag)
-    return normalized_tag in LONG_PULLBACK_HOLD_TAGS
+    for position in positions:
+        if _position_side(position) != "long":
+            continue
+        path_tag = str(
+            position.get("entry_path_tag")
+            or position.get("entry_path_key")
+            or position.get("entry_signal")
+            or ""
+        ).strip()
+        normalized_tag = ENTRY_PATH_TAGS.get(path_tag, path_tag)
+        if normalized_tag in LONG_PULLBACK_HOLD_TAGS:
+            return True
+    return False
 
 
 def _count_positions_by_side(positions, side):
@@ -720,27 +722,19 @@ def _long_time_exit_active(positions, current_close):
     return price_move_pct < LONG_TIME_EXIT_MAX_PRICE_MOVE_PCT
 
 
-def _volume_climax_exhaustion_side(data, idx, positions):
-    stall_bars = 2
-    if not positions or idx < max(VOLUME_CLIMAX_LOOKBACK, stall_bars):
-        return ""
-    lead_position = positions[0]
-    side = _position_side(lead_position)
+def _position_volume_climax_exhausted(data, idx, position, volume_avg, current_bar, stall_bars):
+    side = _position_side(position)
     if side not in {"long", "short"}:
         return ""
-    hold_bars = max(int(lead_position.get("hold_bars", 0)), 0)
+    hold_bars = max(int(position.get("hold_bars", 0)), 0)
     if hold_bars < stall_bars:
-        return ""
-    volume_avg = max(_avg(data, idx - VOLUME_CLIMAX_LOOKBACK, idx - 1, "volume"), 1e-9)
-    current_bar = data[idx]
-    if current_bar["volume"] < volume_avg * VOLUME_CLIMAX_SPIKE_MULT:
         return ""
     entry_idx = max(0, idx - hold_bars)
     prior_extreme_end = idx - stall_bars
     if prior_extreme_end < entry_idx:
         return ""
     recent_extreme_start = idx - stall_bars + 1
-    entry_price = float(lead_position.get("entry_price", 0.0))
+    entry_price = float(position.get("entry_price", 0.0))
     if side == "long":
         prior_extreme = _window_max(data, entry_idx, prior_extreme_end, "high")
         recent_extreme = _window_max(data, recent_extreme_start, idx, "high")
@@ -756,6 +750,34 @@ def _volume_climax_exhaustion_side(data, idx, positions):
     if entry_price > 0.0 and current_bar["close"] >= entry_price:
         return ""
     return "short"
+
+
+def _volume_climax_exhaustion_sides(data, idx, positions):
+    stall_bars = 2
+    if not positions or idx < max(VOLUME_CLIMAX_LOOKBACK, stall_bars):
+        return set()
+    volume_avg = max(_avg(data, idx - VOLUME_CLIMAX_LOOKBACK, idx - 1, "volume"), 1e-9)
+    current_bar = data[idx]
+    if current_bar["volume"] < volume_avg * VOLUME_CLIMAX_SPIKE_MULT:
+        return set()
+    exhausted_sides = set()
+    for position in positions:
+        exhausted_side = _position_volume_climax_exhausted(
+            data,
+            idx,
+            position,
+            volume_avg,
+            current_bar,
+            stall_bars,
+        )
+        if exhausted_side:
+            exhausted_sides.add(exhausted_side)
+    return exhausted_sides
+
+
+def _volume_climax_exhaustion_side(data, idx, positions):
+    exhausted_sides = _volume_climax_exhaustion_sides(data, idx, positions)
+    return next(iter(exhausted_sides)) if len(exhausted_sides) == 1 else ""
 
 
 def _flow_alignment_score(market_state, hourly, fourh, params, side):
@@ -1644,8 +1666,10 @@ def _trend_followthrough_ok(market_state, side, trigger_price, current_close):
 def _active_long_exit_followthrough_ok(positions, market_state, current_close):
     if not positions:
         return True
-    lead_position = positions[0]
-    trigger_price = float(lead_position.get("entry_price", current_close))
+    long_positions = [position for position in positions if _position_side(position) == "long"]
+    if not long_positions:
+        return True
+    trigger_price = float(long_positions[0].get("entry_price", current_close))
     return _trend_followthrough_exit_long(market_state, trigger_price, current_close)
 
 
@@ -2374,12 +2398,14 @@ def strategy_decision(data, idx, positions, market_state):
     if context is None:
         return None
     sideways_regime = bool(context.get("sideways_regime", False))
-    exhausted_side = _volume_climax_exhaustion_side(data, idx, positions)
+    exhausted_sides = _volume_climax_exhaustion_sides(data, idx, positions)
+    long_exhausted = "long" in exhausted_sides
+    short_exhausted = "short" in exhausted_sides
 
     _record_funnel_pass("long", "sideways_pass")
     _record_funnel_pass("short", "sideways_pass")
 
-    if exhausted_side == "long" and not sideways_regime and short_outer_context_ok(context, market_state, p):
+    if long_exhausted and not short_exhausted and not sideways_regime and short_outer_context_ok(context, market_state, p):
         _record_funnel_pass("short", "outer_context_pass")
         short_path_key = _short_entry_path_key(context, market_state, p, require_breakdown_gate=False)
         decision = _short_entry_result(
@@ -2393,7 +2419,7 @@ def strategy_decision(data, idx, positions, market_state):
             return decision
 
     long_reversal_sniper = _long_reversal_sniper_ok(context)
-    if long_reversal_sniper and not sideways_regime:
+    if long_reversal_sniper and not long_exhausted and not sideways_regime:
         _record_funnel_pass("long", "final_veto_pass")
         if not _long_entry_addition_available(positions):
             return None
@@ -2404,7 +2430,7 @@ def strategy_decision(data, idx, positions, market_state):
             "entry_path_tag": ENTRY_PATH_TAGS.get("long_reversal_sniper", "long_reversal_sniper"),
         }
 
-    if exhausted_side != "long" and long_outer_context_ok(context, market_state, p):
+    if not long_exhausted and long_outer_context_ok(context, market_state, p):
         _record_funnel_pass("long", "outer_context_pass")
         long_breakout_path = long_breakout_ok(context, market_state, p)
         long_pullback_path = long_pullback_ok(context, market_state, p)
@@ -2468,7 +2494,7 @@ def strategy_decision(data, idx, positions, market_state):
         if decision is not None:
             return decision
 
-    if exhausted_side != "short" and not sideways_regime and short_outer_context_ok(context, market_state, p):
+    if not short_exhausted and not sideways_regime and short_outer_context_ok(context, market_state, p):
         _record_funnel_pass("short", "outer_context_pass")
         short_path_key = _short_entry_path_key(context, market_state, p, require_breakdown_gate=True)
         decision = _short_entry_result(
@@ -2507,12 +2533,14 @@ def strategy(data, idx, positions, market_state):
                     continue
                 position["stop_price"] = max(float(position.get("stop_price", 0.0)), dynamic_long_stop)
     sideways_regime = bool(context.get("sideways_regime", False))
-    exhausted_side = _volume_climax_exhaustion_side(data, idx, positions)
+    exhausted_sides = _volume_climax_exhaustion_sides(data, idx, positions)
+    long_exhausted = "long" in exhausted_sides
+    short_exhausted = "short" in exhausted_sides
 
     _record_funnel_pass("long", "sideways_pass")
     _record_funnel_pass("short", "sideways_pass")
 
-    if exhausted_side == "long" and not sideways_regime and short_outer_context_ok(context, market_state, p):
+    if long_exhausted and not short_exhausted and not sideways_regime and short_outer_context_ok(context, market_state, p):
         _record_funnel_pass("short", "outer_context_pass")
         short_path_key = _short_entry_path_key(context, market_state, p, require_breakdown_gate=False)
         signal = _short_entry_result(
@@ -2526,13 +2554,13 @@ def strategy(data, idx, positions, market_state):
             return signal
 
     long_reversal_sniper = _long_reversal_sniper_ok(context)
-    if long_reversal_sniper and not sideways_regime:
+    if long_reversal_sniper and not long_exhausted and not sideways_regime:
         _record_funnel_pass("long", "final_veto_pass")
         if not _long_entry_addition_available(positions):
             return None
         return normalize_entry_signal("long_reversal_sniper", fallback_side="long") or None
 
-    if exhausted_side != "long" and long_outer_context_ok(context, market_state, p):
+    if not long_exhausted and long_outer_context_ok(context, market_state, p):
         _record_funnel_pass("long", "outer_context_pass")
         long_breakout_path = long_breakout_ok(context, market_state, p)
         long_pullback_path = long_pullback_ok(context, market_state, p)
@@ -2659,7 +2687,7 @@ def strategy(data, idx, positions, market_state):
         if signal is not None:
             return signal
 
-    if exhausted_side != "short" and not sideways_regime and short_outer_context_ok(context, market_state, p):
+    if not short_exhausted and not sideways_regime and short_outer_context_ok(context, market_state, p):
         _record_funnel_pass("short", "outer_context_pass")
         short_path_key = _short_entry_path_key(context, market_state, p, require_breakdown_gate=True)
         signal = _short_entry_result(

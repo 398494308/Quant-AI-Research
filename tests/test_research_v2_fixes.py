@@ -1432,6 +1432,86 @@ class StrategyValidationFixesTest(unittest.TestCase):
 
         self.assertIsInstance(result, bool)
 
+    def test_long_pullback_hold_scans_long_positions_after_short(self):
+        positions = [
+            {"entry_signal": "short_breakdown", "entry_path_tag": "short_impulse"},
+            {"entry_signal": "long_pullback", "entry_path_tag": "long_retest"},
+        ]
+
+        self.assertTrue(strategy_module._long_pullback_hold_active(positions))
+
+    def test_volume_climax_exhaustion_scans_mixed_positions_by_side(self):
+        data = [
+            {
+                "open": 100.0,
+                "high": 100.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 100.0,
+            }
+            for _ in range(26)
+        ]
+        for index in range(20, 24):
+            data[index]["high"] = 120.0
+            data[index]["low"] = 80.0
+        data[24]["high"] = 118.0
+        data[24]["low"] = 81.0
+        data[25].update({"high": 119.0, "low": 82.0, "close": 115.0, "volume": 400.0})
+        positions = [
+            {"entry_signal": "short_breakdown", "entry_price": 90.0, "hold_bars": 5},
+            {"entry_signal": "long_pullback", "entry_price": 100.0, "hold_bars": 5},
+        ]
+
+        exhausted_sides = strategy_module._volume_climax_exhaustion_sides(data, 25, positions)
+
+        self.assertEqual(exhausted_sides, {"long"})
+        self.assertEqual(strategy_module._volume_climax_exhaustion_side(data, 25, positions), "long")
+
+    def test_strategy_decision_can_return_long_with_existing_short_position(self):
+        strategy_context = {
+            "ready": True,
+            "sideways_regime": False,
+            "current": {"open": 104.0, "high": 106.0, "close": 105.0, "volume": 2000.0},
+            "prev": {"close": 103.0, "high": 104.0, "low": 102.0, "volume": 1000.0},
+            "hourly": {},
+            "fourh": {},
+            "current_candle": {"close_pos": 0.8, "body_ratio": 0.5},
+            "prev_candle": {"body_ratio": 0.4},
+            "recent_volume_avg": 1000.0,
+            "prev_volume": 1000.0,
+            "volume_ratio": 2.0,
+            "atr_ratio": 0.01,
+            "breakout_high": 104.0,
+            "breakout_distance_pct": 0.001,
+            "breakout_high_penetration_pct": 0.001,
+            "prev_breakout_distance_pct": 0.0,
+            "current_range": 2.0,
+            "prev_range": 2.0,
+            "recent_range_avg": 1.0,
+            "recent_pullback_depth_pct": 0.01,
+            "recent_three_low": 100.0,
+            "prior_three_low": 99.0,
+        }
+        positions = [{"entry_signal": "short_breakdown", "entry_price": 110.0, "hold_bars": 5}]
+
+        with mock.patch.object(strategy_module, "_build_signal_context", return_value=strategy_context):
+            with mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False):
+                with mock.patch.object(strategy_module, "_volume_climax_exhaustion_sides", return_value=set()):
+                    with mock.patch.object(strategy_module, "long_outer_context_ok", return_value=True):
+                        with mock.patch.object(strategy_module, "long_breakout_ok", return_value=True):
+                            with mock.patch.object(strategy_module, "long_pullback_ok", return_value=False):
+                                with mock.patch.object(strategy_module, "long_trend_reaccel_ok", return_value=False):
+                                    with mock.patch.object(strategy_module, "long_final_veto_clear", return_value=True):
+                                        decision = strategy_module.strategy_decision(
+                                            [{}] * (strategy_module.PARAMS["min_history"] + 1),
+                                            strategy_module.PARAMS["min_history"],
+                                            positions,
+                                            {},
+                                        )
+
+        self.assertEqual(decision["entry_side"], "long")
+        self.assertEqual(decision["entry_path_key"], "long_breakout")
+
     def test_strategy_funnel_diagnostics_track_long_and_short_gate_passes(self):
         strategy_module.reset_funnel_diagnostics()
 
