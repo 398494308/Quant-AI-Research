@@ -4,7 +4,7 @@
 
 ## 当前快照
 
-说明：`2026-05-07 09:15`（Asia/Shanghai）已按新的交易活跃度低频惩罚口径完成一次 `--reset-best` 基线重算，并把当前源码写成新的 active reference。下面这张表已经同步到最新 `state/research_macd_aggressive_v2_best.json` 的写回结果；评分公式与 gate 口径以下文为准。
+说明：`2026-05-07 09:15`（Asia/Shanghai）已按新的交易活跃度低频惩罚口径完成一次 `--reset-best` 基线重算，并把当前源码写成新的 active reference。`2026-05-08 10:54`（Asia/Shanghai）已重启研究器，让 `8588ae4 Scan mixed positions by side` 的混合持仓方向扫描补丁进入当前运行。下面这张表已经同步到最新 `state/research_macd_aggressive_v2_best.json` 的写回结果；评分公式与 gate 口径以下文为准。
 
 运行时只有一个 active reference。最新快照在：
 
@@ -59,7 +59,7 @@
 - 当前人工方向已经从“继续补多头收益”切到“优先 `train/val` 稳定性、中频覆盖和弱侧修复”；长期软引导在 [config/research_v2_operator_focus.md](../config/research_v2_operator_focus.md)，人工观察卡仍在 [config/research_v2_champion_review.md](../config/research_v2_champion_review.md) 中按 hash 绑定，仅命中当前 hash 时生效。
 - `state/research_macd_aggressive_v2_best.json` 里如果还带旧字段，例如 `working_base`，那只是历史兼容读取入口；新状态写回只使用单一 active reference 语义。
 - 本次重启前已先把当前人工压缩版源码同步到 `backups/strategy_macd_aggressive_v2_best.py`，避免研究器启动时把旧保存态覆盖回主策略文件。
-- 当前运行状态以 [state/research_macd_aggressive_v2_heartbeat.json](../state/research_macd_aggressive_v2_heartbeat.json) 或 `./scripts/manage_research_macd_aggressive_v2.sh status` 为准；本文已同步 `v17` activity-adjusted Sharpe 口径。
+- 当前运行状态以 [state/research_macd_aggressive_v2_heartbeat.json](../state/research_macd_aggressive_v2_heartbeat.json) 或 `./scripts/manage_research_macd_aggressive_v2.sh status` 为准；本文已同步 `v17` activity-adjusted Sharpe 口径和 `8588ae4` 混合持仓方向扫描补丁。
 - `real-money-test/` 这条执行壳子现在默认转为 `OKX Demo Trading`：策略必须先冻结为固定副本，`demo` 只认 `OKX_DEMO_*` 凭证，旧 `dry-run` 代码保留但不再默认使用，播报也切到 `demo` 卡口径。
 - 如果你想把 `demo` 账户里的更大余额压到固定测试规模，当前壳子支持通过 `OKX_DEMO_AVAILABLE_CAPITAL` 给 `freqtrade` 注入单 bot 资金上限；例如 `1000` 表示只按 `1000 USDT` 规模运行。
 
