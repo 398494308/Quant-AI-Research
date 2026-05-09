@@ -46,6 +46,8 @@ class TrendSegment:
     end_idx: int
     move_pct: float
     weight: float
+    trend_efficiency: float = 0.0
+    directional_bar_ratio: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,8 @@ class SegmentScoreDetail:
     weight: float
     duration_bars: int
     avg_atr_ratio: float
+    trend_efficiency: float = 0.0
+    directional_bar_ratio: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -134,13 +138,15 @@ DURATION_SHORT_MAX_BARS = 96
 DURATION_MEDIUM_MAX_BARS = 288
 VOLATILITY_LOW_MAX_ATR_RATIO = 0.010
 VOLATILITY_MEDIUM_MAX_ATR_RATIO = 0.016
-TREND_INIT_MOVE_MULTIPLIER = 3.0
-TREND_INIT_MOVE_FLOOR = 0.04
-TREND_SEGMENT_MOVE_MULTIPLIER = 4.0
-TREND_SEGMENT_MOVE_FLOOR = 0.05
-TREND_REVERSAL_MOVE_MULTIPLIER = 2.0
-TREND_REVERSAL_MOVE_FLOOR = 0.025
+TREND_INIT_MOVE_MULTIPLIER = 2.3
+TREND_INIT_MOVE_FLOOR = 0.030
+TREND_SEGMENT_MOVE_MULTIPLIER = 2.7
+TREND_SEGMENT_MOVE_FLOOR = 0.035
+TREND_REVERSAL_MOVE_MULTIPLIER = 1.5
+TREND_REVERSAL_MOVE_FLOOR = 0.018
 TREND_MIN_SEGMENT_BARS = 3
+TREND_CLEAN_EFFICIENCY_MIN = 0.30
+TREND_CLEAN_DIRECTIONAL_BAR_RATIO_MIN = 0.60
 MIN_VALIDATION_BLOCK_POINTS = 60
 TRAIN_VAL_SCORE_WEIGHT = 0.50
 TURN_PROTECTION_NEUTRAL_DD_PCT = 12.0
@@ -572,6 +578,74 @@ def _trend_threshold(multiplier: float, floor: float, atr_ratio: float) -> float
     return max(floor, multiplier * max(0.0, atr_ratio))
 
 
+def _trend_clean_quality(
+    points: list[dict[str, Any]],
+    start_idx: int,
+    end_idx: int,
+    direction: int,
+) -> tuple[float, float]:
+    if end_idx <= start_idx or direction == 0:
+        return 0.0, 0.0
+    closes = [
+        float(point.get("market_close", 0.0))
+        for point in points[start_idx : end_idx + 1]
+    ]
+    path_distance = 0.0
+    directional_bars = 0
+    valid_bars = 0
+    for idx in range(1, len(closes)):
+        prev_close = closes[idx - 1]
+        current_close = closes[idx]
+        if prev_close <= 1e-9 or current_close <= 1e-9:
+            continue
+        log_return = math.log(current_close / prev_close)
+        if abs(log_return) <= 1e-12:
+            continue
+        path_distance += abs(log_return)
+        valid_bars += 1
+        if direction * log_return > 0.0:
+            directional_bars += 1
+    if closes[0] <= 1e-9 or closes[-1] <= 1e-9:
+        return 0.0, 0.0
+    net_distance = abs(math.log(closes[-1] / closes[0]))
+    return (
+        _safe_ratio(net_distance, path_distance, default=0.0),
+        _safe_ratio(directional_bars, valid_bars, default=0.0),
+    )
+
+
+def _clean_trend_segment(
+    *,
+    points: list[dict[str, Any]],
+    direction: int,
+    start_idx: int,
+    end_idx: int,
+    move_pct: float,
+    weight: float,
+) -> TrendSegment | None:
+    if weight <= 1e-9:
+        return None
+    trend_efficiency, directional_bar_ratio = _trend_clean_quality(
+        points,
+        start_idx,
+        end_idx,
+        direction,
+    )
+    if trend_efficiency < TREND_CLEAN_EFFICIENCY_MIN:
+        return None
+    if directional_bar_ratio < TREND_CLEAN_DIRECTIONAL_BAR_RATIO_MIN:
+        return None
+    return TrendSegment(
+        direction=direction,
+        start_idx=start_idx,
+        end_idx=end_idx,
+        move_pct=move_pct,
+        weight=weight,
+        trend_efficiency=trend_efficiency,
+        directional_bar_ratio=directional_bar_ratio,
+    )
+
+
 def _detect_major_trend_segments(points: list[dict[str, Any]]) -> list[TrendSegment]:
     if len(points) < 6:
         return []
@@ -632,6 +706,7 @@ def _detect_major_trend_segments(points: list[dict[str, Any]]) -> list[TrendSegm
             )
             if move_pct < min_segment:
                 if price <= closes[pivot_idx]:
+                    pivot_idx = extreme_idx
                     direction = -1
                     extreme_idx = idx
                 continue
@@ -641,16 +716,16 @@ def _detect_major_trend_segments(points: list[dict[str, Any]]) -> list[TrendSegm
                 and extreme_idx - pivot_idx >= TREND_MIN_SEGMENT_BARS
             ):
                 weight = _log_weight(closes[pivot_idx], closes[extreme_idx])
-                if weight > 1e-9:
-                    segments.append(
-                        TrendSegment(
-                            direction=1,
-                            start_idx=pivot_idx,
-                            end_idx=extreme_idx,
-                            move_pct=move_pct,
-                            weight=weight,
-                        )
-                    )
+                segment = _clean_trend_segment(
+                    points=points,
+                    direction=1,
+                    start_idx=pivot_idx,
+                    end_idx=extreme_idx,
+                    move_pct=move_pct,
+                    weight=weight,
+                )
+                if segment is not None:
+                    segments.append(segment)
                 pivot_idx = extreme_idx
                 extreme_idx = idx
                 direction = -1
@@ -669,6 +744,7 @@ def _detect_major_trend_segments(points: list[dict[str, Any]]) -> list[TrendSegm
             )
             if move_pct < min_segment:
                 if price >= closes[pivot_idx]:
+                    pivot_idx = extreme_idx
                     direction = 1
                     extreme_idx = idx
                 continue
@@ -678,16 +754,16 @@ def _detect_major_trend_segments(points: list[dict[str, Any]]) -> list[TrendSegm
                 and extreme_idx - pivot_idx >= TREND_MIN_SEGMENT_BARS
             ):
                 weight = _log_weight(closes[pivot_idx], closes[extreme_idx])
-                if weight > 1e-9:
-                    segments.append(
-                        TrendSegment(
-                            direction=-1,
-                            start_idx=pivot_idx,
-                            end_idx=extreme_idx,
-                            move_pct=move_pct,
-                            weight=weight,
-                        )
-                    )
+                segment = _clean_trend_segment(
+                    points=points,
+                    direction=-1,
+                    start_idx=pivot_idx,
+                    end_idx=extreme_idx,
+                    move_pct=move_pct,
+                    weight=weight,
+                )
+                if segment is not None:
+                    segments.append(segment)
                 pivot_idx = extreme_idx
                 extreme_idx = idx
                 direction = 1
@@ -700,16 +776,16 @@ def _detect_major_trend_segments(points: list[dict[str, Any]]) -> list[TrendSegm
     )
     if extreme_idx - pivot_idx >= TREND_MIN_SEGMENT_BARS and final_move >= final_threshold:
         weight = _log_weight(closes[pivot_idx], closes[extreme_idx])
-        if weight > 1e-9:
-            segments.append(
-                TrendSegment(
-                    direction=1 if closes[extreme_idx] >= closes[pivot_idx] else -1,
-                    start_idx=pivot_idx,
-                    end_idx=extreme_idx,
-                    move_pct=final_move,
-                    weight=weight,
-                )
-            )
+        segment = _clean_trend_segment(
+            points=points,
+            direction=1 if closes[extreme_idx] >= closes[pivot_idx] else -1,
+            start_idx=pivot_idx,
+            end_idx=extreme_idx,
+            move_pct=final_move,
+            weight=weight,
+        )
+        if segment is not None:
+            segments.append(segment)
     return segments
 
 
@@ -1136,6 +1212,8 @@ def _trend_score_report(points: list[dict[str, Any]]) -> TrendScoreReport:
                 weight=segment.weight,
                 duration_bars=segment.end_idx - segment.start_idx,
                 avg_atr_ratio=avg_atr_ratio,
+                trend_efficiency=segment.trend_efficiency,
+                directional_bar_ratio=segment.directional_bar_ratio,
             )
         )
         if segment_score >= HIT_SCORE_THRESHOLD:

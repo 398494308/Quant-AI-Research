@@ -384,7 +384,7 @@ def build_strategy_research_prompt(
     reference_metrics: dict[str, Any] | None = None,
     benchmark_label: str = "champion",
     current_base_role: str = "champion",
-    score_regime: str = "trend_capture_v19_directional_capture_fix",
+    score_regime: str = "trend_capture_v20_clean_trend_segments",
     current_complexity_headroom_text: str = "",
     session_mode: str = "resume",
     operator_focus_text: str = "",
@@ -464,7 +464,7 @@ def build_strategy_research_prompt(
 - 当前评分口径是 `{score_regime}`；候选必须先过 `gate`，且 `promotion_score` 严格高于当前 active reference，才有资格刷新 champion；当前不再要求额外晋级边际。
 - `promotion_score` 现在以 `capture_score / timed_return_score = 0.60 / 0.40` 为主体；再额外减去 `trade_activity_penalty`。Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，空窗惩罚权重是 `{trade_idle_penalty_weight:.2f}`。`timed_return_score` 仍是按日收益年化补分，再减去分段回撤惩罚和轻量鲁棒性软惩罚。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓不占这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
-- `capture_score` 不再只偏向少数最大趋势段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
+- `capture_score` 只使用 clean trend segments：先用中度放开的趋势段候选，再过滤掉趋势效率或方向一致性不足的震荡段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
 - 鲁棒性只做轻量软惩罚：用已有 `train` 滚动分数的 median/IQR/std 和 `val` 分块分数比较分布是否离谱，再轻查 `train/val` Ulcer 比；不额外回测。
 - `train` 滚动窗口均值/中位数只做诊断；严重过拟合集中度仍保留为 gate；二者都不直接进入 `promotion_score` 主公式。
 - `test` 只做只读观察，不参与晋升，也不能作为下一轮 prompt 的证据源。

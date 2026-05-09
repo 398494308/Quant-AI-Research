@@ -332,7 +332,7 @@ def summarize_evaluation_impl(
             f"{development_score_std:.2f} / {profitable_window_ratio:.0%}"
         ),
         (
-            "train/val连续趋势抓取混合分(段等权50%+原权重50%) / 抓取主分: "
+            "train/val clean趋势抓取混合分(段等权50%+原权重50%) / 抓取主分: "
             f"{train_capture_score:.2f} / {validation_capture_score:.2f} / {capture_score:.2f}"
         ),
         (
@@ -507,7 +507,7 @@ def summarize_evaluation_impl(
             f"{development_score_std:.2f}/{profitable_window_ratio:.0%}"
         ),
         (
-            f"- 当前评分组成: train/val 连续趋势抓取混合分={train_capture_score:.2f}/{validation_capture_score:.2f}，"
+            f"- 当前评分组成: train/val clean趋势抓取混合分={train_capture_score:.2f}/{validation_capture_score:.2f}，"
             f"数据源={train_capture_source}/{train_daily_return_source}，"
             f"趋势段(train总/多/空/命中)="
             f"{train_continuous_trend_report.segment_count}/"

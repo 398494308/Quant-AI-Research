@@ -38,9 +38,11 @@ from research_v2.evaluation import (
     _collect_daily_path,
     _collect_trend_path,
     _capture_ratio,
+    _detect_major_trend_segments,
     _entry_side_counts,
     _max_trade_idle_days_from_timestamps,
     _period_months_from_timestamps,
+    _trend_clean_quality,
     _robustness_penalty_payload,
     _trade_activity_shortfall,
     _trade_idle_shortfall,
@@ -481,6 +483,18 @@ class BacktestFixesTest(unittest.TestCase):
 
 
 class EvaluationFixesTest(unittest.TestCase):
+    def _trend_points_from_closes(self, closes):
+        return [
+            {
+                "timestamp": idx,
+                "label": f"p{idx}",
+                "market_close": float(close),
+                "atr_ratio": 0.01,
+                "strategy_equity": 100000.0,
+            }
+            for idx, close in enumerate(closes)
+        ]
+
     def test_capture_ratio_rewards_positive_strategy_return_for_bull_and_bear_segments(self):
         self.assertAlmostEqual(
             _capture_ratio(
@@ -518,6 +532,33 @@ class EvaluationFixesTest(unittest.TestCase):
             ),
             -0.50,
         )
+
+    def test_clean_trend_segments_keep_clear_bull_and_bear_moves(self):
+        bull_segments = _detect_major_trend_segments(
+            self._trend_points_from_closes([100, 102, 104, 106, 108, 110, 108])
+        )
+        bear_segments = _detect_major_trend_segments(
+            self._trend_points_from_closes([110, 108, 106, 104, 102, 100, 102])
+        )
+
+        self.assertEqual(len(bull_segments), 1)
+        self.assertEqual(bull_segments[0].direction, 1)
+        self.assertGreaterEqual(bull_segments[0].trend_efficiency, 0.99)
+        self.assertGreaterEqual(bull_segments[0].directional_bar_ratio, 0.99)
+        self.assertEqual(len(bear_segments), 1)
+        self.assertEqual(bear_segments[0].direction, -1)
+        self.assertGreaterEqual(bear_segments[0].trend_efficiency, 0.99)
+        self.assertGreaterEqual(bear_segments[0].directional_bar_ratio, 0.99)
+
+    def test_clean_trend_segments_filter_choppy_endpoint_move(self):
+        points = self._trend_points_from_closes(
+            [100.0, 101.7, 100.2, 101.9, 100.4, 102.1, 100.6, 102.3, 100.8, 103.8, 101.8]
+        )
+        efficiency, directional_ratio = _trend_clean_quality(points, 0, 9, 1)
+
+        self.assertLess(efficiency, 0.30)
+        self.assertLess(directional_ratio, 0.60)
+        self.assertEqual(_detect_major_trend_segments(points), [])
 
     def test_collect_daily_path_assigns_overlapping_days_to_latest_window(self):
         window1 = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-02"})()
