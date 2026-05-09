@@ -720,8 +720,8 @@ def _capture_ratio(
     strategy_return: float,
     direction: int,
 ) -> float:
-    market_return = _simple_return(start_market, end_market)
-    return _clamp(direction * _safe_ratio(strategy_return, abs(market_return), default=0.0), -1.0, 3.0)
+    market_move = abs(_simple_return(start_market, end_market))
+    return _clamp(_safe_ratio(strategy_return, market_move, default=0.0), -1.0, 3.0)
 
 
 def _point_window_drawdown_pct(points: list[dict[str, Any]], start_idx: int, end_idx: int) -> float:

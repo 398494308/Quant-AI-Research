@@ -37,6 +37,7 @@ from research_v2.evaluation import (
     _annualized_return_score,
     _collect_daily_path,
     _collect_trend_path,
+    _capture_ratio,
     _entry_side_counts,
     _max_trade_idle_days_from_timestamps,
     _period_months_from_timestamps,
@@ -480,6 +481,44 @@ class BacktestFixesTest(unittest.TestCase):
 
 
 class EvaluationFixesTest(unittest.TestCase):
+    def test_capture_ratio_rewards_positive_strategy_return_for_bull_and_bear_segments(self):
+        self.assertAlmostEqual(
+            _capture_ratio(
+                start_market=100.0,
+                end_market=120.0,
+                strategy_return=0.10,
+                direction=1,
+            ),
+            0.50,
+        )
+        self.assertAlmostEqual(
+            _capture_ratio(
+                start_market=100.0,
+                end_market=120.0,
+                strategy_return=-0.10,
+                direction=1,
+            ),
+            -0.50,
+        )
+        self.assertAlmostEqual(
+            _capture_ratio(
+                start_market=100.0,
+                end_market=80.0,
+                strategy_return=0.10,
+                direction=-1,
+            ),
+            0.50,
+        )
+        self.assertAlmostEqual(
+            _capture_ratio(
+                start_market=100.0,
+                end_market=80.0,
+                strategy_return=-0.10,
+                direction=-1,
+            ),
+            -0.50,
+        )
+
     def test_collect_daily_path_assigns_overlapping_days_to_latest_window(self):
         window1 = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-02"})()
         window2 = type("Window", (), {"group": "eval", "label": "train2", "start_date": "2026-01-02", "end_date": "2026-01-03"})()
@@ -1627,6 +1666,10 @@ class StrategyValidationFixesTest(unittest.TestCase):
             "prior_three_low": 99.0,
         }
         positions = [{"entry_signal": "short_breakdown", "entry_price": 110.0, "hold_bars": 5}]
+        data = [
+            {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000.0}
+            for _ in range(strategy_module.PARAMS["min_history"] + 1)
+        ]
 
         with mock.patch.object(strategy_module, "_build_signal_context", return_value=strategy_context):
             with mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False):
@@ -1637,7 +1680,7 @@ class StrategyValidationFixesTest(unittest.TestCase):
                                 with mock.patch.object(strategy_module, "long_trend_reaccel_ok", return_value=False):
                                     with mock.patch.object(strategy_module, "long_final_veto_clear", return_value=True):
                                         decision = strategy_module.strategy_decision(
-                                            [{}] * (strategy_module.PARAMS["min_history"] + 1),
+                                            data,
                                             strategy_module.PARAMS["min_history"],
                                             positions,
                                             {},

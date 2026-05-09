@@ -4,42 +4,44 @@
 
 ## 当前快照
 
-`2026-05-08 21:41:04`（Asia/Shanghai）已重算当前 active reference，并按新评分写回 [state/research_macd_aggressive_v2_best.json](../state/research_macd_aggressive_v2_best.json)。当前策略源码同步在：
+`2026-05-09 21:26:33`（Asia/Shanghai）已按 `trend_capture_v19_directional_capture_fix` 重算当前 active reference，并写回 [state/research_macd_aggressive_v2_best.json](../state/research_macd_aggressive_v2_best.json)。当前策略源码同步在：
 
 - [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)
 - [backups/strategy_macd_aggressive_v2_best.py](../backups/strategy_macd_aggressive_v2_best.py)
-- [backups/strategy_macd_aggressive_v2_champion.py](../backups/strategy_macd_aggressive_v2_champion.py)
+
+当前没有通过 v19 gate 的 champion 文件；旧策略只保留为 active baseline。
 
 当前关键指标：
 
 | 项目 | 数值 |
 | --- | --- |
-| active reference | champion |
-| reference hash | `928e86b8e8ed5916932986077ebe655b7678b06b3e61cb0d545ffbf6527ce415` |
-| score regime | `trend_capture_v18_continuous_no_sharpe` |
-| reference stage 起点轮次 | 24 |
-| gate | 通过 |
-| quality_score | 0.5890 |
-| promotion_score | 0.7249 |
-| capture_score / timed_return_score | 0.5622 / 1.8837 |
-| drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 1.0793 / 0.2159 / 0.0000 |
-| train/val 连续抓取分 | 0.5890 / 0.5354 |
-| train+val 期间收益 | 989.16% |
-| val 期间收益 | 297.70% |
-| val 多/空平仓数 | 91 / 69 |
-| train+val 多/空捕获 | 0.4911 / 0.4729 |
-| Sharpe(train / val / train+val) | 1.66 / 1.85 / 1.54 |
-| train/val 非加仓开仓 | 246 / 160 |
-| train/val 月非加仓开仓 | 13.61 / 13.34 |
+| active reference | baseline |
+| reference hash | `4570043420edaa10227897a2e03576176892efd306228fca170daf54188b9d5f` |
+| score regime | `trend_capture_v19_directional_capture_fix` |
+| reference stage 起点轮次 | 78 |
+| gate | 未通过：`val空头捕获偏低(-0.18)` |
+| quality_score | 0.0898 |
+| promotion_score | 0.6807 |
+| capture_score / timed_return_score | 0.0603 / 2.4338 |
+| drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 0.8953 / 0.1791 / 0.0000 |
+| train/val 连续抓取分 | 0.0898 / 0.0308 |
+| train+val 期间收益 | 1598.32% |
+| val 期间收益 | 535.67% |
+| val 多/空平仓数 | 97 / 64 |
+| train+val 多/空捕获 | 0.3488 / -0.1955 |
+| Sharpe(train / val / train+val) | 1.88 / 2.35 / 1.70 |
+| train/val 非加仓开仓 | 238 / 161 |
+| train/val 月非加仓开仓 | 13.17 / 13.43 |
 | 交易短缺惩罚 / 空窗惩罚 / 总活跃度惩罚 | 0.0000 / 0.1500 / 0.1500 |
-| val 分块均值/std/最差/负块数 | 0.6905 / 0.4009 / 0.1776 / 0 |
+| val 分块均值/std/最差/负块数 | 0.3357 / 0.3855 / 0.0049 / 0 |
 | 鲁棒性 center/spread/envelope/ulcer 惩罚 | 0.0000 / 0.0000 / 0.0000 / 0.0000 |
-| test 收益 / Sharpe / 最大回撤 / 平仓数 | -15.38% / -0.48 / 47.30% / 15 |
+| test 收益 / Sharpe / 最大回撤 / 平仓数 | -26.79% / -1.05 / 54.03% / 16 |
 
 说明：
 
-- 当前 `promotion_score` 已按新口径重算为正；Sharpe 不再贡献主评分，分数主要来自趋势抓取、按日收益补分、回撤惩罚和活跃度惩罚。
-- 当前交易频率在目标区间内；后续不需要继续刷交易数量，重点应转到收益质量、回撤、长空窗和 `test` 外推表现。
+- v19 修复了趋势捕获符号问题：单段捕获现在按 `strategy_return / abs(market_return)` 计算，bull 和 bear 都只奖励账户正收益。旧 v18 在 bear 段错误地让账户亏损得到正捕获分。
+- 当前策略收益率高，但空头趋势捕获为负，已不能作为通过 gate 的 champion；后续重点应先修复 bear 段捕获和 test 外推表现。
+- 当前交易频率在目标区间内，不需要继续单纯刷交易数量。
 - Funding 覆盖仍为 `0%`，这是数据源缺口；最终实盘前用长时间 demo run 兜底观察，不把它硬塞进当前研究评分。
 
 ## 数据与窗口
@@ -61,6 +63,12 @@
 `period_score = 0.70 * trend_capture_score + 0.30 * return_score`
 
 连续趋势抓取主分：
+
+单段捕获比：
+
+`capture_ratio = clamp(strategy_return / abs(market_return), -1.0, 3.0)`
+
+这里 `strategy_return` 是账户收益方向，bull 和 bear 都必须账户赚钱才是正捕获；`direction` 只用于分段归类，不再反转收益符号。
 
 `train_capture_score = 0.50 * train_equal_capture_score + 0.50 * train_weighted_capture_score`
 
@@ -134,12 +142,12 @@ Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数
 
 当前基底的鲁棒性诊断：
 
-- train 分数中位/IQR/std：`0.2827 / 0.7034 / 0.5666`
-- val 分数中位/std：`0.6410 / 0.4009`
-- 中位差 IQR 倍数：`0.5094`
-- 波动比：`1.4134`
+- train 分数中位/IQR/std：`-0.0391 / 0.4809 / 0.6710`
+- val 分数中位/std：`0.1725 / 0.3855`
+- 中位差 IQR 倍数：`0.4401`
+- 波动比：`1.7404`
 - 包络溢出：`0.0000`
-- Ulcer 比：`1.0548`
+- Ulcer 比：`1.0040`
 - 最终鲁棒性惩罚：`0.0000`
 
 ## 当前 Gate

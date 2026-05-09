@@ -384,7 +384,7 @@ def build_strategy_research_prompt(
     reference_metrics: dict[str, Any] | None = None,
     benchmark_label: str = "champion",
     current_base_role: str = "champion",
-    score_regime: str = "trend_capture_v18_continuous_no_sharpe",
+    score_regime: str = "trend_capture_v19_directional_capture_fix",
     current_complexity_headroom_text: str = "",
     session_mode: str = "resume",
     operator_focus_text: str = "",
