@@ -422,7 +422,7 @@ def build_strategy_research_prompt(
     reference_metrics: dict[str, Any] | None = None,
     benchmark_label: str = "champion",
     current_base_role: str = "champion",
-    score_regime: str = "trend_capture_v20_clean_trend_segments",
+    score_regime: str = "trend_capture_v21_capture_adjusted_return",
     current_complexity_headroom_text: str = "",
     session_mode: str = "resume",
     operator_focus_text: str = "",
@@ -446,8 +446,9 @@ def build_strategy_research_prompt(
     trade_activity_train_range_high: int = 270,
     trade_activity_validation_range_low: int = 120,
     trade_activity_validation_range_high: int = 180,
-    promotion_trade_activity_penalty_weight: float = 0.20,
-    trade_idle_penalty_weight: float = 0.15,
+    promotion_trade_activity_penalty_weight: float = 0.15,
+    trade_idle_penalty_weight: float = 0.10,
+    trade_participation_penalty_weight: float = 0.10,
     max_trade_idle_days: float = 7.0,
 ) -> str:
     _ = (
@@ -500,7 +501,7 @@ def build_strategy_research_prompt(
 - 围绕一个可证伪假设先写 round brief，交给后续 edit worker 落码。
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
 - 当前评分口径是 `{score_regime}`；候选必须先过 `gate`，且 `promotion_score` 严格高于当前 active reference，才有资格刷新 champion；当前不再要求额外晋级边际。
-- `promotion_score` 现在以 `capture_score / timed_return_score = 0.60 / 0.40` 为主体；再额外减去 `trade_activity_penalty`。Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，空窗惩罚权重是 `{trade_idle_penalty_weight:.2f}`。`timed_return_score` 仍是按日收益年化补分，再减去分段回撤惩罚和轻量鲁棒性软惩罚。
+- `promotion_score` 现在以 `capture_score / adjusted_timed_return_score = 0.60 / 0.40` 为主体；`timed_return_score` 仍是按日收益年化补分，但会按 `capture_score` 平滑打折，避免低捕获策略只靠收益顶分；再减去分段回撤惩罚、轻量鲁棒性软惩罚和 `trade_activity_penalty`。Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，开仓数/空窗/趋势机会覆盖惩罚权重约 `{promotion_trade_activity_penalty_weight:.2f}/{trade_idle_penalty_weight:.2f}/{trade_participation_penalty_weight:.2f}`。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓不占这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - `capture_score` 只使用 clean trend segments：先用中度放开的趋势段候选，再过滤掉趋势效率或方向一致性不足的震荡段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
 - Fear & Greed 情绪数据已作为可选 `market_state` 输入暴露给策略，可读取 `sentiment`、`fear_greed_value`、`fear_greed_ema7`、`fear_greed_delta1/3/7`；它不进入评分或 gate，不是必须使用的信号。
@@ -535,7 +536,7 @@ def build_strategy_research_prompt(
 当前口径的 gate / 评分提醒：
 - val 趋势段命中率 >= {min_validation_hit_rate:.0%}
 - val 趋势捕获分 >= 0.05
-- 交易活跃度现在会单独惩罚低频与长空窗：希望区间约是 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`；最长无新开仓约束是 `{max_trade_idle_days:.1f}` 天；超过 15 笔/月不额外加分，不要为了刷交易数制造无收益短交易
+- 交易活跃度现在会单独惩罚低频、长空窗与趋势机会覆盖不足：希望区间约是 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`；最长无新开仓约束是 `{max_trade_idle_days:.1f}` 天；趋势段命中率低会轻扣，但不要为了刷交易数制造无收益短交易
 - train 与 val 分数落差 <= {max_dev_validation_gap:.2f}
 - val 多头捕获 >= 0.00，val 空头捕获 >= 0.00
 - val 会再切成 {validation_block_count} 个连续时间分块：最差分块 >= {min_validation_block_floor:.2f}，负分块最多 {max_validation_block_failures} 个

@@ -18,7 +18,7 @@
 | 研究器 | 运行中，正在按新 active reference 初始化 |
 | active reference | champion |
 | reference hash | `65980c622eb9821b7599560e8a54ea605752e2ef827c88e227673f6e711c7cee` |
-| score regime | `trend_capture_v20_clean_trend_segments` |
+| score regime | `trend_capture_v21_capture_adjusted_return` |
 | state 写回 | 已按新基底写回，stage/session 已重置 |
 | gate | 通过 |
 | quality_score | 0.0342 |
@@ -39,7 +39,7 @@
 
 说明：
 
-- v20 的目标是把 capture 数据源固定成更干净的单边趋势段，减少震荡段进入评分。
+- v21 沿用 v20 的 clean trend capture 数据源，并增加 capture-adjusted return：低 capture 策略不能再只靠高收益顶分。
 - 研究器不会在策略修改轮次里改这套切段规则；后续候选都按当前代码里的固定规则评估。
 - 当前 champion 是人工降温基底，`promotion_score` 明显低于上一版高 return champion；它用于降低收益项门槛，让研究器优先寻找 capture 的结构性提升。
 - 该基底不是好策略：`test` 仍明显失败，特别是 test capture 为负。`test` 是人工盲测观察，不进入 prompt、方向卡、评分或晋升；planner / reviewer 也不接收 demo 可用性判断。
@@ -59,7 +59,7 @@
 - `train` 滚动窗口：`28` 天，步长 `21` 天
 - `val` 分块：`4` 个连续时间块
 
-## v20 Capture 切段
+## v21 Capture 切段
 
 趋势候选段只从已有 4h 趋势路径里切，不新增回测。
 
@@ -113,6 +113,18 @@
 
 `timed_return_score = 0.50 * train_timed_return_score + 0.50 * val_timed_return_score`
 
+收益补充分会按 `capture_score` 平滑打折：
+
+`capture_return_multiplier = 0.50 + 0.50 * smoothstep(clamp((capture_score - 0.05) / 0.15, 0.0, 1.0))`
+
+`adjusted_timed_return_score = timed_return_score * capture_return_multiplier`
+
+含义：
+
+- `capture_score <= 0.05`：收益补充分只算 `50%`
+- `capture_score >= 0.20`：收益补充分正常全算
+- 中间平滑过渡，避免硬断崖
+
 Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数值，供人工筛选和复核使用。
 
 交易活跃度惩罚：
@@ -121,11 +133,19 @@ Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数
 
 `val_trade_activity_shortfall = clamp(max(120 - validation_entry_trades, 0) / 120, 0.0, 1.0)`
 
-`trade_count_penalty = 0.20 * (0.50 * train_trade_activity_shortfall + 0.50 * val_trade_activity_shortfall)`
+`trade_count_penalty = 0.15 * (0.50 * train_trade_activity_shortfall + 0.50 * val_trade_activity_shortfall)`
 
-`trade_idle_penalty = 0.15 * (0.50 * train_idle_shortfall + 0.50 * val_idle_shortfall)`
+`trade_idle_penalty = 0.10 * (0.50 * train_idle_shortfall + 0.50 * val_idle_shortfall)`
 
-`trade_activity_penalty = trade_count_penalty + trade_idle_penalty`
+趋势机会覆盖惩罚复用已有 clean trend 段命中率：
+
+`train_participation_shortfall = clamp((0.22 - train_segment_hit_rate) / 0.10, 0.0, 1.0)`
+
+`val_participation_shortfall = clamp((0.25 - validation_segment_hit_rate) / 0.10, 0.0, 1.0)`
+
+`trend_participation_penalty = 0.10 * (0.50 * train_participation_shortfall + 0.50 * val_participation_shortfall)`
+
+`trade_activity_penalty = min(0.35, trade_count_penalty + trade_idle_penalty + trend_participation_penalty)`
 
 交易数使用非加仓开仓数，不使用平仓数；加仓只改变已有 position 的规模，不计入活跃度，也不占用 `max_concurrent_positions`。
 
@@ -139,7 +159,7 @@ Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数
 
 晋级分：
 
-`promotion_score = 0.60 * capture_score + 0.40 * timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
+`promotion_score = 0.60 * capture_score + 0.40 * adjusted_timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
 
 候选必须先过 `gate`，并且 `promotion_score` 严格高于当前 active reference，才有资格刷新 champion。
 
@@ -206,7 +226,7 @@ Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数
 5. 可选 `exit_range_scan`：仅单个 `EXIT_PARAMS` 数值键，最多 3 点轻量预筛。
 6. 主进程跑完整 `train walk-forward + val`。
 7. gate 通过且 `promotion_score` 严格高于当前 active reference，才能刷新 champion。
-8. 新 champion 同步跑 `test`、图表、Discord 和 `champion_history` 归档，然后重置 stage/session。
+8. 新 champion 同步跑 `test`；图表优先复用刚完成评估里的 `validation` 与 `train+val` 结果，不重复回测；随后 Discord 和 `champion_history` 归档，然后重置 stage/session。
 9. 人工 `--reset-champion --no-optimize` 重建基底时，也会重算当前源码自己的 `test` 指标，避免沿用旧 champion 的观察值。
 
 评分阶段只使用已有 `train/val` 评估结果和轻量 `exit_range_scan` 预筛结果。

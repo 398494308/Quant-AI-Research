@@ -37,6 +37,7 @@ from research_v2.evaluation import (
     _annualized_return_score,
     _collect_daily_path,
     _collect_trend_path,
+    _capture_return_multiplier,
     _capture_ratio,
     _detect_major_trend_segments,
     _entry_side_counts,
@@ -47,6 +48,8 @@ from research_v2.evaluation import (
     _robustness_penalty_payload,
     _trade_activity_shortfall,
     _trade_idle_shortfall,
+    _trend_participation_penalty,
+    _trend_participation_shortfall,
     _trend_score_report,
     partial_eval_gate_snapshot,
     summarize_evaluation,
@@ -906,6 +909,10 @@ class EvaluationFixesTest(unittest.TestCase):
             0.50 * (expected_train_timed_return_score + expected_validation_timed_return_score),
         )
         self.assertAlmostEqual(
+            report.metrics["adjusted_timed_return_score"],
+            report.metrics["timed_return_score"] * report.metrics["capture_return_multiplier"],
+        )
+        self.assertAlmostEqual(
             report.metrics["promotion_gap"],
             report.metrics["train_capture_score"] - report.metrics["validation_capture_score"],
         )
@@ -915,7 +922,7 @@ class EvaluationFixesTest(unittest.TestCase):
         )
         expected_promotion_score = (
             0.60 * report.metrics["capture_score"]
-            + 0.40 * report.metrics["timed_return_score"]
+            + 0.40 * report.metrics["adjusted_timed_return_score"]
             - expected_drawdown_penalty
             - report.metrics["robustness_penalty_score"]
             - report.metrics["trade_activity_penalty"]
@@ -923,6 +930,7 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(report.metrics["drawdown_penalty_score"], expected_drawdown_penalty)
         self.assertAlmostEqual(report.metrics["promotion_score"], expected_promotion_score)
         self.assertIn("trade_activity_penalty", report.metrics)
+        self.assertLessEqual(report.metrics["trade_activity_penalty"], 0.35)
         self.assertGreaterEqual(report.metrics["drawdown_risk_score"], 0.0)
         self.assertEqual(report.metrics["validation_block_count_used"], 0.0)
         self.assertEqual(report.metrics["eval_unique_trend_points"], 15.0)
@@ -1223,7 +1231,7 @@ class EvaluationFixesTest(unittest.TestCase):
             report.metrics["promotion_score"],
             (
                 0.60 * report.metrics["capture_score"]
-                + 0.40 * report.metrics["timed_return_score"]
+                + 0.40 * report.metrics["adjusted_timed_return_score"]
                 - expected_drawdown_penalty
                 - report.metrics["robustness_penalty_score"]
                 - report.metrics["trade_activity_penalty"]
@@ -1235,6 +1243,33 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(_trade_activity_shortfall(270, 270), 0.0)
         self.assertAlmostEqual(_trade_activity_shortfall(180, 270), 90.0 / 270.0)
         self.assertAlmostEqual(_trade_activity_shortfall(0, 180), 1.0)
+
+    def test_capture_return_multiplier_smoothly_discounts_low_capture(self):
+        scoring = ScoringConfig()
+
+        self.assertAlmostEqual(_capture_return_multiplier(0.00, scoring), 0.50)
+        self.assertAlmostEqual(_capture_return_multiplier(0.05, scoring), 0.50)
+        self.assertAlmostEqual(_capture_return_multiplier(0.20, scoring), 1.00)
+        self.assertAlmostEqual(_capture_return_multiplier(0.50, scoring), 1.00)
+        middle = _capture_return_multiplier(0.125, scoring)
+        self.assertGreater(middle, 0.50)
+        self.assertLess(middle, 1.00)
+
+    def test_trend_participation_penalty_uses_existing_hit_rates_and_caps_component(self):
+        scoring = ScoringConfig()
+
+        self.assertAlmostEqual(
+            _trend_participation_shortfall(0.22, floor=0.12, target=0.22),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            _trend_participation_shortfall(0.25, floor=0.15, target=0.25),
+            0.0,
+        )
+        penalty, train_shortfall, validation_shortfall = _trend_participation_penalty(0.12, 0.15, scoring)
+        self.assertAlmostEqual(train_shortfall, 1.0)
+        self.assertAlmostEqual(validation_shortfall, 1.0)
+        self.assertAlmostEqual(penalty, 0.10)
 
     def test_entry_side_counts_prefers_filled_entries_and_ignores_pyramids(self):
         result = {
@@ -2523,7 +2558,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertNotIn("activity_adjusted_sharpe_score", prompt)
         self.assertIn("分段回撤惩罚", prompt)
         self.assertIn("鲁棒性软惩罚", prompt)
-        self.assertIn("单独惩罚低频与长空窗", prompt)
+        self.assertIn("低频、长空窗与趋势机会覆盖不足", prompt)
         self.assertIn("train 180-270 / val 120-180", prompt)
         self.assertIn("最长无新开仓", prompt)
         self.assertIn("负分块最多 3 个", prompt)
@@ -6390,6 +6425,42 @@ class RefactorHelperRegressionTest(unittest.TestCase):
             self.assertEqual(metadata["test_metrics"]["test_score"], 1.5)
             self.assertTrue((snapshot_dir / "validation.png").exists())
             self.assertTrue((snapshot_dir / "selection.png").exists())
+
+    def test_generate_new_champion_charts_reuses_evaluated_curves(self):
+        validation_window = type("Window", (), {"label": "val1", "start_date": "2025-01-01", "end_date": "2025-12-31"})()
+        test_window = type("Window", (), {"label": "test1", "start_date": "2026-01-01", "end_date": "2026-04-30"})()
+        validation_result = {"daily_equity_curve": [{"date": "2025-01-01", "equity": 1.0, "market_close": 1.0}]}
+        selection_result = {"daily_equity_curve": [{"date": "2023-07-01", "equity": 1.0, "market_close": 1.0}]}
+        test_result = {"daily_equity_curve": [{"date": "2026-01-01", "equity": 1.0, "market_close": 1.0}]}
+
+        def fake_render(*, output_path, **_kwargs):
+            output_path.write_bytes(b"png")
+            return output_path
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(research_script, "charts_available", return_value=True):
+                with mock.patch.object(research_script, "_chart_output_dir", return_value=Path(temp_dir)):
+                    with mock.patch.object(research_script, "_validation_window", return_value=validation_window):
+                        with mock.patch.object(research_script, "_test_window", return_value=test_window):
+                            with mock.patch.object(
+                                research_script,
+                                "_selection_period_bounds",
+                                return_value=("2023-07-01", "2025-12-31"),
+                            ):
+                                with mock.patch.object(research_script, "render_performance_chart", side_effect=fake_render):
+                                    with mock.patch.object(research_script.backtest_module, "backtest_macd_aggressive") as backtest_mock:
+                                        with mock.patch.object(research_script, "_run_selection_period_backtest") as selection_mock:
+                                            paths = research_script._generate_new_champion_charts(
+                                                7,
+                                                test_result=test_result,
+                                                validation_result=validation_result,
+                                                selection_result=selection_result,
+                                            )
+
+        self.assertIsNotNone(paths.validation_chart)
+        self.assertIsNotNone(paths.selection_chart)
+        backtest_mock.assert_not_called()
+        selection_mock.assert_not_called()
 
 
 class RejectedTestQueueTest(unittest.TestCase):

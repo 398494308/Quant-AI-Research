@@ -115,10 +115,19 @@ def _load_scoring_config(windows: "WindowConfig") -> "ScoringConfig":
                 "MACD_V2_PROMOTION_TRADE_ACTIVITY_PENALTY_WEIGHT",
                 "MACD_V2_PROMOTION_TRADE_ACTIVITY_WEIGHT",
             ),
-            0.20,
+            0.15,
         ),
-        trade_idle_penalty_weight=_env_float("MACD_V2_TRADE_IDLE_PENALTY_WEIGHT", 0.15),
+        trade_idle_penalty_weight=_env_float("MACD_V2_TRADE_IDLE_PENALTY_WEIGHT", 0.10),
         max_trade_idle_days=_env_float("MACD_V2_MAX_TRADE_IDLE_DAYS", 7.0),
+        trade_participation_penalty_weight=_env_float("MACD_V2_TRADE_PARTICIPATION_PENALTY_WEIGHT", 0.10),
+        trade_participation_train_floor=_env_float("MACD_V2_TRADE_PARTICIPATION_TRAIN_FLOOR", 0.12),
+        trade_participation_train_target=_env_float("MACD_V2_TRADE_PARTICIPATION_TRAIN_TARGET", 0.22),
+        trade_participation_validation_floor=_env_float("MACD_V2_TRADE_PARTICIPATION_VALIDATION_FLOOR", 0.15),
+        trade_participation_validation_target=_env_float("MACD_V2_TRADE_PARTICIPATION_VALIDATION_TARGET", 0.25),
+        trade_activity_penalty_cap=_env_float("MACD_V2_TRADE_ACTIVITY_PENALTY_CAP", 0.35),
+        capture_return_discount_floor=_env_float("MACD_V2_CAPTURE_RETURN_DISCOUNT_FLOOR", 0.05),
+        capture_return_full_score=_env_float("MACD_V2_CAPTURE_RETURN_FULL_SCORE", 0.20),
+        capture_return_min_multiplier=_env_float("MACD_V2_CAPTURE_RETURN_MIN_MULTIPLIER", 0.50),
         promotion_drawdown_base_weight=_env_float("MACD_V2_PROMOTION_DRAWDOWN_BASE_WEIGHT", 0.20),
         promotion_drawdown_knee=_env_float("MACD_V2_PROMOTION_DRAWDOWN_KNEE", 1.25),
         promotion_drawdown_excess_weight=_env_float("MACD_V2_PROMOTION_DRAWDOWN_EXCESS_WEIGHT", 1.00),
@@ -208,9 +217,18 @@ class GateConfig:
 class ScoringConfig:
     promotion_capture_weight: float = 0.60
     promotion_timed_return_weight: float = 0.40
-    promotion_trade_activity_penalty_weight: float = 0.20
-    trade_idle_penalty_weight: float = 0.15
+    promotion_trade_activity_penalty_weight: float = 0.15
+    trade_idle_penalty_weight: float = 0.10
     max_trade_idle_days: float = 7.0
+    trade_participation_penalty_weight: float = 0.10
+    trade_participation_train_floor: float = 0.12
+    trade_participation_train_target: float = 0.22
+    trade_participation_validation_floor: float = 0.15
+    trade_participation_validation_target: float = 0.25
+    trade_activity_penalty_cap: float = 0.35
+    capture_return_discount_floor: float = 0.05
+    capture_return_full_score: float = 0.20
+    capture_return_min_multiplier: float = 0.50
     promotion_drawdown_base_weight: float = 0.20
     promotion_drawdown_knee: float = 1.25
     promotion_drawdown_excess_weight: float = 1.00

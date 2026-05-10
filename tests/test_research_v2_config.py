@@ -24,9 +24,18 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
                         "MACD_V2_MIN_VALIDATION_CLOSED_TRADES=0",
                         "MACD_V2_PROMOTION_CAPTURE_WEIGHT=0.60",
                         "MACD_V2_PROMOTION_TIMED_RETURN_WEIGHT=0.40",
-                        "MACD_V2_PROMOTION_TRADE_ACTIVITY_PENALTY_WEIGHT=0.20",
-                        "MACD_V2_TRADE_IDLE_PENALTY_WEIGHT=0.15",
+                        "MACD_V2_PROMOTION_TRADE_ACTIVITY_PENALTY_WEIGHT=0.15",
+                        "MACD_V2_TRADE_IDLE_PENALTY_WEIGHT=0.10",
                         "MACD_V2_MAX_TRADE_IDLE_DAYS=7.0",
+                        "MACD_V2_TRADE_PARTICIPATION_PENALTY_WEIGHT=0.10",
+                        "MACD_V2_TRADE_PARTICIPATION_TRAIN_FLOOR=0.12",
+                        "MACD_V2_TRADE_PARTICIPATION_TRAIN_TARGET=0.22",
+                        "MACD_V2_TRADE_PARTICIPATION_VALIDATION_FLOOR=0.15",
+                        "MACD_V2_TRADE_PARTICIPATION_VALIDATION_TARGET=0.25",
+                        "MACD_V2_TRADE_ACTIVITY_PENALTY_CAP=0.35",
+                        "MACD_V2_CAPTURE_RETURN_DISCOUNT_FLOOR=0.05",
+                        "MACD_V2_CAPTURE_RETURN_FULL_SCORE=0.20",
+                        "MACD_V2_CAPTURE_RETURN_MIN_MULTIPLIER=0.50",
                         "MACD_V2_TRADE_ACTIVITY_TRAIN_RANGE_LOW=180",
                         "MACD_V2_TRADE_ACTIVITY_TRAIN_RANGE_HIGH=270",
                         "MACD_V2_TRADE_ACTIVITY_VALIDATION_RANGE_LOW=120",
@@ -65,9 +74,18 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
             self.assertEqual(runtime.gates.max_validation_block_failures, 3)
             self.assertAlmostEqual(runtime.scoring.promotion_capture_weight, 0.60)
             self.assertAlmostEqual(runtime.scoring.promotion_timed_return_weight, 0.40)
-            self.assertAlmostEqual(runtime.scoring.promotion_trade_activity_penalty_weight, 0.20)
-            self.assertAlmostEqual(runtime.scoring.trade_idle_penalty_weight, 0.15)
+            self.assertAlmostEqual(runtime.scoring.promotion_trade_activity_penalty_weight, 0.15)
+            self.assertAlmostEqual(runtime.scoring.trade_idle_penalty_weight, 0.10)
             self.assertAlmostEqual(runtime.scoring.max_trade_idle_days, 7.0)
+            self.assertAlmostEqual(runtime.scoring.trade_participation_penalty_weight, 0.10)
+            self.assertAlmostEqual(runtime.scoring.trade_participation_train_floor, 0.12)
+            self.assertAlmostEqual(runtime.scoring.trade_participation_train_target, 0.22)
+            self.assertAlmostEqual(runtime.scoring.trade_participation_validation_floor, 0.15)
+            self.assertAlmostEqual(runtime.scoring.trade_participation_validation_target, 0.25)
+            self.assertAlmostEqual(runtime.scoring.trade_activity_penalty_cap, 0.35)
+            self.assertAlmostEqual(runtime.scoring.capture_return_discount_floor, 0.05)
+            self.assertAlmostEqual(runtime.scoring.capture_return_full_score, 0.20)
+            self.assertAlmostEqual(runtime.scoring.capture_return_min_multiplier, 0.50)
             self.assertEqual(runtime.scoring.trade_activity_train_range_low, 180)
             self.assertEqual(runtime.scoring.trade_activity_train_range_high, 270)
             self.assertEqual(runtime.scoring.trade_activity_validation_range_low, 120)

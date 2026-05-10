@@ -142,7 +142,7 @@ DISCORD_CONFIG = load_discord_config()
 EVAL_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "eval")
 VALIDATION_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "validation")
 TEST_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "test")
-SCORE_REGIME = "trend_capture_v20_clean_trend_segments"
+SCORE_REGIME = "trend_capture_v21_capture_adjusted_return"
 MODEL_WORKSPACE_STRATEGY_PATH = Path("src/strategy_macd_aggressive.py")
 PRIMARY_DIRECTION_DOMAINS = frozenset({"long", "short", "mixed", "structure"})
 PLANNER_BRIEF_REQUIRED_FIELDS = ("primary_direction", "hypothesis", "change_plan", "novelty_proof", "change_tags")
@@ -1465,6 +1465,8 @@ def _generate_new_champion_charts(
     iteration_id: int,
     *,
     test_result: dict[str, Any] | None = None,
+    validation_result: dict[str, Any] | None = None,
+    selection_result: dict[str, Any] | None = None,
 ) -> PerformanceChartPaths:
     if not charts_available():
         log_info("跳过新 champion 图表：matplotlib 不可用")
@@ -1473,32 +1475,34 @@ def _generate_new_champion_charts(
     chart_dir = _chart_output_dir()
     validation_window = _validation_window()
     test_window = _test_window()
-    prepared_context = _prepare_backtest_context()
-
-    write_heartbeat(
-        "new_champion_charting",
-        message=f"iteration {iteration_id} charting validation",
-        phase="new_champion_charting",
-        current_window=validation_window.label,
-        window_index=1,
-        window_count=2,
-    )
-    validation_result = backtest_module.backtest_macd_aggressive(
-        strategy_func=strategy_module.strategy,
-        intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
-        hourly_file=backtest_module.DEFAULT_HOURLY_FILE,
-        start_date=validation_window.start_date,
-        end_date=validation_window.end_date,
-        strategy_params=strategy_module.PARAMS,
-        exit_params=active_exit_params(),
-        include_diagnostics=True,
-        prepared_context=prepared_context,
-    )
-    selection_result = _run_selection_period_backtest(
-        prepared_context,
-        include_diagnostics=True,
-        heartbeat_phase="new_champion_charting",
-    )
+    if validation_result is None or "daily_equity_curve" not in validation_result:
+        prepared_context = _prepare_backtest_context()
+        write_heartbeat(
+            "new_champion_charting",
+            message=f"iteration {iteration_id} charting validation",
+            phase="new_champion_charting",
+            current_window=validation_window.label,
+            window_index=1,
+            window_count=2,
+        )
+        validation_result = backtest_module.backtest_macd_aggressive(
+            strategy_func=strategy_module.strategy,
+            intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
+            hourly_file=backtest_module.DEFAULT_HOURLY_FILE,
+            start_date=validation_window.start_date,
+            end_date=validation_window.end_date,
+            strategy_params=strategy_module.PARAMS,
+            exit_params=active_exit_params(),
+            include_diagnostics=True,
+            prepared_context=prepared_context,
+        )
+    if selection_result is None or "daily_equity_curve" not in selection_result:
+        prepared_context = _prepare_backtest_context()
+        selection_result = _run_selection_period_backtest(
+            prepared_context,
+            include_diagnostics=True,
+            heartbeat_phase="new_champion_charting",
+        )
 
     validation_chart = chart_dir / (
         f"new_champion_{iteration_id:04d}_validation_{validation_window.start_date}_{validation_window.end_date}.png"
@@ -1536,23 +1540,36 @@ def _generate_new_champion_charts(
 
 
 def evaluate_current_strategy(allow_early_reject: bool = False) -> EvaluationReport:
+    started_at = time.perf_counter()
     prepared_context = _prepare_backtest_context()
+    base_started_at = time.perf_counter()
     base_results = _run_base_backtests(
         allow_early_reject=allow_early_reject,
         prepared_context=prepared_context,
     )
+    base_elapsed = time.perf_counter() - base_started_at
     validation_continuous_result = next(
         (item["result"] for item in base_results if item["window"].group == "validation"),
         None,
     )
+    selection_started_at = time.perf_counter()
     selection_period_result = _run_selection_period_backtest(prepared_context)
-    return summarize_evaluation(
+    selection_elapsed = time.perf_counter() - selection_started_at
+    summarize_started_at = time.perf_counter()
+    report = summarize_evaluation(
         base_results,
         RUNTIME.gates,
         selection_period_result=selection_period_result,
         validation_continuous_result=validation_continuous_result,
         scoring=RUNTIME.scoring,
     )
+    summarize_elapsed = time.perf_counter() - summarize_started_at
+    log_info(
+        "评估耗时: "
+        f"base={base_elapsed:.1f}s selection={selection_elapsed:.1f}s "
+        f"summary={summarize_elapsed:.1f}s total={time.perf_counter() - started_at:.1f}s"
+    )
+    return report
 
 
 def evaluate_test_metrics() -> dict[str, float]:
@@ -3245,6 +3262,7 @@ def _build_model_round_brief(
         trade_activity_validation_range_high=RUNTIME.scoring.trade_activity_validation_range_high,
         promotion_trade_activity_penalty_weight=RUNTIME.scoring.promotion_trade_activity_penalty_weight,
         trade_idle_penalty_weight=RUNTIME.scoring.trade_idle_penalty_weight,
+        trade_participation_penalty_weight=RUNTIME.scoring.trade_participation_penalty_weight,
         max_trade_idle_days=RUNTIME.scoring.max_trade_idle_days,
     )
     round_brief = _request_validated_round_brief(
@@ -4898,9 +4916,12 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         chart_paths = PerformanceChartPaths(validation_chart=None, selection_chart=None)
         champion_snapshot_dir: Path | None = None
         try:
+            report_artifacts = candidate_report.artifacts or {}
             chart_paths = _generate_new_champion_charts(
                 iteration_id,
                 test_result=test_result,
+                validation_result=report_artifacts.get("validation_result"),
+                selection_result=report_artifacts.get("selection_period_result"),
             )
             if chart_paths.selection_chart is not None:
                 log_info(f"train+val图已保存: {chart_paths.selection_chart}")

@@ -561,6 +561,47 @@ def _trade_idle_shortfall(max_idle_days: float, allowed_idle_days: float) -> flo
     return _clamp(max(float(max_idle_days) - limit, 0.0) / limit, 0.0, 1.0)
 
 
+def _smoothstep(value: float) -> float:
+    x = _clamp(float(value), 0.0, 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
+
+def _capture_return_multiplier(capture_score: float, scoring: ScoringConfig) -> float:
+    floor = float(scoring.capture_return_discount_floor)
+    full = max(floor + 1e-9, float(scoring.capture_return_full_score))
+    min_multiplier = _clamp(float(scoring.capture_return_min_multiplier), 0.0, 1.0)
+    progress = (float(capture_score) - floor) / (full - floor)
+    return min_multiplier + (1.0 - min_multiplier) * _smoothstep(progress)
+
+
+def _trend_participation_shortfall(hit_rate: float, *, floor: float, target: float) -> float:
+    low = min(_clamp(float(floor), 0.0, 1.0), 1.0 - 1e-9)
+    high = _clamp(float(target), low + 1e-9, 1.0)
+    return _clamp((high - float(hit_rate)) / (high - low), 0.0, 1.0)
+
+
+def _trend_participation_penalty(
+    train_hit_rate: float,
+    validation_hit_rate: float,
+    scoring: ScoringConfig,
+) -> tuple[float, float, float]:
+    train_shortfall = _trend_participation_shortfall(
+        train_hit_rate,
+        floor=scoring.trade_participation_train_floor,
+        target=scoring.trade_participation_train_target,
+    )
+    validation_shortfall = _trend_participation_shortfall(
+        validation_hit_rate,
+        floor=scoring.trade_participation_validation_floor,
+        target=scoring.trade_participation_validation_target,
+    )
+    penalty = max(0.0, float(scoring.trade_participation_penalty_weight)) * (
+        TRAIN_VAL_SCORE_WEIGHT * train_shortfall
+        + TRAIN_VAL_SCORE_WEIGHT * validation_shortfall
+    )
+    return penalty, train_shortfall, validation_shortfall
+
+
 # ==================== 趋势切段评分 ====================
 
 

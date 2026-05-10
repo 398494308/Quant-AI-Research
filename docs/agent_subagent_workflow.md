@@ -55,17 +55,17 @@ flowchart TB
 - 标的：`BTC-USDT-SWAP`，策略按 `20x` 合约研究。
 - 事实层：`15m`；`1h / 4h` 由 `15m` 聚合，只做确认层。
 - 执行层：优先使用 `1m` 回测成交。
-- 评分口径：`trend_capture_v20_clean_trend_segments`。
+- 评分口径：`trend_capture_v21_capture_adjusted_return`。
 - `train`：`2023-07-01` 到 `2024-12-31`。
 - `val`：`2025-01-01` 到 `2025-12-31`。
 - `test`：`2026-01-01` 到 `2026-04-30`。
 - 晋升条件：候选先过 `gate`；已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference。当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则。
-- `promotion_score = 0.60 * capture_score + 0.40 * timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`。
+- `promotion_score = 0.60 * capture_score + 0.40 * adjusted_timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`；`adjusted_timed_return_score` 会按 `capture_score` 平滑打折，低捕获策略不能只靠收益顶分。
 - 主评分使用连续 `train / val` 数据源；`train` 从已有 `train+val` 连续回测按 `val` 起点切出，walk-forward 继续用于诊断、鲁棒性和早停。
 - `capture_score` 使用固定的 clean trend segments：先用中度放开的阈值找候选趋势段，再用趋势效率和方向一致性过滤震荡段；最终仍按“段等权均分 50% + 原权重均分 50%”混合，减少少数最大趋势段的主导；bull 和 bear 都只奖励账户正收益。
 - Fear & Greed 情绪数据只作为策略可选输入暴露在 `market_state`，不进入评分、gate 或强制优化目标。
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标。
-- `trade_activity_penalty` 是低频与长空窗惩罚：交易频率按非加仓开仓数计算，加仓不计入；希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天；当前只在主评分里减分，不再做硬 gate。
+- `trade_activity_penalty` 是低频、长空窗与趋势机会覆盖不足惩罚：交易频率按非加仓开仓数计算，加仓不计入；希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天，clean trend 命中率不足会轻扣；当前只在主评分里减分，不再做硬 gate，且总上限为 `0.35`。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - 交易数、`filled_entries` 和漏斗通过量只保留观察价值，不再作为下一轮方向的默认软触发。
 - 鲁棒性软惩罚不额外回测；它复用已有 `train` 滚动分数、`val` 分块分数和 `train/val` 固定窗口 Ulcer，检查 `val` 是否明显跑出 `train` 的宽分布包络，以及两侧波动或回撤结构是否严重不一致。
@@ -86,7 +86,7 @@ flowchart TB
 11. 主进程执行 gate 与 promotion 判断。
 12. `summary_worker` 按最终真实 diff 回写候选摘要。
 13. 没有刷新 champion：写回 `journal / wiki / reviewer_summary_card / direction_board`；若该轮已完成 full eval，则后台异步补跑 `test` 关键指标留档，然后进入下一轮。
-14. 刷新 champion：更新策略快照，同步跑 `test`，生成图表和 Discord 播报，归档 `champion_history`，然后重置 stage 与 planner session。
+14. 刷新 champion：更新策略快照，同步跑 `test`；图表优先复用本轮已评估的 `validation` 与 `train+val` 曲线，避免重复回测；随后 Discord 播报，归档 `champion_history`，然后重置 stage 与 planner session。
 
 ## 各角色职责
 

@@ -45,11 +45,14 @@ def _validation_start_timestamp(validation_source: dict[str, Any]) -> int | None
 def _selection_train_trend_points(
     selection_source: dict[str, Any],
     validation_source: dict[str, Any],
+    *,
+    selection_points: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     validation_start = _validation_start_timestamp(validation_source)
     if validation_start is None:
         return []
-    selection_points = mod._normalize_trend_points(mod._result_trend_capture_points(selection_source))
+    if selection_points is None:
+        selection_points = mod._normalize_trend_points(mod._result_trend_capture_points(selection_source))
     return [
         point
         for point in selection_points
@@ -119,7 +122,12 @@ def summarize_evaluation_impl(
     validation_daily_path = mod._collect_daily_path(results, "validation")
     eval_path = mod._collect_trend_path(results, "eval")
     validation_path = mod._collect_trend_path(results, "validation")
-    selection_train_points = _selection_train_trend_points(selection_source, validation_source)
+    selection_points = mod._normalize_trend_points(mod._result_trend_capture_points(selection_source))
+    selection_train_points = _selection_train_trend_points(
+        selection_source,
+        validation_source,
+        selection_points=selection_points,
+    )
     train_capture_source = "selection切分连续train" if selection_train_points else "rolling拼接回退"
     train_score_points = selection_train_points or eval_path.points
     selection_train_daily_returns = _selection_train_daily_returns(selection_source, validation_source)
@@ -152,7 +160,7 @@ def summarize_evaluation_impl(
         if validation_path.points
         else mod._trend_report_from_result(validation_source)
     )
-    selection_trend_report = mod._trend_report_from_result(selection_source)
+    selection_trend_report = mod._trend_score_report(selection_points)
 
     train_capture_equal_score = _equal_segment_score(train_continuous_trend_report)
     validation_capture_equal_score = _equal_segment_score(validation_trend_report)
@@ -170,6 +178,8 @@ def summarize_evaluation_impl(
         mod.TRAIN_VAL_SCORE_WEIGHT * train_timed_return_score
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_timed_return_score
     )
+    capture_return_multiplier = mod._capture_return_multiplier(capture_score, scoring)
+    adjusted_timed_return_score = timed_return_score * capture_return_multiplier
     train_drawdown_risk_report = mod._drawdown_risk_side_report(train_daily_returns, scoring)
     validation_drawdown_risk_report = mod._drawdown_risk_side_report(validation_daily_path.returns, scoring)
     train_drawdown_risk_score = train_drawdown_risk_report.risk_score
@@ -259,16 +269,24 @@ def summarize_evaluation_impl(
         mod.TRAIN_VAL_SCORE_WEIGHT * train_trade_idle_shortfall
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_trade_idle_shortfall
     )
+    trend_participation_penalty, train_trend_participation_shortfall, validation_trend_participation_shortfall = (
+        mod._trend_participation_penalty(
+            train_continuous_trend_report.hit_rate,
+            validation_trend_report.hit_rate,
+            scoring,
+        )
+    )
     trade_count_penalty = scoring.promotion_trade_activity_penalty_weight * trade_activity_shortfall
     trade_idle_penalty = scoring.trade_idle_penalty_weight * trade_idle_shortfall
-    trade_activity_penalty = trade_count_penalty + trade_idle_penalty
+    trade_activity_penalty_raw = trade_count_penalty + trade_idle_penalty + trend_participation_penalty
+    trade_activity_penalty = min(max(0.0, float(scoring.trade_activity_penalty_cap)), trade_activity_penalty_raw)
     train_months = mod._period_months_from_timestamps(selection_start_ts, validation_start_ts)
     validation_months = mod._period_months_from_timestamps(validation_start_ts, validation_end_ts)
     train_monthly_entries = mod._monthly_trade_rate(train_entry_trades, train_months)
     validation_monthly_entries = mod._monthly_trade_rate(validation_entry_trades, validation_months)
     promotion_score = (
         scoring.promotion_capture_weight * capture_score
-        + scoring.promotion_timed_return_weight * timed_return_score
+        + scoring.promotion_timed_return_weight * adjusted_timed_return_score
         - drawdown_penalty_score
         - robustness_penalty_score
         - trade_activity_penalty
@@ -353,9 +371,10 @@ def summarize_evaluation_impl(
         ),
         f"主评分数据源(train capture / train return): {train_capture_source} / {train_daily_return_source}",
         (
-            "train/val按日收益年化分 / 收益补充分 / 固定窗口回撤风险分 / 回撤罚分 / 晋级分: "
+            "train/val按日收益年化分 / 收益补充分(原始/调整后/倍率) / 固定窗口回撤风险分 / 回撤罚分 / 晋级分: "
             f"{train_timed_return_score:.2f} / {validation_timed_return_score:.2f} / "
-            f"{timed_return_score:.2f} / {drawdown_risk_score:.2f} / {drawdown_penalty_score:.2f} / {promotion_score:.2f}"
+            f"{timed_return_score:.2f}/{adjusted_timed_return_score:.2f}/{capture_return_multiplier:.2f} / "
+            f"{drawdown_risk_score:.2f} / {drawdown_penalty_score:.2f} / {promotion_score:.2f}"
         ),
         (
             "交易活跃度区间(train/val) / 非加仓开仓 / 短缺率 / 惩罚: "
@@ -371,6 +390,11 @@ def summarize_evaluation_impl(
             f"{scoring.max_trade_idle_days:.1f} | "
             f"{train_trade_idle_shortfall:.2f} / {validation_trade_idle_shortfall:.2f} / "
             f"{trade_idle_penalty:.2f}"
+        ),
+        (
+            "趋势机会覆盖短缺率(train/val) / 覆盖惩罚 / 活跃度总惩罚(raw/cap后): "
+            f"{train_trend_participation_shortfall:.2f} / {validation_trend_participation_shortfall:.2f} / "
+            f"{trend_participation_penalty:.2f} / {trade_activity_penalty_raw:.2f}/{trade_activity_penalty:.2f}"
         ),
         f"train/val月非加仓开仓频率: {train_monthly_entries:.2f} / {validation_monthly_entries:.2f}",
         (
@@ -520,10 +544,12 @@ def summarize_evaluation_impl(
             f"{validation_trend_report.bear_segment_count}/"
             f"{_hit_segment_count(validation_trend_report)}，"
             f"train/val 按日收益年化分={train_timed_return_score:.2f}/{validation_timed_return_score:.2f}，"
+            f"收益补充分(原始/调整后/倍率)={timed_return_score:.2f}/{adjusted_timed_return_score:.2f}/{capture_return_multiplier:.2f}，"
             f"train/val 非加仓开仓={train_entry_trades}/{validation_entry_trades}，"
             f"短缺率={train_trade_activity_shortfall:.2f}/{validation_trade_activity_shortfall:.2f}，"
             f"月频={train_monthly_entries:.2f}/{validation_monthly_entries:.2f}，"
             f"最长无新开仓={train_max_trade_idle_days:.1f}/{validation_max_trade_idle_days:.1f}天，"
+            f"趋势机会覆盖短缺={train_trend_participation_shortfall:.2f}/{validation_trend_participation_shortfall:.2f}，"
             f"频率惩罚={trade_activity_penalty:.2f}，"
             f"train/val 固定窗口回撤风险分={train_drawdown_risk_score:.2f}/{validation_drawdown_risk_score:.2f}，"
             f"回撤罚分={drawdown_penalty_score:.2f}，鲁棒性软惩罚={robustness_penalty_score:.2f}"
@@ -605,6 +631,8 @@ def summarize_evaluation_impl(
         "train_timed_return_score": train_timed_return_score,
         "validation_timed_return_score": validation_timed_return_score,
         "timed_return_score": timed_return_score,
+        "capture_return_multiplier": capture_return_multiplier,
+        "adjusted_timed_return_score": adjusted_timed_return_score,
         "train_drawdown_risk_score": train_drawdown_risk_score,
         "validation_drawdown_risk_score": validation_drawdown_risk_score,
         "drawdown_risk_score": drawdown_risk_score,
@@ -689,6 +717,10 @@ def summarize_evaluation_impl(
         "trade_idle_shortfall": trade_idle_shortfall,
         "trade_count_penalty": trade_count_penalty,
         "trade_idle_penalty": trade_idle_penalty,
+        "train_trend_participation_shortfall": train_trend_participation_shortfall,
+        "validation_trend_participation_shortfall": validation_trend_participation_shortfall,
+        "trend_participation_penalty": trend_participation_penalty,
+        "trade_activity_penalty_raw": trade_activity_penalty_raw,
         "trade_activity_penalty": trade_activity_penalty,
         "selection_long_closed_trades": float(selection_long_trades),
         "selection_short_closed_trades": float(selection_short_trades),
@@ -754,5 +786,8 @@ def summarize_evaluation_impl(
         gate_reason=gate_reason,
         summary_text="\n".join(summary_lines),
         prompt_summary_text="\n".join(prompt_lines),
-        artifacts={},
+        artifacts={
+            "validation_result": validation_source,
+            "selection_period_result": selection_source,
+        },
     )
