@@ -42,8 +42,8 @@
 - v20 的目标是把 capture 数据源固定成更干净的单边趋势段，减少震荡段进入评分。
 - 研究器不会在策略修改轮次里改这套切段规则；后续候选都按当前代码里的固定规则评估。
 - 当前 champion 是人工降温基底，`promotion_score` 明显低于上一版高 return champion；它用于降低收益项门槛，让研究器优先寻找 capture 的结构性提升。
-- 该基底不是好策略：`test` 仍明显失败，特别是 test capture 为负。`test` 仍只做人工观察，不进入 prompt、评分或晋升。
-- Funding 覆盖仍为 `0%`，这是数据源缺口；最终实盘前用长时间 demo run 兜底观察，不把它硬塞进当前研究评分。
+- 该基底不是好策略：`test` 仍明显失败，特别是 test capture 为负。`test` 是人工盲测观察，不进入 prompt、方向卡、评分或晋升；planner / reviewer 也不接收 demo 可用性判断。
+- Funding 覆盖仍为 `0%`，这是数据源缺口；后续是否进入 demo run 由人工单独决定，不作为研究器优化目标。
 - Fear & Greed 情绪数据现在作为可选 `market_state` 输入暴露给策略；它不进入评分、gate 或强制优化目标。
 
 ## 数据与窗口
@@ -105,7 +105,7 @@
 
 主评分使用连续 `train / val` 数据源：`train` 从已有 `train+val` 连续回测按 `val` 起点切出，`val` 使用连续 validation 结果。`train` walk-forward 仍保留用于窗口诊断、鲁棒性和早停。
 
-`test_trend_capture_score` 只做观察，但也使用同一混合口径：
+人工盲测观察也使用同一混合口径，但该结果不回喂模型：
 
 `test_trend_capture_score = 0.50 * test_equal_capture_score + 0.50 * test_weighted_capture_score`
 

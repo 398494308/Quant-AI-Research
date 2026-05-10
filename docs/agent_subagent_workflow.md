@@ -47,7 +47,7 @@ flowchart TB
 - `planner` 负责想方向，不直接写代码；`reviewer` 负责拦坏方向，不替 planner 发明方向。
 - `edit_worker` 只把 reviewer 放行后的方向落到 `src/strategy_macd_aggressive.py`。
 - 主进程负责判卷，不负责想策略。
-- `test` 对新 champion 同步运行；对已完成完整评估但未保留的候选会后台异步补跑，只做只读留档，不参与晋升，也不进入普通调参循环。
+- `test` 对新 champion 同步运行；对已完成完整评估但未保留的候选会后台异步补跑，只做人工只读留档，不参与晋升，不进入普通调参循环，也不注入 planner / reviewer prompt。
 - 人工卡都是软引导，不是硬 gate；当前 champion 人工观察卡必须 hash 命中才会给 planner 看。
 
 ## 当前数据与评分口径
@@ -62,14 +62,14 @@ flowchart TB
 - 晋升条件：候选先过 `gate`；已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference。当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则。
 - `promotion_score = 0.60 * capture_score + 0.40 * timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`。
 - 主评分使用连续 `train / val` 数据源；`train` 从已有 `train+val` 连续回测按 `val` 起点切出，walk-forward 继续用于诊断、鲁棒性和早停。
-- `capture_score` 使用固定的 clean trend segments：先用中度放开的阈值找候选趋势段，再用趋势效率和方向一致性过滤震荡段；最终仍按“段等权均分 50% + 原权重均分 50%”混合，减少少数最大趋势段的主导；`test_trend_capture_score` 也使用同一混合口径；bull 和 bear 都只奖励账户正收益。
+- `capture_score` 使用固定的 clean trend segments：先用中度放开的阈值找候选趋势段，再用趋势效率和方向一致性过滤震荡段；最终仍按“段等权均分 50% + 原权重均分 50%”混合，减少少数最大趋势段的主导；bull 和 bear 都只奖励账户正收益。
 - Fear & Greed 情绪数据只作为策略可选输入暴露在 `market_state`，不进入评分、gate 或强制优化目标。
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标。
 - `trade_activity_penalty` 是低频与长空窗惩罚：交易频率按非加仓开仓数计算，加仓不计入；希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天；当前只在主评分里减分，不再做硬 gate。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - 交易数、`filled_entries` 和漏斗通过量只保留观察价值，不再作为下一轮方向的默认软触发。
 - 鲁棒性软惩罚不额外回测；它复用已有 `train` 滚动分数、`val` 分块分数和 `train/val` 固定窗口 Ulcer，检查 `val` 是否明显跑出 `train` 的宽分布包络，以及两侧波动或回撤结构是否严重不一致。
-- `test` 只做只读观察；reject / duplicate_skipped 的异步 `test` 只进留档，不进 prompt、不进晋升。
+- `test` 只做人工只读观察；reject / duplicate_skipped 的异步 `test` 只进留档，不进 prompt、不进晋升；demo 是否可用也只由人工判断，不写进模型方向卡。
 
 ## 每一轮怎么跑
 

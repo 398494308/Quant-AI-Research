@@ -2588,6 +2588,39 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("退出过晚", prompt)
         self.assertIn("绑定 champion hash", prompt)
 
+    def test_build_strategy_runtime_prompt_filters_human_only_holdout_text(self):
+        prompt = build_strategy_research_prompt(
+            evaluation_summary="诊断",
+            journal_summary="记忆",
+            previous_best_score=1.23,
+            operator_focus_text=(
+                "- 优先检查多头外层 choke point\n"
+                "- `test` 不回喂模型，只做人工观察\n"
+                "- demo 是否可用由人工决定，不要写进优化目标"
+            ),
+            champion_review_text=(
+                "champion_code_hash: " + "a" * 64 + "\n"
+                "- 退出过晚，利润回吐偏大\n"
+                "- test期间回撤太大，不适合上线"
+            ),
+            champion_review_code_hash="a" * 64,
+            reviewer_summary_text=(
+                "# Reviewer Summary Card\n"
+                "- verdict: REVISE\n"
+                "- must_change: 换机制层\n"
+                "- reviewer_summary: 这版 demo readiness 仍不足"
+            ),
+        )
+
+        self.assertIn("优先检查多头外层 choke point", prompt)
+        self.assertIn("退出过晚", prompt)
+        self.assertIn("换机制层", prompt)
+        self.assertNotIn("`test`", prompt)
+        self.assertNotIn("test期间", prompt)
+        self.assertNotIn("demo", prompt.lower())
+        self.assertNotIn("readiness", prompt.lower())
+        self.assertNotIn("上线", prompt)
+
     def test_load_champion_review_text_requires_matching_hash(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)

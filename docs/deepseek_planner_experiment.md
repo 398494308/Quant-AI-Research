@@ -75,6 +75,7 @@ DeepSeek 没有直接复用 Codex 的 session 机制。
 - 压缩 planner / reviewer / repair 的重复规则文本
 - 把人工卡、reviewer 卡和 front memory 改成更短的摘要块
 - 保留原有“先复盘失败证据，再决定继续还是转向”的工作方式
+- planner 可见摘要会过滤人工盲测、demo readiness 和上线判断类文本，避免把人工验收信息变成优化目标。
 
 ### 6. telemetry 现在区分原始 prompt 和真实发送上下文
 
