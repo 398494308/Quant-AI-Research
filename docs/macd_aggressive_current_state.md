@@ -4,7 +4,7 @@
 
 ## 当前快照
 
-`2026-05-10 11:58:06`（Asia/Shanghai）已把 `test` capture 展示口径同步为“段等权 50% + 原加权 50%”，并手工把 active reference 换成 `v2.39.long_veto_hist_ease`。这次换基底的目的，是降低过高 `timed_return_score` 对搜索的锁定，让后续候选更容易围绕 `capture_score` 做真实突破。
+`2026-05-10 13:20:27`（Asia/Shanghai）已把 active reference 手工降温为 `manual.cooldown_maxpos2_trigger8`。这次换基底把 `max_concurrent_positions` 从 `4` 降到 `2`，把 `position_fraction` 从 `0.17` 降到 `0.14`，并把 `pyramid_trigger_pnl` 从 `3.588` 提高到 `8.0`；目的不是得到好策略，而是把过高收益基底降到更容易突破的水平，让后续候选优先围绕 `capture_score` 做真实改进。
 
 当前策略源码位置：
 
@@ -15,33 +15,34 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 研究器 | 运行中，正在加载并重算 active reference |
+| 研究器 | 运行中，正在按新 active reference 初始化 |
 | active reference | champion |
-| reference hash | `9a3ce24ec22742a1ed27cd93f8710cc27f6e71f9e03f636a931cb18ab5b99c89` |
+| reference hash | `65980c622eb9821b7599560e8a54ea605752e2ef827c88e227673f6e711c7cee` |
 | score regime | `trend_capture_v20_clean_trend_segments` |
 | state 写回 | 已按新基底写回，stage/session 已重置 |
 | gate | 通过 |
-| quality_score | 0.0288 |
-| promotion_score | 0.5342 |
-| capture_score / timed_return_score | 0.1237 / 2.1243 |
-| drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 1.1990 / 0.2398 / 0.0000 |
-| train/val clean 抓取分 | 0.0288 / 0.2187 |
+| quality_score | 0.0342 |
+| promotion_score | 0.1936 |
+| capture_score / timed_return_score | 0.0978 / 1.2267 |
+| drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 1.0288 / 0.2058 / 0.0000 |
+| train/val clean 抓取分 | 0.0342 / 0.1615 |
 | train clean 趋势段 | 67 段，多 36 / 空 31 |
 | val clean 趋势段 | 50 段，多 28 / 空 22 |
-| val 多/空捕获 | 0.3433 / 0.1264 |
-| train+val 期间收益 | 1349.29% |
-| val 期间收益 | 372.44% |
-| train/val 非加仓开仓 | 349 / 262 |
-| train/val 月非加仓开仓 | 约 19.4 / 21.9 |
-| Sharpe(val / train+val) | 1.93 / 1.65 |
-| test capture / return / 平仓 | 0.0307 / 17.14% / 9 |
+| val 多/空捕获 | 0.3349 / 0.0116 |
+| train+val 期间收益 | 857.19% |
+| val 期间收益 | 54.36% |
+| train/val 非加仓开仓 | 193 / 152 |
+| train/val 月非加仓开仓 | 约 10.7 / 12.7 |
+| Sharpe(val / train+val) | 0.98 / 1.95 |
+| test capture / return / 平仓 | -0.0995 / -35.69% / 26 |
 | val 12 月覆盖 | 已覆盖到 2025-12-22 |
 
 说明：
 
 - v20 的目标是把 capture 数据源固定成更干净的单边趋势段，减少震荡段进入评分。
 - 研究器不会在策略修改轮次里改这套切段规则；后续候选都按当前代码里的固定规则评估。
-- 当前 champion 的 `promotion_score` 明显低于上一版高 return champion，但 `capture_score` 保持在同一档；这个基底用于降低收益项门槛，让研究器优先寻找 capture 的结构性提升。
+- 当前 champion 是人工降温基底，`promotion_score` 明显低于上一版高 return champion；它用于降低收益项门槛，让研究器优先寻找 capture 的结构性提升。
+- 该基底不是好策略：`test` 仍明显失败，特别是 test capture 为负。`test` 仍只做人工观察，不进入 prompt、评分或晋升。
 - Funding 覆盖仍为 `0%`，这是数据源缺口；最终实盘前用长时间 demo run 兜底观察，不把它硬塞进当前研究评分。
 - Fear & Greed 情绪数据现在作为可选 `market_state` 输入暴露给策略；它不进入评分、gate 或强制优化目标。
 
@@ -188,7 +189,7 @@ Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数
 
 ## 多空并行与仓位
 
-- `max_concurrent_positions = 4`，统计独立 position。
+- 当前基底 `max_concurrent_positions = 2`，统计独立 position；研究器仍可在允许范围内探索这个参数。
 - 加仓不新增独立 position，只改变已有 position 的规模。
 - 多空可以在总仓位上限内并行存在。
 - 现有空仓不会阻止新的多头信号；现有多仓也不会阻止新的空头信号。
@@ -206,6 +207,7 @@ Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数
 6. 主进程跑完整 `train walk-forward + val`。
 7. gate 通过且 `promotion_score` 严格高于当前 active reference，才能刷新 champion。
 8. 新 champion 同步跑 `test`、图表、Discord 和 `champion_history` 归档，然后重置 stage/session。
+9. 人工 `--reset-champion --no-optimize` 重建基底时，也会重算当前源码自己的 `test` 指标，避免沿用旧 champion 的观察值。
 
 评分阶段只使用已有 `train/val` 评估结果和轻量 `exit_range_scan` 预筛结果。
 
