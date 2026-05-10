@@ -41,6 +41,7 @@ from research_v2.evaluation import (
     _detect_major_trend_segments,
     _entry_side_counts,
     _max_trade_idle_days_from_timestamps,
+    _normalize_trend_points,
     _period_months_from_timestamps,
     _trend_clean_quality,
     _robustness_penalty_payload,
@@ -49,6 +50,7 @@ from research_v2.evaluation import (
     _trend_score_report,
     partial_eval_gate_snapshot,
     summarize_evaluation,
+    summarize_test_result,
 )
 from research_v2.journal import (
     ORDINARY_REGION_FAMILIES,
@@ -481,6 +483,121 @@ class BacktestFixesTest(unittest.TestCase):
         self.assertEqual(result["trade_reason_stats"].get("反向信号", 0), 0)
         self.assertEqual(result["trades"], 2)
 
+    def test_backtest_exposes_sentiment_market_state(self):
+        interval_ms = 15 * 60 * 1000
+        bars = [
+            {
+                "timestamp": idx * interval_ms,
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 1000.0,
+            }
+            for idx in range(2)
+        ]
+        intraday_state = [
+            {
+                "trade_count": 100.0,
+                "trade_count_ratio": 1.0,
+                "taker_buy_volume": 500.0,
+                "taker_sell_volume": 500.0,
+                "taker_buy_ratio": 0.5,
+                "taker_sell_ratio": 0.5,
+                "flow_imbalance": 0.0,
+                "ema_fast": 100.0,
+                "ema_slow": 99.0,
+                "adx": 30.0,
+                "atr": 10.0,
+                "atr_ratio": 0.01,
+                "rsi": 50.0,
+                "chop": 40.0,
+                "macd_line": 1.0,
+                "signal_line": 0.0,
+                "histogram": 1.0,
+            }
+            for _ in bars
+        ]
+        higher_state = [
+            {
+                "close": 100.0,
+                "ema_fast": 100.0,
+                "ema_slow": 99.0,
+                "macd_line": 1.0,
+                "signal_line": 0.0,
+                "adx": 30.0,
+                "chop": 40.0,
+                "trend_spread_pct": 0.01,
+                "ema_slow_slope_pct": 0.01,
+            }
+            for _ in bars
+        ]
+        sentiment_state = [
+            {"timestamp": 0, "value": 20.0, "classification": "Extreme Fear", "ema7": 20.0, "delta3": 0.0, "delta7": 0.0},
+            {"timestamp": interval_ms, "value": 35.0, "classification": "Fear", "ema7": 25.0, "delta3": 15.0, "delta7": 15.0},
+        ]
+        prepared_context = {
+            "intraday_all": bars,
+            "hourly_all": bars,
+            "intraday_timestamps": [bar["timestamp"] for bar in bars],
+            "intraday_interval_ms": interval_ms,
+            "execution_interval_ms": 60_000,
+            "execution_all": [],
+            "execution_timestamps": [],
+            "funding_all": [],
+            "funding_timestamps": [],
+            "hourly_state": higher_state,
+            "four_hour_state": higher_state,
+            "intraday_state": intraday_state,
+            "hourly_close_timestamps": [bar["timestamp"] + interval_ms for bar in bars],
+            "four_hour_close_timestamps": [bar["timestamp"] + interval_ms for bar in bars],
+            "sentiment_state": sentiment_state,
+            "sentiment_timestamps": [row["timestamp"] for row in sentiment_state],
+        }
+        runtime = type(
+            "Runtime",
+            (),
+            {
+                "intraday_data": bars,
+                "intraday_start_idx": 0,
+                "intraday_end_idx": len(bars),
+                "start_ts": bars[0]["timestamp"],
+                "end_ts": bars[-1]["timestamp"] + interval_ms,
+                "execution_rows": [],
+                "execution_timestamps": [],
+                "funding_rows": [],
+                "funding_timestamps": [],
+                "funding_coverage": {"mode": "disabled", "ratio": 0.0, "gap_count": 0},
+                "four_hour_window_state": [],
+                "four_hour_window_close_timestamps": [],
+            },
+        )()
+        captured_states = []
+
+        def capture_strategy(_data, _idx, _positions, market_state):
+            captured_states.append(market_state)
+            return None
+
+        with mock.patch.object(backtest, "prepare_backtest_window_runtime", return_value=runtime):
+            backtest.backtest_macd_aggressive(
+                capture_strategy,
+                intraday_file=None,
+                hourly_file=None,
+                start_date="2026-01-01",
+                end_date="2026-01-02",
+                strategy_params={},
+                exit_params={"funding_fee_enabled": 0},
+                include_diagnostics=False,
+                prepared_context=prepared_context,
+            )
+
+        self.assertEqual(len(captured_states), 2)
+        self.assertEqual(captured_states[0]["sentiment"]["classification"], "Extreme Fear")
+        self.assertAlmostEqual(captured_states[0]["fear_greed_value"], 20.0)
+        self.assertTrue(captured_states[0]["sentiment"]["extreme_fear"])
+        self.assertAlmostEqual(captured_states[1]["fear_greed_delta1"], 15.0)
+        self.assertAlmostEqual(captured_states[1]["fear_greed_ema7"], 25.0)
+
 
 class EvaluationFixesTest(unittest.TestCase):
     def _trend_points_from_closes(self, closes):
@@ -559,6 +676,36 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertLess(efficiency, 0.30)
         self.assertLess(directional_ratio, 0.60)
         self.assertEqual(_detect_major_trend_segments(points), [])
+
+    def test_summarize_test_result_uses_activity_capture_blend(self):
+        points = [
+            {"timestamp": idx, "label": f"p{idx}", "market_close": close, "atr_ratio": 0.01, "strategy_equity": equity}
+            for idx, close, equity in [
+                (1, 100.0, 100000.0),
+                (2, 104.0, 101000.0),
+                (3, 108.0, 102000.0),
+                (4, 112.0, 103000.0),
+                (5, 118.0, 104000.0),
+                (6, 124.0, 105000.0),
+                (7, 118.0, 106000.0),
+                (8, 110.0, 109000.0),
+                (9, 101.0, 113000.0),
+                (10, 92.0, 118000.0),
+                (11, 88.0, 120000.0),
+                (12, 94.0, 119000.0),
+            ]
+        ]
+        normalized_points = _normalize_trend_points(points)
+        report = _trend_score_report(normalized_points)
+
+        self.assertGreaterEqual(len(report.segment_details), 2)
+        equal_score = sum(detail.score for detail in report.segment_details) / len(report.segment_details)
+        self.assertNotAlmostEqual(equal_score, report.trend_score)
+        metrics = summarize_test_result({"trend_capture_points": points})
+
+        self.assertAlmostEqual(metrics["test_capture_equal_score"], equal_score)
+        self.assertAlmostEqual(metrics["test_capture_weighted_score"], report.trend_score)
+        self.assertAlmostEqual(metrics["test_trend_capture_score"], 0.50 * equal_score + 0.50 * report.trend_score)
 
     def test_collect_daily_path_assigns_overlapping_days_to_latest_window(self):
         window1 = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-02"})()

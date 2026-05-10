@@ -167,6 +167,14 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _equal_segment_score(report: TrendScoreReport) -> float:
+    return _mean([detail.score for detail in report.segment_details])
+
+
+def _capture_score_from_report(report: TrendScoreReport) -> float:
+    return 0.50 * _equal_segment_score(report) + 0.50 * report.trend_score
+
+
 def _std(values: list[float]) -> float:
     if len(values) <= 1:
         return 0.0
@@ -1547,11 +1555,14 @@ def normalize_test_metrics_payload(metrics: Mapping[str, Any] | None) -> dict[st
 
 def summarize_test_result(result: dict[str, Any] | None) -> dict[str, float]:
     trend_report = _trend_report_from_result(result)
+    capture_score = _capture_score_from_report(trend_report)
     long_trades, short_trades = _trade_side_counts(result)
     daily_returns = [float(value) for value in (result or {}).get("daily_returns", [])]
     return {
         "test_score": _period_score(trend_report),
-        "test_trend_capture_score": trend_report.trend_score,
+        "test_trend_capture_score": capture_score,
+        "test_capture_equal_score": _equal_segment_score(trend_report),
+        "test_capture_weighted_score": trend_report.trend_score,
         "test_return_score": trend_report.return_score,
         "test_arrival_score": trend_report.arrival_score,
         "test_escort_score": trend_report.escort_score,

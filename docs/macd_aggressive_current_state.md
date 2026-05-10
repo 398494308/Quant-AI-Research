@@ -4,7 +4,7 @@
 
 ## 当前快照
 
-`2026-05-09 23:08:49`（Asia/Shanghai）已把评分口径切到 `trend_capture_v20_clean_trend_segments`，并按 v20 重算当前 active reference。随后已重置 stage/session 并重新启动研究器；当前研究器已进入新 stage 的第 1 轮 planner。
+`2026-05-10 11:58:06`（Asia/Shanghai）已把 `test` capture 展示口径同步为“段等权 50% + 原加权 50%”，并手工把 active reference 换成 `v2.39.long_veto_hist_ease`。这次换基底的目的，是降低过高 `timed_return_score` 对搜索的锁定，让后续候选更容易围绕 `capture_score` 做真实突破。
 
 当前策略源码位置：
 
@@ -15,33 +15,35 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 研究器 | 运行中，`model_planner` |
-| active reference | baseline |
-| reference hash | `4570043420edaa10227897a2e03576176892efd306228fca170daf54188b9d5f` |
+| 研究器 | 运行中，正在加载并重算 active reference |
+| active reference | champion |
+| reference hash | `9a3ce24ec22742a1ed27cd93f8710cc27f6e71f9e03f636a931cb18ab5b99c89` |
 | score regime | `trend_capture_v20_clean_trend_segments` |
-| state 写回 | 已按 v20 写回 |
-| gate | 未通过：`val空头捕获偏低(-0.01)` |
-| quality_score | 0.0442 |
-| promotion_score | 0.7008 |
-| capture_score / timed_return_score | 0.0939 / 2.4338 |
-| drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 0.8953 / 0.1791 / 0.0000 |
-| train/val clean 抓取分 | 0.0442 / 0.1436 |
+| state 写回 | 已按新基底写回，stage/session 已重置 |
+| gate | 通过 |
+| quality_score | 0.0288 |
+| promotion_score | 0.5342 |
+| capture_score / timed_return_score | 0.1237 / 2.1243 |
+| drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 1.1990 / 0.2398 / 0.0000 |
+| train/val clean 抓取分 | 0.0288 / 0.2187 |
 | train clean 趋势段 | 67 段，多 36 / 空 31 |
 | val clean 趋势段 | 50 段，多 28 / 空 22 |
-| val 多/空捕获 | 0.3296 / -0.0078 |
-| train+val 期间收益 | 1598.32% |
-| val 期间收益 | 535.67% |
-| train/val 非加仓开仓 | 238 / 161 |
-| train/val 月非加仓开仓 | 13.17 / 13.43 |
-| Sharpe(train / val / train+val) | 1.88 / 2.35 / 1.70 |
+| val 多/空捕获 | 0.3433 / 0.1264 |
+| train+val 期间收益 | 1349.29% |
+| val 期间收益 | 372.44% |
+| train/val 非加仓开仓 | 349 / 262 |
+| train/val 月非加仓开仓 | 约 19.4 / 21.9 |
+| Sharpe(val / train+val) | 1.93 / 1.65 |
+| test capture / return / 平仓 | 0.0307 / 17.14% / 9 |
 | val 12 月覆盖 | 已覆盖到 2025-12-22 |
 
 说明：
 
 - v20 的目标是把 capture 数据源固定成更干净的单边趋势段，减少震荡段进入评分。
 - 研究器不会在策略修改轮次里改这套切段规则；后续候选都按当前代码里的固定规则评估。
-- 当前 baseline 按 v20 仍未过 gate，主要问题是 val 空头 clean 趋势捕获略低；新 stage 会围绕新评分继续探索。
+- 当前 champion 的 `promotion_score` 明显低于上一版高 return champion，但 `capture_score` 保持在同一档；这个基底用于降低收益项门槛，让研究器优先寻找 capture 的结构性提升。
 - Funding 覆盖仍为 `0%`，这是数据源缺口；最终实盘前用长时间 demo run 兜底观察，不把它硬塞进当前研究评分。
+- Fear & Greed 情绪数据现在作为可选 `market_state` 输入暴露给策略；它不进入评分、gate 或强制优化目标。
 
 ## 数据与窗口
 
@@ -49,6 +51,7 @@
 - 事实层：`15m`
 - 确认层：`1h / 4h`，由 `15m` 聚合得到
 - 执行价：优先使用 `1m`
+- 情绪：Fear & Greed 日频数据，只作为策略可选环境信息
 - `train`：`2023-07-01` 到 `2024-12-31`
 - `val`：`2025-01-01` 到 `2025-12-31`
 - `test`：`2026-01-01` 到 `2026-04-30`
@@ -100,6 +103,10 @@
 `capture_score = 0.50 * train_capture_score + 0.50 * val_capture_score`
 
 主评分使用连续 `train / val` 数据源：`train` 从已有 `train+val` 连续回测按 `val` 起点切出，`val` 使用连续 validation 结果。`train` walk-forward 仍保留用于窗口诊断、鲁棒性和早停。
+
+`test_trend_capture_score` 只做观察，但也使用同一混合口径：
+
+`test_trend_capture_score = 0.50 * test_equal_capture_score + 0.50 * test_weighted_capture_score`
 
 收益补充分：
 

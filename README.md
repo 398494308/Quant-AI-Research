@@ -44,7 +44,8 @@
 - 候选必须先过 `gate`
 - 已有 champion 时，候选还必须 `promotion_score` 严格高于当前 active reference 才能刷新；当前取消的是额外晋级边际，不是“过 gate 就替换”
 - `promotion_score = 0.60 * capture_score + 0.40 * timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
-- `capture_score` 使用固定的 clean trend segments：先用中度放开的阈值找候选趋势段，再用趋势效率和方向一致性过滤震荡段；主评分使用连续 `train / val` 数据源，`train` 从已有 `train+val` 连续回测按 `val` 起点切出，不新增回测；每侧趋势抓取分仍是“段等权均分 50% + 原权重均分 50%”的混合方式；bull 和 bear 都只奖励账户正收益
+- `capture_score` 使用固定的 clean trend segments：先用中度放开的阈值找候选趋势段，再用趋势效率和方向一致性过滤震荡段；主评分使用连续 `train / val` 数据源，`train` 从已有 `train+val` 连续回测按 `val` 起点切出，不新增回测；每侧趋势抓取分仍是“段等权均分 50% + 原权重均分 50%”的混合方式；`test_trend_capture_score` 也使用同一混合口径；bull 和 bear 都只奖励账户正收益
+- Fear & Greed 情绪数据现在只作为可选 `market_state` 信息源暴露给策略，字段包括 `sentiment`、`fear_greed_value`、`fear_greed_ema7`、`fear_greed_delta1/3/7`；它不进入评分、gate 或 planner 强制目标
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标
 - `trade_activity_penalty` 是低频与长空窗惩罚：交易频率按非加仓开仓数计算，加仓不计入；希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天；低于交易数下沿或超过空窗上限才扣分，不单独做交易数硬 gate
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position

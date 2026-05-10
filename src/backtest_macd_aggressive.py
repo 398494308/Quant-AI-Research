@@ -563,6 +563,27 @@ def _prepare_sentiment_state(rows):
     return output
 
 
+def _sentiment_market_state(sentiment_state, sentiment_idx):
+    if sentiment_idx < 0 or sentiment_idx >= len(sentiment_state):
+        return None
+    current = sentiment_state[sentiment_idx]
+    previous = sentiment_state[sentiment_idx - 1] if sentiment_idx > 0 else current
+    value = float(current["value"])
+    delta1 = value - float(previous["value"])
+    return {
+        "value": value,
+        "classification": current.get("classification", ""),
+        "ema7": float(current.get("ema7", value)),
+        "delta1": delta1,
+        "delta3": float(current.get("delta3", 0.0)),
+        "delta7": float(current.get("delta7", 0.0)),
+        "extreme_fear": value <= 25.0,
+        "fear": value < 45.0,
+        "greed": value > 55.0,
+        "extreme_greed": value >= 75.0,
+    }
+
+
 def _position_pnl_pct(position, price, leverage):
     direction = -1.0 if _position_side(position) == "short" else 1.0
     return direction * ((price - position["entry_price"]) / position["entry_price"]) * leverage * 100.0
@@ -1455,10 +1476,17 @@ def backtest_macd_aggressive(
         four_hour_context = four_hour_state[four_hour_idx] if four_hour_idx >= 0 else None
         intraday_context = intraday_state[idx]
         prev_intraday_context = intraday_state[idx - 1] if idx > 0 else intraday_context
+        sentiment_context = _sentiment_market_state(sentiment_state, sentiment_idx)
         market_state = {
             "hourly": hourly_context,
             "prev_hourly": prev_hourly_context,
             "four_hour": four_hour_context,
+            "sentiment": sentiment_context,
+            "fear_greed_value": sentiment_context["value"] if sentiment_context else None,
+            "fear_greed_ema7": sentiment_context["ema7"] if sentiment_context else None,
+            "fear_greed_delta1": sentiment_context["delta1"] if sentiment_context else None,
+            "fear_greed_delta3": sentiment_context["delta3"] if sentiment_context else None,
+            "fear_greed_delta7": sentiment_context["delta7"] if sentiment_context else None,
             "trade_count": intraday_context["trade_count"],
             "trade_count_ratio": intraday_context["trade_count_ratio"],
             "taker_buy_volume": intraday_context["taker_buy_volume"],

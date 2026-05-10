@@ -10,11 +10,11 @@ from research_v2 import evaluation as mod
 
 
 def _equal_segment_score(report: mod.TrendScoreReport) -> float:
-    return mod._mean([detail.score for detail in report.segment_details])
+    return mod._equal_segment_score(report)
 
 
 def _capture_score_from_report(report: mod.TrendScoreReport) -> float:
-    return 0.50 * _equal_segment_score(report) + 0.50 * report.trend_score
+    return mod._capture_score_from_report(report)
 
 
 def _hit_segment_count(report: mod.TrendScoreReport) -> int:
