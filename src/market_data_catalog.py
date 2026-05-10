@@ -14,8 +14,8 @@ INDEX_DIR = REPO_ROOT / "data" / "index"
 DEFAULT_VENUE = "okx"
 DEFAULT_INSTRUMENT_ID = "BTC-USDT-SWAP"
 DATA_START_STR = "2023-01-01"
-DATA_END_STR = "2026-04-21"
-SENTIMENT_FILE_NAME = "crypto_fear_greed_daily_20230101_20260420.csv"
+DATA_END_STR = "2026-05-01"
+SENTIMENT_FILE_NAME = "crypto_fear_greed_daily_20230101_20260430.csv"
 FILE_TAG = f"{DATA_START_STR.replace('-', '')}_{DATA_END_STR.replace('-', '')}"
 
 PRICE_HEADER = [
@@ -124,4 +124,3 @@ def okx_flow_proxy(
         "taker_sell_volume": max(volume_value - taker_buy_volume, 0.0),
         "flow_metric_source": "okx_candle_proxy",
     }
-

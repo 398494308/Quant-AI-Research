@@ -34,7 +34,7 @@ flowchart TB
     T --> E
 
     S -- 是 --> U[更新 best/champion/策略快照]
-    U --> V[只读 test 验收<br/>2026-01-01 到 2026-04-20]
+    U --> V[只读 test 验收<br/>2026-01-01 到 2026-04-30]
     V --> W[生成图表 / Discord 播报 / champion_history 归档]
     W --> X[重置 stage 和 planner session]
     X --> Y[旧 champion_review 自动失效<br/>除非人工更新 hash]
@@ -58,7 +58,7 @@ flowchart TB
 - 评分口径：`trend_capture_v20_clean_trend_segments`。
 - `train`：`2023-07-01` 到 `2024-12-31`。
 - `val`：`2025-01-01` 到 `2025-12-31`。
-- `test`：`2026-01-01` 到 `2026-04-20`。
+- `test`：`2026-01-01` 到 `2026-04-30`。
 - 晋升条件：候选先过 `gate`；已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference。当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则。
 - `promotion_score = 0.60 * capture_score + 0.40 * timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`。
 - 主评分使用连续 `train / val` 数据源；`train` 从已有 `train+val` 连续回测按 `val` 起点切出，walk-forward 继续用于诊断、鲁棒性和早停。

@@ -303,7 +303,7 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         validation_start_date=os.getenv("MACD_V2_VALIDATION_START_DATE", "2025-01-01"),
         validation_end_date=os.getenv("MACD_V2_VALIDATION_END_DATE", "2025-12-31"),
         test_start_date=os.getenv("MACD_V2_TEST_START_DATE", "2026-01-01"),
-        test_end_date=os.getenv("MACD_V2_TEST_END_DATE", "2026-04-20"),
+        test_end_date=os.getenv("MACD_V2_TEST_END_DATE", "2026-04-30"),
         eval_window_days=_env_int("MACD_V2_EVAL_WINDOW_DAYS", 28),
         eval_step_days=_env_int("MACD_V2_EVAL_STEP_DAYS", 21),
     )

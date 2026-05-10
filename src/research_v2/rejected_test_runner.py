@@ -58,7 +58,7 @@ def run_round_artifact_test(repo_root_text: str, round_dir_text: str) -> dict[st
     windows_payload = metadata.get("evaluation_context") if isinstance(metadata.get("evaluation_context"), dict) else {}
     windows = windows_payload.get("windows") if isinstance(windows_payload.get("windows"), dict) else {}
     start_date = str(windows.get("test_start_date", "")).strip() or "2026-01-01"
-    end_date = str(windows.get("test_end_date", "")).strip() or "2026-04-20"
+    end_date = str(windows.get("test_end_date", "")).strip() or "2026-04-30"
 
     prepared_context = backtest_module.prepare_backtest_context(
         strategy_params,
