@@ -4,7 +4,7 @@
 
 ## 当前快照
 
-`2026-05-10 13:20:27`（Asia/Shanghai）已把 active reference 手工降温为 `manual.cooldown_maxpos2_trigger8`。这次换基底把 `max_concurrent_positions` 从 `4` 降到 `2`，把 `position_fraction` 从 `0.17` 降到 `0.14`，并把 `pyramid_trigger_pnl` 从 `3.588` 提高到 `8.0`；目的不是得到好策略，而是把过高收益基底降到更容易突破的水平，让后续候选优先围绕 `capture_score` 做真实改进。
+`2026-05-11 10:36:16`（Asia/Shanghai）已切到 `v23` 评分，并用手工降温后的合法基底重建 champion、重置 stage/session。新评分不再让旧 `capture_score` 直接调节收益，而是用 `capture_core` 同时约束 train/val 平衡和 bull/bear 平衡；低捕获或偏科策略会明显折扣正收益项。
 
 当前策略源码位置：
 
@@ -15,33 +15,40 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 研究器 | 运行中，正在按新 active reference 初始化 |
+| 研究器 | v23 基底已重建，stage/session 已重置并启动 |
 | active reference | champion |
-| reference hash | `65980c622eb9821b7599560e8a54ea605752e2ef827c88e227673f6e711c7cee` |
-| score regime | `trend_capture_v21_capture_adjusted_return` |
-| state 写回 | 已按新基底写回，stage/session 已重置 |
+| reference hash | `d0cf39bad76e5b52e18aef4c51a81f3dfedd85b03e47e2a99d98ab919e49fa47` |
+| score regime | `trend_capture_v23_gap_aware_capture_core` |
+| state 写回 | 已按当前源码重算并写回；stage iteration 已重置为 0 |
 | gate | 通过 |
-| quality_score | 0.0342 |
-| promotion_score | 0.1936 |
-| capture_score / timed_return_score | 0.0978 / 1.2267 |
-| drawdown_risk_score / drawdown_penalty_score / robustness_penalty_score | 1.0288 / 0.2058 / 0.0000 |
-| train/val clean 抓取分 | 0.0342 / 0.1615 |
+| quality_score | 0.0387 |
+| promotion_score | 0.1520 |
+| capture_score / capture_core_score | 0.1080 / 0.0657 |
+| period_capture_score / side_capture_score | 0.0943 / -0.0011 |
+| timed_return_score / adjusted_timed_return_score | 1.8435 / 0.9409 |
+| capture_return_multiplier | 0.5104 |
+| drawdown_penalty_score / robustness_penalty_score / trade_activity_penalty | 0.1831 / 0.0000 / 0.1354 |
+| train/val clean 抓取分 | 0.0387 / 0.1773 |
+| train/val capture gap | 0.1386 |
+| bull/bear capture gap | 0.2597 |
 | train clean 趋势段 | 67 段，多 36 / 空 31 |
 | val clean 趋势段 | 50 段，多 28 / 空 22 |
-| val 多/空捕获 | 0.3349 / 0.0116 |
-| train+val 期间收益 | 857.19% |
-| val 期间收益 | 54.36% |
-| train/val 非加仓开仓 | 193 / 152 |
-| train/val 月非加仓开仓 | 约 10.7 / 12.7 |
-| Sharpe(val / train+val) | 0.98 / 1.95 |
-| test capture / return / 平仓 | -0.0995 / -35.69% / 26 |
+| selection 多/空捕获 | 0.2132 / -0.0466 |
+| train+val 期间收益 | 1520.45% |
+| val 期间收益 | 202.25% |
+| train/val 非加仓开仓 | 332 / 266 |
+| train/val 月非加仓开仓 | 约 18.4 / 22.2 |
+| Sharpe(val / train+val) | 1.91 / 2.09 |
+| test capture / return / 平仓 | -0.1057 / -23.87% / 43 |
 | val 12 月覆盖 | 已覆盖到 2025-12-22 |
+| 策略复杂度 | `warning_2`；`sideways_family` 剩余 lines 5，`short_path_chain` 剩余 lines 2 |
 
 说明：
 
-- v21 沿用 v20 的 clean trend capture 数据源，并增加 capture-adjusted return：低 capture 策略不能再只靠高收益顶分。
+- v23 沿用 v20/v21 的 clean trend capture 数据源，但主评分只吃 capture_core-adjusted return：低捕获或偏科策略不能再只靠高收益顶分。
 - 研究器不会在策略修改轮次里改这套切段规则；后续候选都按当前代码里的固定规则评估。
-- 当前 champion 是人工降温基底，`promotion_score` 明显低于上一版高 return champion；它用于降低收益项门槛，让研究器优先寻找 capture 的结构性提升。
+- 当前 champion 在 v23 下的 `promotion_score` 为 `0.1520`；主要原因是 `capture_core=0.0657` 只能释放约 `51.0%` 的正收益补分。后续研究应优先寻找 capture_core 的结构性提升，尤其是弱侧 bear 和 train/val 平衡。
+- 本次基底只做合法降温：`max_concurrent_positions=4`、`position_fraction=0.10`、`LONG_PYRAMID_MAX_ADDS=1`；`pyramid_max_times=2` 和 `pyramid_size_ratio=0.28` 仍由校验固定。
 - 该基底不是好策略：`test` 仍明显失败，特别是 test capture 为负。`test` 是人工盲测观察，不进入 prompt、方向卡、评分或晋升；planner / reviewer 也不接收 demo 可用性判断。
 - Funding 覆盖仍为 `0%`，这是数据源缺口；后续是否进入 demo run 由人工单独决定，不作为研究器优化目标。
 - Fear & Greed 情绪数据现在作为可选 `market_state` 输入暴露给策略；它不进入评分、gate 或强制优化目标。
@@ -59,7 +66,7 @@
 - `train` 滚动窗口：`28` 天，步长 `21` 天
 - `val` 分块：`4` 个连续时间块
 
-## v21 Capture 切段
+## v23 Capture 切段与收益合成
 
 趋势候选段只从已有 4h 趋势路径里切，不新增回测。
 
@@ -113,17 +120,39 @@
 
 `timed_return_score = 0.50 * train_timed_return_score + 0.50 * val_timed_return_score`
 
-收益补充分会按 `capture_score` 平滑打折：
+`capture_core`：
 
-`capture_return_multiplier = 0.50 + 0.50 * smoothstep(clamp((capture_score - 0.05) / 0.15, 0.0, 1.0))`
+`period_capture_score = balance(train_capture_score, val_capture_score)`
 
-`adjusted_timed_return_score = timed_return_score * capture_return_multiplier`
+`side_capture_score = balance(selection_bull_capture_score, selection_bear_capture_score)`
+
+`capture_core = 0.70 * period_capture_score + 0.30 * side_capture_score`
+
+`balance(left, right)` 在差距 `<=0.08` 时近似取平均；差距从 `0.08` 到 `0.24` 之间平滑转向弱项；差距 `>=0.24` 时弱项权重达到 `0.65`。
+
+收益补充分会按 `capture_core` 连续调整：
+
+当 `capture_core <= 0.03`：
+
+`capture_return_multiplier = 0.25`
+
+当 `0.03 < capture_core <= 0.12`：
+
+`capture_return_multiplier = 0.25 + 0.75 * smoothstep((capture_core - 0.03) / 0.09)`
+
+当 `capture_core > 0.12`：
+
+`capture_return_multiplier = 1.00 + 0.45 * (1.00 - exp(-(capture_core - 0.12) / 0.20))`
+
+`adjusted_timed_return_score = timed_return_score * capture_return_multiplier`（仅当 `timed_return_score >= 0`）
 
 含义：
 
-- `capture_score <= 0.05`：收益补充分只算 `50%`
-- `capture_score >= 0.20`：收益补充分正常全算
-- 中间平滑过渡，避免硬断崖
+- `capture_core <= 0.03`：正收益补充分只算 `25%`
+- `capture_core = 0.12`：收益不打折也不加成
+- `capture_core > 0.12`：继续加成，但边际收益递减
+- `capture_core` 越高仍然越好，不存在单个“满倍率封顶点”
+- 如果 `timed_return_score < 0`，不做倍率折扣，亏损按原值进入评分，避免低 capture 把负收益“折轻”
 
 Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数值，供人工筛选和复核使用。
 
@@ -159,7 +188,7 @@ Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数
 
 晋级分：
 
-`promotion_score = 0.60 * capture_score + 0.40 * adjusted_timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
+`promotion_score = 0.50 * adjusted_timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
 
 候选必须先过 `gate`，并且 `promotion_score` 严格高于当前 active reference，才有资格刷新 champion。
 
@@ -209,7 +238,7 @@ Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数
 
 ## 多空并行与仓位
 
-- 当前基底 `max_concurrent_positions = 2`，统计独立 position；研究器仍可在允许范围内探索这个参数。
+- 当前基底 `max_concurrent_positions = 4`，统计独立 position；研究器仍可在允许范围内探索这个参数。
 - 加仓不新增独立 position，只改变已有 position 的规模。
 - 多空可以在总仓位上限内并行存在。
 - 现有空仓不会阻止新的多头信号；现有多仓也不会阻止新的空头信号。

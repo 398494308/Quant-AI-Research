@@ -5,8 +5,11 @@
 ## 优先方向
 
 - 当前阶段优先研究 `train/val` 稳定性，先找连续 `train/val` 趋势捕获、收益、回撤和交易参与度更均衡的平台；Sharpe 只作人工复核，不是主评分目标。
-- 当前评分会按 `capture_score` 平滑折扣收益补充分；低捕获策略不能再只靠高收益刷新 champion。
-- 当前基底已手工降温为 `manual.cooldown_maxpos2_trigger8`：`max_concurrent_positions=2`、`position_fraction=0.14`、`pyramid_trigger_pnl=8.0`，hash 为 `65980c622eb9821b7599560e8a54ea605752e2ef827c88e227673f6e711c7cee`。这次换基底的目的，是把过高收益基底降到更容易突破的水平；下一阶段优先找 `capture_score` 的真实突破，不要只靠恢复更大并行仓位、更早加仓或更晚退出把收益重新顶高。
+- 当前评分口径是 `trend_capture_v23_gap_aware_capture_core`。`capture_core` 由 train/val 平衡分和 bull/bear 平衡分组成；差距不大时近似看平均，偏科明显时更靠弱项计分。
+- 收益补充分不再按旧 `capture_score` 调整，而是按 `capture_core` 连续调整：`0.03` 以下低倍率，`0.12` 附近回到 1 倍，超过后继续加成但边际递减。低捕获或偏科策略不能再只靠高收益刷新 champion。
+- 当前 active reference 是手工降温后的合法基底 hash `d0cf39bad76e5b52e18aef4c51a81f3dfedd85b03e47e2a99d98ab919e49fa47`。它在 v23 下 `promotion_score` 约 `0.1520`，`capture_core` 约 `0.0657`，`capture_return_multiplier` 约 `0.5104`，train/val 月开仓约 `18.4/22.2`；下一阶段优先找 capture_core 的真实突破，尤其是弱侧 bear 和 train/val 平衡。
+- 当前基底只做合法降温：`max_concurrent_positions=4`、`position_fraction=0.10`、`LONG_PYRAMID_MAX_ADDS=1`；`pyramid_max_times=2` 和 `pyramid_size_ratio=0.28` 仍是固定校验项，不要改。
+- 策略脚本已做等价压缩，复杂度从 `hard_cap` 降到 `warning_2`；后续仍要优先改旧逻辑、复用现有 helper，不要再堆大块条件。
 - 在保持 gate 通过、手续费拖累不过度恶化的前提下，优先缩小 `train/val` 落差，优先提高较弱一侧，而不是继续抬高已经偏强的一侧。
 - 若要提高交易次数，优先提高真实成交覆盖度：优先看 `path`、`final_veto`、`filled_entries`、有效再入场、加仓触发，而不是只靠延长持仓或放松止盈来抬收益。
 - 若要提高交易活跃度，默认参考区间是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天；趋势段命中率不足也会轻扣。应通过新增独立有效趋势机会去靠近，而不是靠无条件放松 gate 或单纯拉长持仓时间。

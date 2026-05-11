@@ -35,8 +35,10 @@ from research_v2.config import GateConfig, ScoringConfig
 from research_v2.evaluation import (
     EvaluationReport,
     _annualized_return_score,
+    _balanced_pair_score,
     _collect_daily_path,
     _collect_trend_path,
+    _capture_core_score,
     _capture_return_multiplier,
     _capture_ratio,
     _detect_major_trend_segments,
@@ -894,6 +896,17 @@ class EvaluationFixesTest(unittest.TestCase):
             report.metrics["capture_score"],
             0.50 * (expected_train_capture_score + expected_validation_capture_score),
         )
+        self.assertIn("period_capture_score", report.metrics)
+        self.assertIn("side_capture_score", report.metrics)
+        self.assertIn("capture_core_score", report.metrics)
+        self.assertIn("train_validation_capture_gap", report.metrics)
+        self.assertIn("bull_bear_capture_gap", report.metrics)
+        self.assertIn("period_capture_weak_weight", report.metrics)
+        self.assertIn("side_capture_weak_weight", report.metrics)
+        self.assertAlmostEqual(
+            report.metrics["capture_return_multiplier"],
+            _capture_return_multiplier(report.metrics["capture_core_score"], ScoringConfig()),
+        )
         self.assertAlmostEqual(
             report.metrics["quality_score"],
             expected_train_capture_score,
@@ -910,7 +923,11 @@ class EvaluationFixesTest(unittest.TestCase):
         )
         self.assertAlmostEqual(
             report.metrics["adjusted_timed_return_score"],
-            report.metrics["timed_return_score"] * report.metrics["capture_return_multiplier"],
+            (
+                report.metrics["timed_return_score"] * report.metrics["capture_return_multiplier"]
+                if report.metrics["timed_return_score"] >= 0.0
+                else report.metrics["timed_return_score"]
+            ),
         )
         self.assertAlmostEqual(
             report.metrics["promotion_gap"],
@@ -921,8 +938,7 @@ class EvaluationFixesTest(unittest.TestCase):
             + 1.00 * max(report.metrics["drawdown_risk_score"] - 1.25, 0.0)
         )
         expected_promotion_score = (
-            0.60 * report.metrics["capture_score"]
-            + 0.40 * report.metrics["adjusted_timed_return_score"]
+            0.50 * report.metrics["adjusted_timed_return_score"]
             - expected_drawdown_penalty
             - report.metrics["robustness_penalty_score"]
             - report.metrics["trade_activity_penalty"]
@@ -1230,8 +1246,7 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(
             report.metrics["promotion_score"],
             (
-                0.60 * report.metrics["capture_score"]
-                + 0.40 * report.metrics["adjusted_timed_return_score"]
+                0.50 * report.metrics["adjusted_timed_return_score"]
                 - expected_drawdown_penalty
                 - report.metrics["robustness_penalty_score"]
                 - report.metrics["trade_activity_penalty"]
@@ -1244,16 +1259,48 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(_trade_activity_shortfall(180, 270), 90.0 / 270.0)
         self.assertAlmostEqual(_trade_activity_shortfall(0, 180), 1.0)
 
-    def test_capture_return_multiplier_smoothly_discounts_low_capture(self):
+    def test_balanced_pair_score_only_leans_on_weak_side_after_gap_tolerance(self):
         scoring = ScoringConfig()
 
-        self.assertAlmostEqual(_capture_return_multiplier(0.00, scoring), 0.50)
-        self.assertAlmostEqual(_capture_return_multiplier(0.05, scoring), 0.50)
-        self.assertAlmostEqual(_capture_return_multiplier(0.20, scoring), 1.00)
-        self.assertAlmostEqual(_capture_return_multiplier(0.50, scoring), 1.00)
-        middle = _capture_return_multiplier(0.125, scoring)
-        self.assertGreater(middle, 0.50)
-        self.assertLess(middle, 1.00)
+        balanced_score, balanced_gap, balanced_weight = _balanced_pair_score(0.10, 0.16, scoring)
+        self.assertAlmostEqual(balanced_score, 0.13)
+        self.assertAlmostEqual(balanced_gap, 0.06)
+        self.assertAlmostEqual(balanced_weight, 0.0)
+
+        skewed_score, skewed_gap, skewed_weight = _balanced_pair_score(0.02, 0.30, scoring)
+        self.assertAlmostEqual(skewed_gap, 0.28)
+        self.assertAlmostEqual(skewed_weight, 0.65)
+        self.assertLess(skewed_score, 0.16)
+        self.assertGreater(skewed_score, 0.02)
+
+    def test_capture_core_score_combines_period_balance_and_side_balance(self):
+        scoring = ScoringConfig()
+
+        payload = _capture_core_score(0.10, 0.14, 0.08, 0.20, scoring)
+        period_score, _, _ = _balanced_pair_score(0.10, 0.14, scoring)
+        side_score, _, _ = _balanced_pair_score(0.08, 0.20, scoring)
+
+        self.assertAlmostEqual(payload["period_capture_score"], period_score)
+        self.assertAlmostEqual(payload["side_capture_score"], side_score)
+        self.assertAlmostEqual(payload["capture_core_score"], 0.70 * period_score + 0.30 * side_score)
+        self.assertAlmostEqual(payload["train_validation_capture_gap"], 0.04)
+        self.assertAlmostEqual(payload["bull_bear_capture_gap"], 0.12)
+
+    def test_capture_return_multiplier_is_smooth_then_diminishing(self):
+        scoring = ScoringConfig()
+
+        self.assertAlmostEqual(_capture_return_multiplier(0.00, scoring), 0.25)
+        self.assertAlmostEqual(_capture_return_multiplier(0.03, scoring), 0.25)
+        self.assertAlmostEqual(_capture_return_multiplier(0.075, scoring), 0.625)
+        self.assertAlmostEqual(_capture_return_multiplier(0.12, scoring), 1.00)
+        tail_022 = _capture_return_multiplier(0.22, scoring)
+        tail_032 = _capture_return_multiplier(0.32, scoring)
+        tail_042 = _capture_return_multiplier(0.42, scoring)
+        self.assertGreater(tail_022, 1.00)
+        self.assertGreater(tail_032, tail_022)
+        self.assertGreater(tail_042, tail_032)
+        self.assertLess(tail_042, 1.45)
+        self.assertGreater(tail_032 - tail_022, tail_042 - tail_032)
 
     def test_trend_participation_penalty_uses_existing_hit_rates_and_caps_component(self):
         scoring = ScoringConfig()
@@ -2552,8 +2599,10 @@ class JournalPromptFixesTest(unittest.TestCase):
         )
 
         self.assertIn("promotion_score` 严格高于当前 active reference", prompt)
-        self.assertIn("0.60 / 0.40", prompt)
-        self.assertIn("按日收益年化补分", prompt)
+        self.assertIn("唯一主收益项", prompt)
+        self.assertIn("capture_core<=0.03", prompt)
+        self.assertIn("0.12", prompt)
+        self.assertIn("偏科越大越靠弱项计分", prompt)
         self.assertIn("Sharpe 只作为人工筛选", prompt)
         self.assertNotIn("activity_adjusted_sharpe_score", prompt)
         self.assertIn("分段回撤惩罚", prompt)

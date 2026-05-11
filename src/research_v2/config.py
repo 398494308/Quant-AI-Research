@@ -108,8 +108,8 @@ def _load_scoring_config(windows: "WindowConfig") -> "ScoringConfig":
         _env_int("MACD_V2_TRADE_ACTIVITY_VALIDATION_RANGE_HIGH", _monthly_trade_count(validation_days, 15.0)),
     )
     return ScoringConfig(
-        promotion_capture_weight=_env_float("MACD_V2_PROMOTION_CAPTURE_WEIGHT", 0.60),
-        promotion_timed_return_weight=_env_float("MACD_V2_PROMOTION_TIMED_RETURN_WEIGHT", 0.40),
+        promotion_capture_weight=_env_float("MACD_V2_PROMOTION_CAPTURE_WEIGHT", 0.00),
+        promotion_timed_return_weight=_env_float("MACD_V2_PROMOTION_TIMED_RETURN_WEIGHT", 0.50),
         promotion_trade_activity_penalty_weight=_env_float_any(
             (
                 "MACD_V2_PROMOTION_TRADE_ACTIVITY_PENALTY_WEIGHT",
@@ -125,9 +125,21 @@ def _load_scoring_config(windows: "WindowConfig") -> "ScoringConfig":
         trade_participation_validation_floor=_env_float("MACD_V2_TRADE_PARTICIPATION_VALIDATION_FLOOR", 0.15),
         trade_participation_validation_target=_env_float("MACD_V2_TRADE_PARTICIPATION_VALIDATION_TARGET", 0.25),
         trade_activity_penalty_cap=_env_float("MACD_V2_TRADE_ACTIVITY_PENALTY_CAP", 0.35),
-        capture_return_discount_floor=_env_float("MACD_V2_CAPTURE_RETURN_DISCOUNT_FLOOR", 0.05),
-        capture_return_full_score=_env_float("MACD_V2_CAPTURE_RETURN_FULL_SCORE", 0.20),
-        capture_return_min_multiplier=_env_float("MACD_V2_CAPTURE_RETURN_MIN_MULTIPLIER", 0.50),
+        capture_balance_gap_tolerance=_env_float("MACD_V2_CAPTURE_BALANCE_GAP_TOLERANCE", 0.08),
+        capture_balance_gap_full=_env_float("MACD_V2_CAPTURE_BALANCE_GAP_FULL", 0.24),
+        capture_balance_max_weak_weight=_env_float("MACD_V2_CAPTURE_BALANCE_MAX_WEAK_WEIGHT", 0.65),
+        capture_core_period_weight=_env_float("MACD_V2_CAPTURE_CORE_PERIOD_WEIGHT", 0.70),
+        capture_return_discount_floor=_env_float("MACD_V2_CAPTURE_RETURN_DISCOUNT_FLOOR", 0.03),
+        capture_return_neutral_score=_env_float_any(
+            (
+                "MACD_V2_CAPTURE_RETURN_NEUTRAL_SCORE",
+                "MACD_V2_CAPTURE_RETURN_FULL_SCORE",
+            ),
+            0.12,
+        ),
+        capture_return_min_multiplier=_env_float("MACD_V2_CAPTURE_RETURN_MIN_MULTIPLIER", 0.25),
+        capture_return_tail_gain=_env_float("MACD_V2_CAPTURE_RETURN_TAIL_GAIN", 0.45),
+        capture_return_tail_scale=_env_float("MACD_V2_CAPTURE_RETURN_TAIL_SCALE", 0.20),
         promotion_drawdown_base_weight=_env_float("MACD_V2_PROMOTION_DRAWDOWN_BASE_WEIGHT", 0.20),
         promotion_drawdown_knee=_env_float("MACD_V2_PROMOTION_DRAWDOWN_KNEE", 1.25),
         promotion_drawdown_excess_weight=_env_float("MACD_V2_PROMOTION_DRAWDOWN_EXCESS_WEIGHT", 1.00),
@@ -215,8 +227,8 @@ class GateConfig:
 
 @dataclass(frozen=True)
 class ScoringConfig:
-    promotion_capture_weight: float = 0.60
-    promotion_timed_return_weight: float = 0.40
+    promotion_capture_weight: float = 0.00
+    promotion_timed_return_weight: float = 0.50
     promotion_trade_activity_penalty_weight: float = 0.15
     trade_idle_penalty_weight: float = 0.10
     max_trade_idle_days: float = 7.0
@@ -226,9 +238,15 @@ class ScoringConfig:
     trade_participation_validation_floor: float = 0.15
     trade_participation_validation_target: float = 0.25
     trade_activity_penalty_cap: float = 0.35
-    capture_return_discount_floor: float = 0.05
-    capture_return_full_score: float = 0.20
-    capture_return_min_multiplier: float = 0.50
+    capture_balance_gap_tolerance: float = 0.08
+    capture_balance_gap_full: float = 0.24
+    capture_balance_max_weak_weight: float = 0.65
+    capture_core_period_weight: float = 0.70
+    capture_return_discount_floor: float = 0.03
+    capture_return_neutral_score: float = 0.12
+    capture_return_min_multiplier: float = 0.25
+    capture_return_tail_gain: float = 0.45
+    capture_return_tail_scale: float = 0.20
     promotion_drawdown_base_weight: float = 0.20
     promotion_drawdown_knee: float = 1.25
     promotion_drawdown_excess_weight: float = 1.00

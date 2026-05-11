@@ -163,6 +163,11 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return min(max(value, minimum), maximum)
 
 
+def _smoothstep(value: float) -> float:
+    progress = _clamp(float(value), 0.0, 1.0)
+    return progress * progress * (3.0 - 2.0 * progress)
+
+
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
@@ -173,6 +178,56 @@ def _equal_segment_score(report: TrendScoreReport) -> float:
 
 def _capture_score_from_report(report: TrendScoreReport) -> float:
     return 0.50 * _equal_segment_score(report) + 0.50 * report.trend_score
+
+
+def _balanced_pair_score(
+    left_score: float,
+    right_score: float,
+    scoring: ScoringConfig,
+) -> tuple[float, float, float]:
+    average_score = 0.50 * (float(left_score) + float(right_score))
+    weak_score = min(float(left_score), float(right_score))
+    gap = abs(float(left_score) - float(right_score))
+    tolerance = max(0.0, float(scoring.capture_balance_gap_tolerance))
+    full_gap = max(tolerance + 1e-9, float(scoring.capture_balance_gap_full))
+    max_weak_weight = _clamp(float(scoring.capture_balance_max_weak_weight), 0.0, 1.0)
+    if gap <= tolerance:
+        weak_weight = 0.0
+    elif gap >= full_gap:
+        weak_weight = max_weak_weight
+    else:
+        weak_weight = max_weak_weight * _smoothstep((gap - tolerance) / (full_gap - tolerance))
+    return (1.0 - weak_weight) * average_score + weak_weight * weak_score, gap, weak_weight
+
+
+def _capture_core_score(
+    train_capture_score: float,
+    validation_capture_score: float,
+    bull_capture_score: float,
+    bear_capture_score: float,
+    scoring: ScoringConfig,
+) -> dict[str, float]:
+    period_capture_score, period_gap, period_weak_weight = _balanced_pair_score(
+        train_capture_score,
+        validation_capture_score,
+        scoring,
+    )
+    side_capture_score, side_gap, side_weak_weight = _balanced_pair_score(
+        bull_capture_score,
+        bear_capture_score,
+        scoring,
+    )
+    period_weight = _clamp(float(scoring.capture_core_period_weight), 0.0, 1.0)
+    side_weight = 1.0 - period_weight
+    return {
+        "period_capture_score": period_capture_score,
+        "side_capture_score": side_capture_score,
+        "capture_core_score": period_weight * period_capture_score + side_weight * side_capture_score,
+        "train_validation_capture_gap": period_gap,
+        "bull_bear_capture_gap": side_gap,
+        "period_capture_weak_weight": period_weak_weight,
+        "side_capture_weak_weight": side_weak_weight,
+    }
 
 
 def _std(values: list[float]) -> float:
@@ -561,17 +616,19 @@ def _trade_idle_shortfall(max_idle_days: float, allowed_idle_days: float) -> flo
     return _clamp(max(float(max_idle_days) - limit, 0.0) / limit, 0.0, 1.0)
 
 
-def _smoothstep(value: float) -> float:
-    x = _clamp(float(value), 0.0, 1.0)
-    return x * x * (3.0 - 2.0 * x)
-
-
 def _capture_return_multiplier(capture_score: float, scoring: ScoringConfig) -> float:
     floor = float(scoring.capture_return_discount_floor)
-    full = max(floor + 1e-9, float(scoring.capture_return_full_score))
+    neutral = max(floor + 1e-9, float(scoring.capture_return_neutral_score))
     min_multiplier = _clamp(float(scoring.capture_return_min_multiplier), 0.0, 1.0)
-    progress = (float(capture_score) - floor) / (full - floor)
-    return min_multiplier + (1.0 - min_multiplier) * _smoothstep(progress)
+    capture = float(capture_score)
+    if capture <= floor:
+        return min_multiplier
+    if capture <= neutral:
+        progress = _smoothstep((capture - floor) / (neutral - floor))
+        return min_multiplier + (1.0 - min_multiplier) * progress
+    tail_gain = max(0.0, float(scoring.capture_return_tail_gain))
+    tail_scale = max(1e-9, float(scoring.capture_return_tail_scale))
+    return 1.0 + tail_gain * (1.0 - math.exp(-(capture - neutral) / tail_scale))
 
 
 def _trend_participation_shortfall(hit_rate: float, *, floor: float, target: float) -> float:

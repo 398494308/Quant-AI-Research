@@ -55,14 +55,15 @@ flowchart TB
 - 标的：`BTC-USDT-SWAP`，策略按 `20x` 合约研究。
 - 事实层：`15m`；`1h / 4h` 由 `15m` 聚合，只做确认层。
 - 执行层：优先使用 `1m` 回测成交。
-- 评分口径：`trend_capture_v21_capture_adjusted_return`。
+- 评分口径：`trend_capture_v23_gap_aware_capture_core`。
 - `train`：`2023-07-01` 到 `2024-12-31`。
 - `val`：`2025-01-01` 到 `2025-12-31`。
 - `test`：`2026-01-01` 到 `2026-04-30`。
 - 晋升条件：候选先过 `gate`；已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference。当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则。
-- `promotion_score = 0.60 * capture_score + 0.40 * adjusted_timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`；`adjusted_timed_return_score` 会按 `capture_score` 平滑打折，低捕获策略不能只靠收益顶分。
+- `promotion_score = 0.50 * adjusted_timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`；`adjusted_timed_return_score` 会按 `capture_core` 连续调整，`capture_core<=0.03` 时低倍率，`0.12` 附近回到 1 倍，超过后继续加成但边际递减。低捕获或偏科策略不能只靠收益顶分。
 - 主评分使用连续 `train / val` 数据源；`train` 从已有 `train+val` 连续回测按 `val` 起点切出，walk-forward 继续用于诊断、鲁棒性和早停。
-- `capture_score` 使用固定的 clean trend segments：先用中度放开的阈值找候选趋势段，再用趋势效率和方向一致性过滤震荡段；最终仍按“段等权均分 50% + 原权重均分 50%”混合，减少少数最大趋势段的主导；bull 和 bear 都只奖励账户正收益。
+- `capture_score` 使用固定的 clean trend segments：先用中度放开的阈值找候选趋势段，再用趋势效率和方向一致性过滤震荡段；最终仍按“段等权均分 50% + 原权重均分 50%”混合，减少少数最大趋势段的主导；bull 和 bear 都只奖励账户正收益。`capture_core` 在此基础上加入 train/val 与 bull/bear 平衡，差距越大越靠弱项计分。
+- 当前策略源码已做等价压缩，复杂度诊断从 `hard_cap` 降到 `warning_2`；复杂度仍只做人工诊断，不作为自动 gate。
 - Fear & Greed 情绪数据只作为策略可选输入暴露在 `market_state`，不进入评分、gate 或强制优化目标。
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标。
 - `trade_activity_penalty` 是低频、长空窗与趋势机会覆盖不足惩罚：交易频率按非加仓开仓数计算，加仓不计入；希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天，clean trend 命中率不足会轻扣；当前只在主评分里减分，不再做硬 gate，且总上限为 `0.35`。

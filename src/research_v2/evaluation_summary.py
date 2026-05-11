@@ -17,6 +17,20 @@ def _capture_score_from_report(report: mod.TrendScoreReport) -> float:
     return mod._capture_score_from_report(report)
 
 
+def _weak_label(left_label: str, left_score: float, right_label: str, right_score: float) -> str:
+    if abs(float(left_score) - float(right_score)) < 1e-12:
+        return "balanced"
+    return left_label if float(left_score) < float(right_score) else right_label
+
+
+def _balance_warning(gap: float, scoring: mod.ScoringConfig) -> str:
+    if gap >= float(scoring.capture_balance_gap_full):
+        return "严重偏科"
+    if gap > float(scoring.capture_balance_gap_tolerance):
+        return "偏科"
+    return "正常"
+
+
 def _hit_segment_count(report: mod.TrendScoreReport) -> int:
     return sum(1 for detail in report.segment_details if detail.score >= mod.HIT_SCORE_THRESHOLD)
 
@@ -172,14 +186,26 @@ def summarize_evaluation_impl(
         mod.TRAIN_VAL_SCORE_WEIGHT * train_capture_score
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_capture_score
     )
+    capture_core_payload = mod._capture_core_score(
+        train_capture_score,
+        validation_capture_score,
+        selection_trend_report.bull_score,
+        selection_trend_report.bear_score,
+        scoring,
+    )
+    capture_core_score = capture_core_payload["capture_core_score"]
     train_timed_return_score = mod._annualized_return_score(train_daily_returns)
     validation_timed_return_score = mod._annualized_return_score(validation_daily_path.returns)
     timed_return_score = (
         mod.TRAIN_VAL_SCORE_WEIGHT * train_timed_return_score
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_timed_return_score
     )
-    capture_return_multiplier = mod._capture_return_multiplier(capture_score, scoring)
-    adjusted_timed_return_score = timed_return_score * capture_return_multiplier
+    capture_return_multiplier = mod._capture_return_multiplier(capture_core_score, scoring)
+    adjusted_timed_return_score = (
+        timed_return_score * capture_return_multiplier
+        if timed_return_score >= 0.0
+        else timed_return_score
+    )
     train_drawdown_risk_report = mod._drawdown_risk_side_report(train_daily_returns, scoring)
     validation_drawdown_risk_report = mod._drawdown_risk_side_report(validation_daily_path.returns, scoring)
     train_drawdown_risk_score = train_drawdown_risk_report.risk_score
@@ -291,6 +317,8 @@ def summarize_evaluation_impl(
         - robustness_penalty_score
         - trade_activity_penalty
     )
+    promotion_return_contribution = scoring.promotion_timed_return_weight * adjusted_timed_return_score
+    promotion_penalty_total = drawdown_penalty_score + robustness_penalty_score + trade_activity_penalty
     eval_funnel_counts = mod._aggregate_funnel_counts(results, "eval")
     validation_funnel_counts = mod._result_funnel_counts(validation_source)
     selection_funnel_counts = mod._result_funnel_counts(selection_source)
@@ -339,6 +367,15 @@ def summarize_evaluation_impl(
 
     gate_passed = not gate_reasons
     gate_reason = "通过" if gate_passed else "；".join(gate_reasons)
+    weak_period_label = _weak_label("train", train_capture_score, "val", validation_capture_score)
+    weak_side_label = _weak_label(
+        "bull",
+        selection_trend_report.bull_score,
+        "bear",
+        selection_trend_report.bear_score,
+    )
+    period_balance_warning = _balance_warning(capture_core_payload["train_validation_capture_gap"], scoring)
+    side_balance_warning = _balance_warning(capture_core_payload["bull_bear_capture_gap"], scoring)
 
     weakest_signals = mod._aggregate_signal_stats(results, "eval")
     weakest_signal_paths = mod._aggregate_signal_stats(results, "eval", stats_key="signal_path_stats")
@@ -350,8 +387,18 @@ def summarize_evaluation_impl(
             f"{development_score_std:.2f} / {profitable_window_ratio:.0%}"
         ),
         (
-            "train/val clean趋势抓取混合分(段等权50%+原权重50%) / 抓取主分: "
-            f"{train_capture_score:.2f} / {validation_capture_score:.2f} / {capture_score:.2f}"
+            "train/val clean趋势抓取混合分(段等权50%+原权重50%) / 平均抓取 / capture_core: "
+            f"{train_capture_score:.2f} / {validation_capture_score:.2f} / "
+            f"{capture_score:.2f} / {capture_core_score:.2f}"
+        ),
+        (
+            "capture balance(period/side): "
+            f"period={capture_core_payload['period_capture_score']:.2f}, "
+            f"side={capture_core_payload['side_capture_score']:.2f}, "
+            f"gap={capture_core_payload['train_validation_capture_gap']:.2f}/"
+            f"{capture_core_payload['bull_bear_capture_gap']:.2f}, "
+            f"weak={weak_period_label}/{weak_side_label}, "
+            f"warning={period_balance_warning}/{side_balance_warning}"
         ),
         (
             "train/val段等权抓取 / 原权重抓取: "
@@ -371,9 +418,10 @@ def summarize_evaluation_impl(
         ),
         f"主评分数据源(train capture / train return): {train_capture_source} / {train_daily_return_source}",
         (
-            "train/val按日收益年化分 / 收益补充分(原始/调整后/倍率) / 固定窗口回撤风险分 / 回撤罚分 / 晋级分: "
+            "train/val按日收益年化分 / 收益补充分(原始/调整后/倍率) / 收益贡献 / 固定窗口回撤风险分 / 回撤罚分 / 晋级分: "
             f"{train_timed_return_score:.2f} / {validation_timed_return_score:.2f} / "
             f"{timed_return_score:.2f}/{adjusted_timed_return_score:.2f}/{capture_return_multiplier:.2f} / "
+            f"{promotion_return_contribution:.2f} / "
             f"{drawdown_risk_score:.2f} / {drawdown_penalty_score:.2f} / {promotion_score:.2f}"
         ),
         (
@@ -505,7 +553,8 @@ def summarize_evaluation_impl(
         "当前诊断（必须先读）:",
         (
             f"- 当前基底: 质量分(train连续趋势分)={quality_score:.2f}，晋级分={promotion_score:.2f}，"
-            f"抓取主分={capture_score:.2f}，收益补充分={timed_return_score:.2f}，"
+            f"平均抓取={capture_score:.2f}，capture_core={capture_core_score:.2f}，"
+            f"收益补充分={timed_return_score:.2f}，"
             f"回撤风险分={drawdown_risk_score:.2f}，回撤罚分={drawdown_penalty_score:.2f}，"
             f"鲁棒性软惩罚={robustness_penalty_score:.2f}，"
             f"gate={gate_reason}"
@@ -531,6 +580,37 @@ def summarize_evaluation_impl(
             f"{development_score_std:.2f}/{profitable_window_ratio:.0%}"
         ),
         (
+            f"- capture balance: period_capture={capture_core_payload['period_capture_score']:.2f}，"
+            f"side_capture={capture_core_payload['side_capture_score']:.2f}，"
+            f"capture_core={capture_core_score:.2f}，"
+            f"train/val gap={capture_core_payload['train_validation_capture_gap']:.2f}"
+            f"({period_balance_warning}, weak={weak_period_label}, weak_weight="
+            f"{capture_core_payload['period_capture_weak_weight']:.2f})，"
+            f"bull/bear gap={capture_core_payload['bull_bear_capture_gap']:.2f}"
+            f"({side_balance_warning}, weak={weak_side_label}, weak_weight="
+            f"{capture_core_payload['side_capture_weak_weight']:.2f})；"
+            f"gap>0.08 说明偏科，gap>=0.24 说明严重偏科，不能只强化强侧"
+        ),
+        (
+            f"- promotion breakdown: 收益贡献={promotion_return_contribution:.2f} "
+            f"(timed_return={timed_return_score:.2f}, adjusted={adjusted_timed_return_score:.2f}, "
+            f"multiplier={capture_return_multiplier:.2f})，"
+            f"回撤扣分={drawdown_penalty_score:.2f}，鲁棒性扣分={robustness_penalty_score:.2f}，"
+            f"活跃度扣分={trade_activity_penalty:.2f}，最终promotion={promotion_score:.2f}"
+        ),
+        (
+            f"- activity diagnostic: train/val非加仓开仓={train_entry_trades}/{validation_entry_trades}，"
+            f"月频={train_monthly_entries:.2f}/{validation_monthly_entries:.2f}，"
+            f"最长无新开仓={train_max_trade_idle_days:.1f}/{validation_max_trade_idle_days:.1f}天，"
+            f"趋势机会覆盖短缺={train_trend_participation_shortfall:.2f}/"
+            f"{validation_trend_participation_shortfall:.2f}"
+        ),
+        (
+            f"- risk diagnostic: train/val固定窗口回撤风险={train_drawdown_risk_score:.2f}/"
+            f"{validation_drawdown_risk_score:.2f}，回撤扣分={drawdown_penalty_score:.2f}，"
+            f"鲁棒性软惩罚={robustness_penalty_score:.2f}"
+        ),
+        (
             f"- 当前评分组成: train/val clean趋势抓取混合分={train_capture_score:.2f}/{validation_capture_score:.2f}，"
             f"数据源={train_capture_source}/{train_daily_return_source}，"
             f"趋势段(train总/多/空/命中)="
@@ -544,6 +624,7 @@ def summarize_evaluation_impl(
             f"{validation_trend_report.bear_segment_count}/"
             f"{_hit_segment_count(validation_trend_report)}，"
             f"train/val 按日收益年化分={train_timed_return_score:.2f}/{validation_timed_return_score:.2f}，"
+            f"平均抓取/capture_core={capture_score:.2f}/{capture_core_score:.2f}，"
             f"收益补充分(原始/调整后/倍率)={timed_return_score:.2f}/{adjusted_timed_return_score:.2f}/{capture_return_multiplier:.2f}，"
             f"train/val 非加仓开仓={train_entry_trades}/{validation_entry_trades}，"
             f"短缺率={train_trade_activity_shortfall:.2f}/{validation_trade_activity_shortfall:.2f}，"
@@ -628,6 +709,13 @@ def summarize_evaluation_impl(
         "train_capture_weighted_score": train_capture_weighted_score,
         "validation_capture_weighted_score": validation_capture_weighted_score,
         "capture_score": capture_score,
+        "period_capture_score": capture_core_payload["period_capture_score"],
+        "side_capture_score": capture_core_payload["side_capture_score"],
+        "capture_core_score": capture_core_score,
+        "train_validation_capture_gap": capture_core_payload["train_validation_capture_gap"],
+        "bull_bear_capture_gap": capture_core_payload["bull_bear_capture_gap"],
+        "period_capture_weak_weight": capture_core_payload["period_capture_weak_weight"],
+        "side_capture_weak_weight": capture_core_payload["side_capture_weak_weight"],
         "train_timed_return_score": train_timed_return_score,
         "validation_timed_return_score": validation_timed_return_score,
         "timed_return_score": timed_return_score,
@@ -775,6 +863,8 @@ def summarize_evaluation_impl(
         "overfit_hard_fail": 1.0 if overfit_report.hard_fail else 0.0,
         "low_activity_signal_count": float(low_activity_payload["count"]),
         "quality_score": quality_score,
+        "promotion_return_contribution": promotion_return_contribution,
+        "promotion_penalty_total": promotion_penalty_total,
         "promotion_score": promotion_score,
     }
     mod._append_funnel_metrics(metrics, "eval", eval_funnel_counts)
