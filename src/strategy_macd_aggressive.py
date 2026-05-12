@@ -100,7 +100,7 @@ EXIT_PARAMS = {
     "breakout_max_hold_bars": 384,
     "breakout_stop_atr_mult": 2.3,
     "breakout_tp1_close_fraction": 0.16,
-    "breakout_tp1_pnl_pct": 80.0,
+    "breakout_tp1_pnl_pct": 89.0,
     "breakout_trailing_activation_pct": 95.0,
     "breakout_trailing_giveback_pct": 20.0,
     "dynamic_hold_adx_strong_threshold": 26.0,
@@ -136,24 +136,24 @@ EXIT_PARAMS = {
     "short_breakdown_max_hold_bars": 96,
     "short_breakdown_stop_atr_mult": 3.4,
     "short_breakdown_tp1_close_fraction": 0.22,
-    "short_breakdown_tp1_pnl_pct": 288.88,
+    "short_breakdown_tp1_pnl_pct": 297.88,
     "short_breakdown_trailing_activation_pct": 999.0,
     "short_breakdown_trailing_giveback_pct": 6.25,
     "short_trend_break_even_activation_pct": 257.0,
     "short_trend_max_hold_bars": 96,
     "short_trend_stop_atr_mult": 3.4,
     "short_trend_tp1_close_fraction": 0.22,
-    "short_trend_tp1_pnl_pct": 288.88,
+    "short_trend_tp1_pnl_pct": 297.88,
     "short_trend_trailing_activation_pct": 32.0,
     "short_trend_trailing_giveback_pct": 6.25,
     "slippage_pct": 0.0003,
     "stop_atr_mult": 3.1,
     "stop_max_loss_pct": 75.7,
     "tp1_close_fraction": 0.50,
-    "tp1_pnl_pct": 85.0,
-    "take_profit": 0.04,
+    "tp1_pnl_pct": 79.9,
+    "take_profit": 0.045,
     "trading_fee_enabled": 1,
-    "trailing_activation_pct": 110.4,
+    "trailing_activation_pct": 15.333333,
     "trailing_giveback_pct": 10.0,
 }
 # EXIT_PARAMS_END
@@ -952,6 +952,10 @@ def _long_entry_addition_available(positions, current_close, market_state=None):
     )
 
 
+def _short_entry_addition_available(positions):
+    return _count_positions_by_side(positions, "short") <= 0
+
+
 def _long_time_exit_active(positions, current_close):
     if not positions or current_close <= 0.0:
         return False
@@ -1150,19 +1154,22 @@ def _flow_confirmation_ok(market_state, hourly, fourh, params, side, strong=Fals
 
     if strong:
         return (
-            score >= 6
-            and intraday_imbalance <= -0.06
-            and hourly_imbalance <= 0.0
-            and fourh_imbalance <= 0.0
-            and hourly_sell_ratio >= 0.505
-            and fourh_sell_ratio >= 0.50
+            score >= 7
+            and intraday_imbalance <= -0.08
+            and hourly_imbalance <= -0.01
+            and fourh_imbalance <= -0.005
+            and _safe_payload_float(market_state, "taker_sell_ratio", 0.5) >= 0.545
+            and hourly_sell_ratio >= 0.512
+            and fourh_sell_ratio >= 0.502
         )
     return (
-        score >= 5
-        and intraday_imbalance <= 0.02
-        and hourly_sell_ratio >= 0.50
-        and fourh_sell_ratio >= 0.495
-        and fourh_imbalance <= 0.02
+        score >= 6
+        and intraday_imbalance <= -0.02
+        and hourly_imbalance <= 0.0
+        and _safe_payload_float(market_state, "taker_sell_ratio", 0.5) >= 0.535
+        and hourly_sell_ratio >= 0.505
+        and fourh_sell_ratio >= 0.50
+        and fourh_imbalance <= 0.0
     )
 
 
@@ -1773,8 +1780,9 @@ def _trend_quality_short(market_state):
     fourh = market_state["four_hour"]
     metrics = _directional_trend_metrics(market_state, "short")
     atr_ratio = metrics["atr_ratio"]
-    intraday_adx_gate = max(p["intraday_adx_min"] * 1.12, 13.6)
-    hourly_adx_gate = max(p["hourly_adx_min"] * 1.12, p["hourly_adx_min"] + 1.5)
+    intraday_adx_gate = max(p["intraday_adx_min"] * 1.34, 16.8)
+    hourly_adx_gate = max(p["hourly_adx_min"] * 1.28, p["hourly_adx_min"] + 3.5)
+    fourh_adx_gate = max(p["fourh_adx_min"] * 1.24, p["fourh_adx_min"] + 2.4)
     histogram_pressure_floor = max(p["breakdown_hist_max"] * 0.044, 0.52)
 
     confirms = _count_true(
@@ -1790,14 +1798,14 @@ def _trend_quality_short(market_state):
     fourh_participation_ok = (
         metrics["fourh_spread"] >= max(metrics["hourly_spread"] * 0.74, atr_ratio * 0.78)
         and metrics["fourh_slope"] >= atr_ratio * 0.032
-        and fourh["adx"] >= max(p["fourh_adx_min"] - 0.2, 13.4)
+        and fourh["adx"] >= fourh_adx_gate
     )
     fresh_pressure_ok = (
         metrics["hourly_spread"] >= max(SIDEWAYS_MIN_HOURLY_SPREAD_PCT * 1.54, atr_ratio * 0.92)
         and metrics["fourh_spread"] >= max(SIDEWAYS_MIN_FOURH_SPREAD_PCT * 0.84, atr_ratio * 0.78)
         and metrics["hourly_slope"] >= atr_ratio * 0.088
         and metrics["fourh_slope"] >= atr_ratio * 0.036
-        and market_state["adx"] >= 15.2
+        and market_state["adx"] >= max(intraday_adx_gate - 0.6, 16.2)
     )
     macd_pressure_ok = (
         market_state["histogram"] <= -histogram_pressure_floor
@@ -1815,7 +1823,8 @@ def _trend_quality_short(market_state):
     return (
         confirms >= 4
         and macd_pressure_ok
-        and (fourh_participation_ok or fresh_pressure_ok or hourly["adx"] >= hourly_adx_gate)
+        and hourly["adx"] >= hourly_adx_gate
+        and (fourh_participation_ok or fresh_pressure_ok)
     )
 
 
@@ -2491,8 +2500,7 @@ def long_final_veto_clear(
 ):
     quality_relax_gate = 0.60
     fourh_quality_score = _fourh_trend_quality_long_score(market_state, params)
-    long_quality_score = 0.65 * float(_trend_quality_long(market_state)) + 0.35 * fourh_quality_score
-    high_quality_long = long_quality_score >= quality_relax_gate
+    high_quality_long = fourh_quality_score >= quality_relax_gate
     atr_ratio = context["atr_ratio"]
     rsi = market_state["rsi"]
     breakout_distance_pct = context["breakout_distance_pct"]
@@ -2902,8 +2910,6 @@ def _short_entry_path_key(context, market_state, params, require_breakdown_gate=
     if not short_impulse_rsi_ok:
         short_trend_path = False
         short_breakdown_path = False
-    if short_trend_path:
-        return "short_trend"
     if short_breakdown_path:
         return "short_breakdown"
     if short_bounce_fail_path:
@@ -2967,6 +2973,8 @@ def _long_entry_result(
 
 def _short_entry_result(context, market_state, params, short_path_key, *, as_decision):
     if not short_path_key:
+        return None
+    if short_path_key == "short_trend":
         return None
     if short_path_key == "short_trend" and not _flow_confirmation_ok(
         market_state,
@@ -3306,7 +3314,11 @@ def strategy_decision(data, idx, positions, market_state):
         return None
 
     short_decision = None
-    if not sideways_regime and _short_outer_context_safe(context, market_state, p):
+    if (
+        _short_entry_addition_available(positions)
+        and not sideways_regime
+        and _short_outer_context_safe(context, market_state, p)
+    ):
         _record_funnel_pass("short", "outer_context_pass")
         short_path_key = _short_entry_path_key(context, market_state, p, require_breakdown_gate=True)
         short_decision = _short_entry_result(
@@ -3428,7 +3440,11 @@ def strategy(data, idx, positions, market_state):
     if short_exit_active:
         return None
 
-    if not sideways_regime and _short_outer_context_safe(context, market_state, p):
+    if (
+        _short_entry_addition_available(positions)
+        and not sideways_regime
+        and _short_outer_context_safe(context, market_state, p)
+    ):
         _record_funnel_pass("short", "outer_context_pass")
         short_path_key = _short_entry_path_key(context, market_state, p, require_breakdown_gate=True)
         signal = _short_entry_result(

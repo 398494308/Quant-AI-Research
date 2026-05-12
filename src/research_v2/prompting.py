@@ -422,7 +422,7 @@ def build_strategy_research_prompt(
     reference_metrics: dict[str, Any] | None = None,
     benchmark_label: str = "champion",
     current_base_role: str = "champion",
-    score_regime: str = "trend_capture_v23_gap_aware_capture_core",
+    score_regime: str = "trend_capture_v24_multiplicative_capture_core",
     current_complexity_headroom_text: str = "",
     session_mode: str = "resume",
     operator_focus_text: str = "",
@@ -502,7 +502,8 @@ def build_strategy_research_prompt(
 - 围绕一个可证伪假设先写 round brief，交给后续 edit worker 落码。
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
 - 当前评分口径是 `{score_regime}`；候选必须先过 `gate`，且 `promotion_score` 严格高于当前 active reference，才有资格刷新 champion；当前不再要求额外晋级边际。
-- `promotion_score` 现在以 `adjusted_timed_return_score` 为唯一主收益项，权重约 `{promotion_timed_return_weight:.2f}`；`timed_return_score` 会按 `capture_core` 连续调整：`capture_core<=0.03` 时只释放低倍率，`0.12` 附近回到 1 倍，超过后继续加成但边际递减，避免低捕获策略只靠收益顶分。`capture_core` 同时看 train/val 和 bull/bear 是否偏科，偏科越大越靠弱项计分。再减去分段回撤惩罚、轻量鲁棒性软惩罚和 `trade_activity_penalty`。Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，开仓数/空窗/趋势机会覆盖惩罚权重约 `{promotion_trade_activity_penalty_weight:.2f}/{trade_idle_penalty_weight:.2f}/{trade_participation_penalty_weight:.2f}`。
+- `promotion_score` 现在以 `adjusted_timed_return_score` 为唯一主收益项，权重约 `{promotion_timed_return_weight:.2f}`；`timed_return_score` 会按 `capture_core` 连续调整：`capture_core<=0.03` 时只释放低倍率，`0.12` 附近回到 1 倍，超过后继续加成但边际递减，避免低捕获策略只靠收益顶分。`capture_core = period_capture * side_multiplier`：period 看 train/val 是否都抓到，side 只在 bull/bear 偏弱时打折，偏科越大越靠弱项计分。再减去分段回撤惩罚、轻量鲁棒性软惩罚和 `trade_activity_penalty`。Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，开仓数/空窗/趋势机会覆盖惩罚权重约 `{promotion_trade_activity_penalty_weight:.2f}/{trade_idle_penalty_weight:.2f}/{trade_participation_penalty_weight:.2f}`。
+- 参数改动有中等最小步长硬规则：`PARAMS`/`EXIT_PARAMS` 的数值键相对 active reference 改动太小会被拒收；bars/lookback/hold/period 类至少约 15% 且不少于 4 根，0~1 阈值至少 0.01 或 8%，小比例至少 10% 且不少于 0.002，其他百分比至少 8% 且不少于 2 点；`exit_range_scan` 也只扫满足该步长的候选点。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓不占这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - `capture_score` 只使用 clean trend segments：先用中度放开的趋势段候选，再过滤掉趋势效率或方向一致性不足的震荡段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
 - Fear & Greed 情绪数据已作为可选 `market_state` 输入暴露给策略，可读取 `sentiment`、`fear_greed_value`、`fear_greed_ema7`、`fear_greed_delta1/3/7`；它不进入评分或 gate，不是必须使用的信号。

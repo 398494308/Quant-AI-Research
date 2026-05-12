@@ -200,6 +200,19 @@ def _balanced_pair_score(
     return (1.0 - weak_weight) * average_score + weak_weight * weak_score, gap, weak_weight
 
 
+def _capture_side_multiplier(side_capture_score: float, scoring: ScoringConfig) -> float:
+    floor = _clamp(float(scoring.capture_side_multiplier_floor), 0.0, 1.0)
+    floor_score = float(scoring.capture_side_multiplier_floor_score)
+    neutral_score = max(floor_score + 1e-9, float(scoring.capture_side_multiplier_neutral_score))
+    side_score = float(side_capture_score)
+    if side_score <= floor_score:
+        return floor
+    if side_score >= neutral_score:
+        return 1.0
+    progress = _smoothstep((side_score - floor_score) / (neutral_score - floor_score))
+    return floor + (1.0 - floor) * progress
+
+
 def _capture_core_score(
     train_capture_score: float,
     validation_capture_score: float,
@@ -217,12 +230,12 @@ def _capture_core_score(
         bear_capture_score,
         scoring,
     )
-    period_weight = _clamp(float(scoring.capture_core_period_weight), 0.0, 1.0)
-    side_weight = 1.0 - period_weight
+    side_multiplier = _capture_side_multiplier(side_capture_score, scoring)
     return {
         "period_capture_score": period_capture_score,
         "side_capture_score": side_capture_score,
-        "capture_core_score": period_weight * period_capture_score + side_weight * side_capture_score,
+        "side_capture_multiplier": side_multiplier,
+        "capture_core_score": period_capture_score * side_multiplier,
         "train_validation_capture_gap": period_gap,
         "bull_bear_capture_gap": side_gap,
         "period_capture_weak_weight": period_weak_weight,

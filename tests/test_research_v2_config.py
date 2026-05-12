@@ -36,7 +36,9 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
                         "MACD_V2_CAPTURE_BALANCE_GAP_TOLERANCE=0.08",
                         "MACD_V2_CAPTURE_BALANCE_GAP_FULL=0.24",
                         "MACD_V2_CAPTURE_BALANCE_MAX_WEAK_WEIGHT=0.65",
-                        "MACD_V2_CAPTURE_CORE_PERIOD_WEIGHT=0.70",
+                        "MACD_V2_CAPTURE_SIDE_MULTIPLIER_FLOOR=0.35",
+                        "MACD_V2_CAPTURE_SIDE_MULTIPLIER_FLOOR_SCORE=0.02",
+                        "MACD_V2_CAPTURE_SIDE_MULTIPLIER_NEUTRAL_SCORE=0.10",
                         "MACD_V2_CAPTURE_RETURN_DISCOUNT_FLOOR=0.03",
                         "MACD_V2_CAPTURE_RETURN_NEUTRAL_SCORE=0.12",
                         "MACD_V2_CAPTURE_RETURN_MIN_MULTIPLIER=0.25",
@@ -92,7 +94,9 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
             self.assertAlmostEqual(runtime.scoring.capture_balance_gap_tolerance, 0.08)
             self.assertAlmostEqual(runtime.scoring.capture_balance_gap_full, 0.24)
             self.assertAlmostEqual(runtime.scoring.capture_balance_max_weak_weight, 0.65)
-            self.assertAlmostEqual(runtime.scoring.capture_core_period_weight, 0.70)
+            self.assertAlmostEqual(runtime.scoring.capture_side_multiplier_floor, 0.35)
+            self.assertAlmostEqual(runtime.scoring.capture_side_multiplier_floor_score, 0.02)
+            self.assertAlmostEqual(runtime.scoring.capture_side_multiplier_neutral_score, 0.10)
             self.assertAlmostEqual(runtime.scoring.capture_return_discount_floor, 0.03)
             self.assertAlmostEqual(runtime.scoring.capture_return_neutral_score, 0.12)
             self.assertAlmostEqual(runtime.scoring.capture_return_min_multiplier, 0.25)

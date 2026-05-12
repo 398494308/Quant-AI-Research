@@ -1273,7 +1273,7 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertLess(skewed_score, 0.16)
         self.assertGreater(skewed_score, 0.02)
 
-    def test_capture_core_score_combines_period_balance_and_side_balance(self):
+    def test_capture_core_score_uses_period_score_with_side_multiplier(self):
         scoring = ScoringConfig()
 
         payload = _capture_core_score(0.10, 0.14, 0.08, 0.20, scoring)
@@ -1282,9 +1282,18 @@ class EvaluationFixesTest(unittest.TestCase):
 
         self.assertAlmostEqual(payload["period_capture_score"], period_score)
         self.assertAlmostEqual(payload["side_capture_score"], side_score)
-        self.assertAlmostEqual(payload["capture_core_score"], 0.70 * period_score + 0.30 * side_score)
+        self.assertAlmostEqual(payload["side_capture_multiplier"], 1.0)
+        self.assertAlmostEqual(payload["capture_core_score"], period_score)
         self.assertAlmostEqual(payload["train_validation_capture_gap"], 0.04)
         self.assertAlmostEqual(payload["bull_bear_capture_gap"], 0.12)
+
+        weak_side_payload = _capture_core_score(0.10, 0.14, -0.10, 0.00, scoring)
+        weak_side_period_score, _, _ = _balanced_pair_score(0.10, 0.14, scoring)
+        self.assertAlmostEqual(weak_side_payload["side_capture_multiplier"], 0.35)
+        self.assertAlmostEqual(
+            weak_side_payload["capture_core_score"],
+            weak_side_period_score * 0.35,
+        )
 
     def test_capture_return_multiplier_is_smooth_then_diminishing(self):
         scoring = ScoringConfig()
@@ -2268,9 +2277,27 @@ def strategy(*args, **kwargs):
 
     def test_validate_strategy_source_allows_exit_param_change(self):
         base_source = self._minimal_validation_source()
-        source = base_source.replace("'tp1_pnl_pct': 65.7", "'tp1_pnl_pct': 70.0")
+        source = base_source.replace("'tp1_pnl_pct': 65.7", "'tp1_pnl_pct': 75.0")
 
         validate_strategy_source(source, base_source=base_source)
+
+    def test_validate_strategy_source_rejects_tiny_numeric_param_change(self):
+        base_source = self._minimal_validation_source()
+        source = base_source.replace(
+            "PARAMS = {'intraday_adx_min': 10}",
+            "PARAMS = {'intraday_adx_min': 11}",
+            1,
+        )
+
+        with self.assertRaisesRegex(StrategySourceError, "numeric change too small"):
+            validate_strategy_source(source, base_source=base_source)
+
+    def test_validate_strategy_source_rejects_tiny_numeric_exit_change(self):
+        base_source = self._minimal_validation_source()
+        source = base_source.replace("'tp1_pnl_pct': 65.7", "'tp1_pnl_pct': 67.0")
+
+        with self.assertRaisesRegex(StrategySourceError, "numeric change too small"):
+            validate_strategy_source(source, base_source=base_source)
 
     def test_validate_strategy_source_rejects_fixed_exit_param_change(self):
         base_source = self._minimal_validation_source()

@@ -128,7 +128,9 @@ def _load_scoring_config(windows: "WindowConfig") -> "ScoringConfig":
         capture_balance_gap_tolerance=_env_float("MACD_V2_CAPTURE_BALANCE_GAP_TOLERANCE", 0.08),
         capture_balance_gap_full=_env_float("MACD_V2_CAPTURE_BALANCE_GAP_FULL", 0.24),
         capture_balance_max_weak_weight=_env_float("MACD_V2_CAPTURE_BALANCE_MAX_WEAK_WEIGHT", 0.65),
-        capture_core_period_weight=_env_float("MACD_V2_CAPTURE_CORE_PERIOD_WEIGHT", 0.70),
+        capture_side_multiplier_floor=_env_float("MACD_V2_CAPTURE_SIDE_MULTIPLIER_FLOOR", 0.35),
+        capture_side_multiplier_floor_score=_env_float("MACD_V2_CAPTURE_SIDE_MULTIPLIER_FLOOR_SCORE", 0.02),
+        capture_side_multiplier_neutral_score=_env_float("MACD_V2_CAPTURE_SIDE_MULTIPLIER_NEUTRAL_SCORE", 0.10),
         capture_return_discount_floor=_env_float("MACD_V2_CAPTURE_RETURN_DISCOUNT_FLOOR", 0.03),
         capture_return_neutral_score=_env_float_any(
             (
@@ -241,7 +243,9 @@ class ScoringConfig:
     capture_balance_gap_tolerance: float = 0.08
     capture_balance_gap_full: float = 0.24
     capture_balance_max_weak_weight: float = 0.65
-    capture_core_period_weight: float = 0.70
+    capture_side_multiplier_floor: float = 0.35
+    capture_side_multiplier_floor_score: float = 0.02
+    capture_side_multiplier_neutral_score: float = 0.10
     capture_return_discount_floor: float = 0.03
     capture_return_neutral_score: float = 0.12
     capture_return_min_multiplier: float = 0.25

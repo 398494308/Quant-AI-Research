@@ -225,6 +225,7 @@ def persist_round_artifact(
             "capture_score",
             "period_capture_score",
             "side_capture_score",
+            "side_capture_multiplier",
             "capture_core_score",
             "train_validation_capture_gap",
             "bull_bear_capture_gap",

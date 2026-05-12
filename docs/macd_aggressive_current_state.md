@@ -4,7 +4,7 @@
 
 ## 当前快照
 
-`2026-05-11 10:36:16`（Asia/Shanghai）已切到 `v23` 评分，并用手工降温后的合法基底重建 champion、重置 stage/session。新评分不再让旧 `capture_score` 直接调节收益，而是用 `capture_core` 同时约束 train/val 平衡和 bull/bear 平衡；低捕获或偏科策略会明显折扣正收益项。
+`2026-05-12 09:43:57`（Asia/Shanghai）已切到 `v24` 评分，并用历史第 30 轮 `planner_040` 的很差但 gate 通过版本重建 champion、重置 stage/session。这个基底的目标不是直接可用，而是给研究器留出明显增长空间，避免继续围绕旧高收益局部平台微调。
 
 当前策略源码位置：
 
@@ -15,43 +15,41 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 研究器 | v23 基底已重建，stage/session 已重置并启动 |
+| 研究器 | v24 基底已重建，stage/session 已重置 |
 | active reference | champion |
-| reference hash | `d0cf39bad76e5b52e18aef4c51a81f3dfedd85b03e47e2a99d98ab919e49fa47` |
-| score regime | `trend_capture_v23_gap_aware_capture_core` |
-| state 写回 | 已按当前源码重算并写回；stage iteration 已重置为 0 |
+| reference hash | `bc1b2137aba6bb103357ac12394825cc1739b6e4f8c96c2e5831c32192468e6f` |
+| 来源 | 历史第 30 轮 `planner_040` |
+| score regime | `trend_capture_v24_multiplicative_capture_core` |
 | gate | 通过 |
-| quality_score | 0.0387 |
-| promotion_score | 0.1520 |
-| capture_score / capture_core_score | 0.1080 / 0.0657 |
-| period_capture_score / side_capture_score | 0.0943 / -0.0011 |
-| timed_return_score / adjusted_timed_return_score | 1.8435 / 0.9409 |
-| capture_return_multiplier | 0.5104 |
-| drawdown_penalty_score / robustness_penalty_score / trade_activity_penalty | 0.1831 / 0.0000 / 0.1354 |
-| train/val clean 抓取分 | 0.0387 / 0.1773 |
-| train/val capture gap | 0.1386 |
-| bull/bear capture gap | 0.2597 |
+| quality_score | -0.0424 |
+| promotion_score | -0.3267 |
+| capture_score / capture_core_score | 0.0374 / 0.0056 |
+| period_capture_score / side_capture_score / side_multiplier | 0.0116 / 0.0430 / 0.4803 |
+| timed_return_score / adjusted_timed_return_score | 0.2515 / 0.0629 |
+| capture_return_multiplier | 0.2500 |
+| drawdown_penalty_score / robustness_penalty_score / trade_activity_penalty | 0.2003 / 0.0000 / 0.1578 |
+| train/val clean 抓取分 | -0.0424 / 0.1173 |
+| train/val capture gap | 0.1597 |
+| bull/bear capture gap | 0.0225 |
 | train clean 趋势段 | 67 段，多 36 / 空 31 |
 | val clean 趋势段 | 50 段，多 28 / 空 22 |
-| selection 多/空捕获 | 0.2132 / -0.0466 |
-| train+val 期间收益 | 1520.45% |
-| val 期间收益 | 202.25% |
-| train/val 非加仓开仓 | 332 / 266 |
-| train/val 月非加仓开仓 | 约 18.4 / 22.2 |
-| Sharpe(val / train+val) | 1.91 / 2.09 |
-| test capture / return / 平仓 | -0.1057 / -23.87% / 43 |
-| val 12 月覆盖 | 已覆盖到 2025-12-22 |
-| 策略复杂度 | `warning_2`；`sideways_family` 剩余 lines 5，`short_path_chain` 剩余 lines 2 |
+| selection 多/空捕获 | 0.0543 / 0.0317 |
+| train+val 期间收益 | 54.06% |
+| val 期间收益 | 18.90% |
+| train/val 非加仓开仓 | 336 / 268 |
+| train/val 月非加仓开仓 | 约 18.6 / 22.3 |
+| Sharpe(train / val / train+val) | 0.59 / 0.58 / 0.58 |
+| test capture / return / 平仓 | -0.0430 / -13.25% / 44 |
+| 策略复杂度 | `hard_cap` 诊断态；复杂度只提示，不做自动拒收 |
 
 说明：
 
-- v23 沿用 v20/v21 的 clean trend capture 数据源，但主评分只吃 capture_core-adjusted return：低捕获或偏科策略不能再只靠高收益顶分。
-- 研究器不会在策略修改轮次里改这套切段规则；后续候选都按当前代码里的固定规则评估。
-- 当前 champion 在 v23 下的 `promotion_score` 为 `0.1520`；主要原因是 `capture_core=0.0657` 只能释放约 `51.0%` 的正收益补分。后续研究应优先寻找 capture_core 的结构性提升，尤其是弱侧 bear 和 train/val 平衡。
-- 本次基底只做合法降温：`max_concurrent_positions=4`、`position_fraction=0.10`、`LONG_PYRAMID_MAX_ADDS=1`；`pyramid_max_times=2` 和 `pyramid_size_ratio=0.28` 仍由校验固定。
-- 该基底不是好策略：`test` 仍明显失败，特别是 test capture 为负。`test` 是人工盲测观察，不进入 prompt、方向卡、评分或晋升；planner / reviewer 也不接收 demo 可用性判断。
+- v24 的主变化是 `capture_core` 改为乘法结构：train/val 平衡是主体，多空偏科只作为乘数打折。
+- 当前 champion 分数很低，`capture_core=0.0056`，正收益补充分只释放 `25%`。研究器应优先找到连续 train/val 趋势捕获的结构性提升。
+- 当前基底交易量充足，不需要再把第一优先级放在“补交易量”；核心短板是 train 捕获为负、整体 capture 很低。
+- `test` 是人工盲测观察，不进入 prompt、方向卡、评分或晋升；planner / reviewer 也不接收 demo 可用性判断。
 - Funding 覆盖仍为 `0%`，这是数据源缺口；后续是否进入 demo run 由人工单独决定，不作为研究器优化目标。
-- Fear & Greed 情绪数据现在作为可选 `market_state` 输入暴露给策略；它不进入评分、gate 或强制优化目标。
+- Fear & Greed 情绪数据作为可选 `market_state` 输入暴露给策略；它不进入评分、gate 或强制优化目标。
 
 ## 数据与窗口
 
@@ -66,9 +64,9 @@
 - `train` 滚动窗口：`28` 天，步长 `21` 天
 - `val` 分块：`4` 个连续时间块
 
-## v23 Capture 切段与收益合成
+## v24 Capture 与收益合成
 
-趋势候选段只从已有 4h 趋势路径里切，不新增回测。
+趋势候选段只从已有 4h 趋势路径里切，不新增回测。切段规则固定，研究器不会在普通策略修改轮次里改这套 capture 数据源。
 
 候选趋势阈值：
 
@@ -77,30 +75,14 @@
 - 反转确认：`max(1.8%, 1.5 * ATR ratio)`
 - 最短段长：`3` 根 4h K 线
 
-候选段还必须通过两个 clean 过滤：
-
-`trend_efficiency = abs(log(end_price / start_price)) / sum(abs(4h_log_return))`
-
-`directional_bar_ratio = 顺趋势方向的非零 4h K 线数 / 非零 4h K 线总数`
-
-当前阈值：
+clean 过滤：
 
 - `trend_efficiency >= 0.30`
 - `directional_bar_ratio >= 0.60`
 
-这两个指标都只复用已有价格路径。前者过滤来回震荡但首尾有位移的段，后者过滤多数 K 线逆着趋势方向走的段。
-
-## 评分公式
-
 原始单段分数：
 
 `period_score = 0.70 * trend_capture_score + 0.30 * return_score`
-
-单段捕获比：
-
-`capture_ratio = clamp(strategy_return / abs(market_return), -1.0, 3.0)`
-
-这里 `strategy_return` 是账户收益方向，bull 和 bear 都必须账户赚钱才是正捕获；`direction` 只用于分段归类，不反转收益符号。
 
 连续趋势抓取主分：
 
@@ -110,53 +92,38 @@
 
 `capture_score = 0.50 * train_capture_score + 0.50 * val_capture_score`
 
-主评分使用连续 `train / val` 数据源：`train` 从已有 `train+val` 连续回测按 `val` 起点切出，`val` 使用连续 validation 结果。`train` walk-forward 仍保留用于窗口诊断、鲁棒性和早停。
-
-人工盲测观察也使用同一混合口径，但该结果不回喂模型：
-
-`test_trend_capture_score = 0.50 * test_equal_capture_score + 0.50 * test_weighted_capture_score`
-
-收益补充分：
-
-`timed_return_score = 0.50 * train_timed_return_score + 0.50 * val_timed_return_score`
-
 `capture_core`：
 
 `period_capture_score = balance(train_capture_score, val_capture_score)`
 
 `side_capture_score = balance(selection_bull_capture_score, selection_bear_capture_score)`
 
-`capture_core = 0.70 * period_capture_score + 0.30 * side_capture_score`
+```text
+side_multiplier =
+  0.35                                      if side_capture_score <= 0.02
+  0.35 + 0.65 * smoothstep((side - 0.02) / 0.08)  if 0.02 < side_capture_score < 0.10
+  1.00                                      if side_capture_score >= 0.10
+```
+
+`capture_core = period_capture_score * side_multiplier`
 
 `balance(left, right)` 在差距 `<=0.08` 时近似取平均；差距从 `0.08` 到 `0.24` 之间平滑转向弱项；差距 `>=0.24` 时弱项权重达到 `0.65`。
 
 收益补充分会按 `capture_core` 连续调整：
 
-当 `capture_core <= 0.03`：
-
-`capture_return_multiplier = 0.25`
-
-当 `0.03 < capture_core <= 0.12`：
-
-`capture_return_multiplier = 0.25 + 0.75 * smoothstep((capture_core - 0.03) / 0.09)`
-
-当 `capture_core > 0.12`：
-
-`capture_return_multiplier = 1.00 + 0.45 * (1.00 - exp(-(capture_core - 0.12) / 0.20))`
+- `capture_core <= 0.03`：`capture_return_multiplier = 0.25`
+- `0.03 < capture_core <= 0.12`：`0.25 + 0.75 * smoothstep((capture_core - 0.03) / 0.09)`
+- `capture_core > 0.12`：`1.00 + 0.45 * (1.00 - exp(-(capture_core - 0.12) / 0.20))`
 
 `adjusted_timed_return_score = timed_return_score * capture_return_multiplier`（仅当 `timed_return_score >= 0`）
 
-含义：
-
-- `capture_core <= 0.03`：正收益补充分只算 `25%`
-- `capture_core = 0.12`：收益不打折也不加成
-- `capture_core > 0.12`：继续加成，但边际收益递减
-- `capture_core` 越高仍然越好，不存在单个“满倍率封顶点”
-- 如果 `timed_return_score < 0`，不做倍率折扣，亏损按原值进入评分，避免低 capture 把负收益“折轻”
+`timed_return_score < 0` 时不打折，亏损按原值进入评分，避免低 capture 把负收益“折轻”。
 
 Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数值，供人工筛选和复核使用。
 
-交易活跃度惩罚：
+## 交易活跃度
+
+交易数使用非加仓开仓数，不使用平仓数。加仓只改变已有 position 的规模，不计入活跃度，也不占用 `max_concurrent_positions`。
 
 `train_trade_activity_shortfall = clamp(max(180 - train_entry_trades, 0) / 180, 0.0, 1.0)`
 
@@ -164,33 +131,25 @@ Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数
 
 `trade_count_penalty = 0.15 * (0.50 * train_trade_activity_shortfall + 0.50 * val_trade_activity_shortfall)`
 
-`trade_idle_penalty = 0.10 * (0.50 * train_idle_shortfall + 0.50 * val_idle_shortfall)`
+最长无新开仓上限约 `7` 天；趋势机会覆盖惩罚复用已有 clean trend 段命中率。三项活跃度惩罚合计上限为 `0.35`。
 
-趋势机会覆盖惩罚复用已有 clean trend 段命中率：
-
-`train_participation_shortfall = clamp((0.22 - train_segment_hit_rate) / 0.10, 0.0, 1.0)`
-
-`val_participation_shortfall = clamp((0.25 - validation_segment_hit_rate) / 0.10, 0.0, 1.0)`
-
-`trend_participation_penalty = 0.10 * (0.50 * train_participation_shortfall + 0.50 * val_participation_shortfall)`
-
-`trade_activity_penalty = min(0.35, trade_count_penalty + trade_idle_penalty + trend_participation_penalty)`
-
-交易数使用非加仓开仓数，不使用平仓数；加仓只改变已有 position 的规模，不计入活跃度，也不占用 `max_concurrent_positions`。
-
-回撤惩罚：
-
-`drawdown_risk_score = 0.50 * train_drawdown_risk_score + 0.50 * val_drawdown_risk_score`
-
-`drawdown_penalty_score = 0.20 * drawdown_risk_score + 1.00 * max(drawdown_risk_score - 1.25, 0.0)`
-
-`drawdown_risk_score` 复用已有日收益路径，按固定窗口计算 Ulcer 风格回撤深度和持续时间，不新增回测。
-
-晋级分：
+## 晋级分
 
 `promotion_score = 0.50 * adjusted_timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
 
 候选必须先过 `gate`，并且 `promotion_score` 严格高于当前 active reference，才有资格刷新 champion。
+
+## 最小改动硬规则
+
+为避免研究器在同一局部平台做近邻微调，候选相对 active reference 的 `PARAMS` / `EXIT_PARAMS` 数值改动必须达到中等步长：
+
+- bars / lookback / hold / period 类整数参数：至少约 `15%`，且不少于 `4` 根。
+- 0 到 1 的 ratio / fraction / confirmation 类阈值：至少 `0.01` 或 `8%`，取较大者。
+- 小比例参数：至少 `10%`，且不少于 `0.002`。
+- 其他百分比参数：至少 `8%`，且不少于 `2` 个绝对点。
+- `exit_range_scan` 的显式值和自动值也必须满足同一最小步长。
+
+这不是 soft constraint；低于最小步长会直接技术拒收。
 
 ## 鲁棒性软惩罚
 
@@ -200,90 +159,4 @@ Sharpe 不进入主评分，只保留原始 `train / val / train+val / test` 数
 - `validation_block_scores`：现有 val 分块 `period_score`
 - `train_ulcer_pct / validation_ulcer_pct`：现有固定窗口回撤风险里的 blended Ulcer
 
-当前计算：
-
-1. 取 `train_window_scores` 的 `median`、`IQR`、`std`。
-2. `IQR` 最小按 `0.10` 处理，避免 train 分布过窄导致过度敏感。
-3. 取 `validation_block_scores` 的 `median`、`std`。
-4. `center_gap_units = abs(val_median - train_median) / train_iqr`
-5. `spread_ratio = max(train_std, val_std, 0.10) / min(max(train_std, 0.10), max(val_std, 0.10))`
-6. `envelope_overflow_units`：把 `train_median ± 4 * train_iqr` 当宽包络，只看 val 分块跑出包络多少个 IQR。
-7. `ulcer_ratio = max(train_ulcer + 1, val_ulcer + 1) / min(train_ulcer + 1, val_ulcer + 1)`
-
-惩罚上限：
-
-- 总上限：`0.15`
-- 中位偏离：`2 / 4 / 8` 个 IQR 开始、加重、封顶，组件最多 `0.05`
-- 波动比例：`3 / 6 / 10` 倍开始、加重、封顶，组件最多 `0.03`
-- 包络溢出：超过宽包络后按 `2 / 5` 个 IQR 加重、封顶，组件最多 `0.03`
-- Ulcer 比：`3 / 6 / 10` 倍开始、加重、封顶，组件最多 `0.04`
-
-这个设计刻意很宽：`train` 和 `val` 都可能包含不同行情，不要求两侧谁更好，只在差异非常离谱时软降权。
-
-## 当前 Gate
-
-当前真正参与 gate 的条件：
-
-- `val` 命中率至少 `0.20`
-- `val` 趋势捕获分至少 `0.05`
-- `train / val` 连续趋势抓取分差不超过 `0.30`
-- `val` 多头捕获至少 `0.00`
-- `val` 空头捕获至少 `0.00`
-- 平均手续费拖累不超过 `11.5%`
-- `val` 最差分块至少 `-0.10`
-- `val` 负分块最多 `3`
-- `train+val` 严重集中度过拟合直接 veto
-
-`train` rolling 均值和中位数只做诊断，不做硬 gate。收益率已经在 `timed_return_score` 中计分，不再在 gate 里重复强约束。
-
-## 多空并行与仓位
-
-- 当前基底 `max_concurrent_positions = 4`，统计独立 position；研究器仍可在允许范围内探索这个参数。
-- 加仓不新增独立 position，只改变已有 position 的规模。
-- 多空可以在总仓位上限内并行存在。
-- 现有空仓不会阻止新的多头信号；现有多仓也不会阻止新的空头信号。
-- 混合持仓时，信号层按方向扫描所有 position，不再只看 `positions[0]`。
-
-## 研究器流程
-
-当前链路：
-
-1. `planner` 持久 session 写 draft brief。
-2. `reviewer` fresh session 审稿，只输出 `PASS / REVISE`。
-3. `edit_worker` 只改 [src/strategy_macd_aggressive.py](../src/strategy_macd_aggressive.py)。
-4. 主进程检查 diff、smoke、behavioral noop。
-5. 可选 `exit_range_scan`：仅单个 `EXIT_PARAMS` 数值键，最多 3 点轻量预筛。
-6. 主进程跑完整 `train walk-forward + val`。
-7. gate 通过且 `promotion_score` 严格高于当前 active reference，才能刷新 champion。
-8. 新 champion 同步跑 `test`；图表优先复用刚完成评估里的 `validation` 与 `train+val` 结果，不重复回测；随后 Discord 和 `champion_history` 归档，然后重置 stage/session。
-9. 人工 `--reset-champion --no-optimize` 重建基底时，也会重算当前源码自己的 `test` 指标，避免沿用旧 champion 的观察值。
-
-评分阶段只使用已有 `train/val` 评估结果和轻量 `exit_range_scan` 预筛结果。
-
-## 运行与状态
-
-查看状态：
-
-```bash
-bash scripts/manage_research_macd_aggressive_v2.sh status
-```
-
-停止研究器：
-
-```bash
-bash scripts/manage_research_macd_aggressive_v2.sh stop
-```
-
-重开 stage/session：
-
-```bash
-bash scripts/reset_research_macd_aggressive_v2_stage.sh
-```
-
-启动研究器：
-
-```bash
-bash scripts/manage_research_macd_aggressive_v2.sh start
-```
-
-当前运行状态以 [state/research_macd_aggressive_v2_heartbeat.json](../state/research_macd_aggressive_v2_heartbeat.json) 和管理脚本输出为准。
+当前总上限为 `0.15`。它只用来识别 train/val 分布差异是否离谱，不能压过主评分。

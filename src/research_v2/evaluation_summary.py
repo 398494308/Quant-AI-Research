@@ -395,6 +395,7 @@ def summarize_evaluation_impl(
             "capture balance(period/side): "
             f"period={capture_core_payload['period_capture_score']:.2f}, "
             f"side={capture_core_payload['side_capture_score']:.2f}, "
+            f"side_mult={capture_core_payload['side_capture_multiplier']:.2f}, "
             f"gap={capture_core_payload['train_validation_capture_gap']:.2f}/"
             f"{capture_core_payload['bull_bear_capture_gap']:.2f}, "
             f"weak={weak_period_label}/{weak_side_label}, "
@@ -582,6 +583,7 @@ def summarize_evaluation_impl(
         (
             f"- capture balance: period_capture={capture_core_payload['period_capture_score']:.2f}，"
             f"side_capture={capture_core_payload['side_capture_score']:.2f}，"
+            f"side_multiplier={capture_core_payload['side_capture_multiplier']:.2f}，"
             f"capture_core={capture_core_score:.2f}，"
             f"train/val gap={capture_core_payload['train_validation_capture_gap']:.2f}"
             f"({period_balance_warning}, weak={weak_period_label}, weak_weight="
@@ -711,6 +713,7 @@ def summarize_evaluation_impl(
         "capture_score": capture_score,
         "period_capture_score": capture_core_payload["period_capture_score"],
         "side_capture_score": capture_core_payload["side_capture_score"],
+        "side_capture_multiplier": capture_core_payload["side_capture_multiplier"],
         "capture_core_score": capture_core_score,
         "train_validation_capture_gap": capture_core_payload["train_validation_capture_gap"],
         "bull_bear_capture_gap": capture_core_payload["bull_bear_capture_gap"],

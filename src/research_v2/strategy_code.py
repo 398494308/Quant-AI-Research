@@ -117,6 +117,64 @@ PARAM_RELATIONS: tuple[tuple[str, str, str], ...] = (
     ("macd_fast", "<", "macd_slow"),
 )
 
+MIN_CHANGE_INTEGER_KEY_TOKENS = (
+    "bars",
+    "lookback",
+    "period",
+    "ema_",
+    "macd_",
+    "confirm_bars",
+)
+MIN_CHANGE_UNIT_INTERVAL_TOKENS = (
+    "fraction",
+    "ratio",
+    "imbalance",
+    "confirmation",
+    "close_pos",
+    "body_ratio",
+)
+
+
+def _is_numeric_param_value(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_integer_step_key(key: str, base_value: float | int, candidate_value: float | int | None = None) -> bool:
+    key_lower = key.lower()
+    if any(token in key_lower for token in MIN_CHANGE_INTEGER_KEY_TOKENS):
+        return True
+    if isinstance(base_value, int) and (candidate_value is None or isinstance(candidate_value, int)):
+        return True
+    return False
+
+
+def _is_unit_interval_key(key: str, base_value: float | int, candidate_value: float | int | None = None) -> bool:
+    key_lower = key.lower()
+    if not any(token in key_lower for token in MIN_CHANGE_UNIT_INTERVAL_TOKENS):
+        return False
+    values = [float(base_value)]
+    if candidate_value is not None:
+        values.append(float(candidate_value))
+    return max(abs(value) for value in values) <= 1.5
+
+
+def minimum_numeric_change_delta(
+    key: str,
+    base_value: float | int,
+    candidate_value: float | int | None = None,
+) -> float:
+    """返回研究器允许的最小数值步幅。"""
+    base_abs = abs(float(base_value))
+    if _is_integer_step_key(key, base_value, candidate_value):
+        return max(4.0, base_abs * 0.15)
+    if _is_unit_interval_key(key, base_value, candidate_value):
+        return max(0.01, base_abs * 0.08)
+    max_abs = max(base_abs, abs(float(candidate_value)) if candidate_value is not None else base_abs)
+    if max_abs <= 2.0:
+        return max(0.002, base_abs * 0.10)
+    return max(2.0, base_abs * 0.08)
+
+
 STRUCTURAL_LITERAL_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,}")
 REQUIRED_FUNCTIONS: tuple[str, ...] = (
     "_sideways_release_flags",
@@ -1123,6 +1181,61 @@ def validate_editable_region_boundaries(
     return None
 
 
+def _minimum_numeric_change_violations(
+    base_params: dict[str, object],
+    candidate_params: dict[str, object],
+    *,
+    section: str,
+    skip_keys: set[str] | frozenset[str] = frozenset(),
+) -> list[str]:
+    violations: list[str] = []
+    for key in sorted(set(base_params) & set(candidate_params)):
+        if key in skip_keys:
+            continue
+        base_value = base_params[key]
+        candidate_value = candidate_params[key]
+        if not _is_numeric_param_value(base_value) or not _is_numeric_param_value(candidate_value):
+            continue
+        delta = abs(float(candidate_value) - float(base_value))
+        if delta <= 1e-12:
+            continue
+        minimum_delta = minimum_numeric_change_delta(key, base_value, candidate_value)
+        if delta + 1e-12 < minimum_delta:
+            violations.append(
+                f"{section}.{key}: {base_value}->{candidate_value} delta={delta:.6g} min={minimum_delta:.6g}"
+            )
+    return violations
+
+
+def _validate_minimum_numeric_changes(
+    normalized: str,
+    *,
+    base_source: str,
+    params: dict[str, object],
+    source_has_exit_params: bool,
+) -> None:
+    base_normalized = normalize_strategy_source(base_source)
+    base_params = extract_params(base_normalized)
+    violations = _minimum_numeric_change_violations(base_params, params, section="PARAMS")
+    base_has_exit_params = EXIT_PARAM_BLOCK_PATTERN.search(base_normalized) is not None
+    if base_has_exit_params and source_has_exit_params:
+        base_exit_params = extract_exit_params(base_normalized)
+        candidate_exit_params = extract_exit_params(normalized)
+        violations.extend(
+            _minimum_numeric_change_violations(
+                base_exit_params,
+                candidate_exit_params,
+                section="EXIT_PARAMS",
+                skip_keys=frozenset(FIXED_EXIT_PARAM_VALUES),
+            )
+        )
+    if violations:
+        raise StrategySourceError(
+            "numeric change too small; use a larger minimum step: "
+            + "; ".join(violations[:8])
+        )
+
+
 def validate_strategy_source(
     source: str,
     *,
@@ -1214,6 +1327,14 @@ def validate_strategy_source(
                 continue
             if actual_value != expected_value:
                 raise StrategySourceError(f"fixed EXIT_PARAMS key {key} must remain {expected_value}")
+
+    if base_source is not None:
+        _validate_minimum_numeric_changes(
+            normalized,
+            base_source=base_source,
+            params=params,
+            source_has_exit_params=source_has_exit_params,
+        )
 
     _validate_source_shape_policy(
         normalized,

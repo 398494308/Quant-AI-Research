@@ -55,14 +55,16 @@ flowchart TB
 - 标的：`BTC-USDT-SWAP`，策略按 `20x` 合约研究。
 - 事实层：`15m`；`1h / 4h` 由 `15m` 聚合，只做确认层。
 - 执行层：优先使用 `1m` 回测成交。
-- 评分口径：`trend_capture_v23_gap_aware_capture_core`。
+- 评分口径：`trend_capture_v24_multiplicative_capture_core`。
 - `train`：`2023-07-01` 到 `2024-12-31`。
 - `val`：`2025-01-01` 到 `2025-12-31`。
 - `test`：`2026-01-01` 到 `2026-04-30`。
 - 晋升条件：候选先过 `gate`；已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference。当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则。
 - `promotion_score = 0.50 * adjusted_timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`；`adjusted_timed_return_score` 会按 `capture_core` 连续调整，`capture_core<=0.03` 时低倍率，`0.12` 附近回到 1 倍，超过后继续加成但边际递减。低捕获或偏科策略不能只靠收益顶分。
 - 主评分使用连续 `train / val` 数据源；`train` 从已有 `train+val` 连续回测按 `val` 起点切出，walk-forward 继续用于诊断、鲁棒性和早停。
-- `capture_score` 使用固定的 clean trend segments：先用中度放开的阈值找候选趋势段，再用趋势效率和方向一致性过滤震荡段；最终仍按“段等权均分 50% + 原权重均分 50%”混合，减少少数最大趋势段的主导；bull 和 bear 都只奖励账户正收益。`capture_core` 在此基础上加入 train/val 与 bull/bear 平衡，差距越大越靠弱项计分。
+- `capture_score` 使用固定的 clean trend segments：先用中度放开的阈值找候选趋势段，再用趋势效率和方向一致性过滤震荡段；最终仍按“段等权均分 50% + 原权重均分 50%”混合，减少少数最大趋势段的主导；bull 和 bear 都只奖励账户正收益。
+- `capture_core = period_capture * side_multiplier`：`period_capture` 是 train/val 平衡分；`side_multiplier` 由 bull/bear 平衡分决定，`side<=0.02` 时为 `0.35`，`0.02~0.10` 平滑升到 `1.00`，`side>=0.10` 后不再打折。
+- `PARAMS` / `EXIT_PARAMS` 数值改动有最小步长硬规则；bars/lookback/hold/period 类至少约 `15%` 且不少于 `4` 根，0 到 1 阈值至少 `0.01` 或 `8%`，小比例至少 `10%` 且不少于 `0.002`，其他百分比至少 `8%` 且不少于 `2` 点。`exit_range_scan` 的扫描点也必须满足同一规则。
 - 当前策略源码已做等价压缩，复杂度诊断从 `hard_cap` 降到 `warning_2`；复杂度仍只做人工诊断，不作为自动 gate。
 - Fear & Greed 情绪数据只作为策略可选输入暴露在 `market_state`，不进入评分、gate 或强制优化目标。
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标。
@@ -82,7 +84,7 @@ flowchart TB
 6. 若 `PASS`，`edit_worker` 把方向落到策略源码。
 7. 若出现 no-edit、语法错误、缺 helper、校验失败等技术问题，`repair_worker` 只修技术错误。
 8. 主进程检查真实 diff、重复源码、smoke 行为和关键漏斗变化。
-9. 如果 brief 指定单个连续型 `EXIT_PARAMS` 的 `exit_range_scan`，主进程最多扫 3 个值，只做轻量预筛。
+9. 如果 brief 指定单个连续型 `EXIT_PARAMS` 的 `exit_range_scan`，主进程最多扫 3 个值，只做轻量预筛；扫描点必须满足最小步长规则。
 10. 主进程跑完整 `train walk-forward + val`；评分阶段只使用已有评估结果和轻量预筛结果。
 11. 主进程执行 gate 与 promotion 判断。
 12. `summary_worker` 按最终真实 diff 回写候选摘要。

@@ -4,30 +4,31 @@
 
 ## 优先方向
 
-- 当前阶段优先研究 `train/val` 稳定性，先找连续 `train/val` 趋势捕获、收益、回撤和交易参与度更均衡的平台；Sharpe 只作人工复核，不是主评分目标。
-- 当前评分口径是 `trend_capture_v23_gap_aware_capture_core`。`capture_core` 由 train/val 平衡分和 bull/bear 平衡分组成；差距不大时近似看平均，偏科明显时更靠弱项计分。
-- 收益补充分不再按旧 `capture_score` 调整，而是按 `capture_core` 连续调整：`0.03` 以下低倍率，`0.12` 附近回到 1 倍，超过后继续加成但边际递减。低捕获或偏科策略不能再只靠高收益刷新 champion。
-- 当前 active reference 是手工降温后的合法基底 hash `d0cf39bad76e5b52e18aef4c51a81f3dfedd85b03e47e2a99d98ab919e49fa47`。它在 v23 下 `promotion_score` 约 `0.1520`，`capture_core` 约 `0.0657`，`capture_return_multiplier` 约 `0.5104`，train/val 月开仓约 `18.4/22.2`；下一阶段优先找 capture_core 的真实突破，尤其是弱侧 bear 和 train/val 平衡。
-- 当前基底只做合法降温：`max_concurrent_positions=4`、`position_fraction=0.10`、`LONG_PYRAMID_MAX_ADDS=1`；`pyramid_max_times=2` 和 `pyramid_size_ratio=0.28` 仍是固定校验项，不要改。
-- 策略脚本已做等价压缩，复杂度从 `hard_cap` 降到 `warning_2`；后续仍要优先改旧逻辑、复用现有 helper，不要再堆大块条件。
-- 在保持 gate 通过、手续费拖累不过度恶化的前提下，优先缩小 `train/val` 落差，优先提高较弱一侧，而不是继续抬高已经偏强的一侧。
-- 若要提高交易次数，优先提高真实成交覆盖度：优先看 `path`、`final_veto`、`filled_entries`、有效再入场、加仓触发，而不是只靠延长持仓或放松止盈来抬收益。
-- 若要提高交易活跃度，默认参考区间是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天；趋势段命中率不足也会轻扣。应通过新增独立有效趋势机会去靠近，而不是靠无条件放松 gate 或单纯拉长持仓时间。
-- 优先选择能新增“独立有效机会”且不明显破坏 `train/val` 平衡的方案，而不是在同一条旧路径上继续做近邻阈值拨动。
-- `long`、`short`、`mixed` 都可以研究；默认优先修当前更弱的一侧，而不是继续强化已经偏强的一侧。
+- 当前评分口径是 `trend_capture_v24_multiplicative_capture_core`。
+- 当前 active reference 是历史第 30 轮 `planner_040` 重建出来的低分 champion，hash `bc1b2137aba6bb103357ac12394825cc1739b6e4f8c96c2e5831c32192468e6f`。
+- 当前基底 gate 通过，但分数很低：`promotion_score=-0.3267`，`capture_score=0.0374`，`capture_core=0.0056`，`capture_return_multiplier=0.25`。
+- 当前交易量已经足够：train/val 非加仓开仓约 `336/268`，月频约 `18.6/22.3`。不要把主要预算浪费在刷交易量。
+- 当前核心短板是趋势捕获质量：train capture 为负，val capture 也不高；多空侧相对均衡但都弱。优先找能同时提高 train/val 连续趋势捕获的结构性规则。
+- `capture_core = period_capture * side_multiplier`：period 看 train/val 是否都抓到，side 只在 bull/bear 偏弱时打折。不能只靠收益或单边强项刷新 champion。
+- 收益补充分按 `capture_core` 连续调整：`0.03` 以下只释放 `25%`，`0.12` 附近回到 `1` 倍，超过后继续加成但边际递减。
+- 数值参数有最小步长硬规则：`PARAMS` / `EXIT_PARAMS` 相对 active reference 改动太小会被拒收；bars/lookback/hold/period 类至少约 `15%` 且不少于 `4` 根，0 到 1 阈值至少 `0.01` 或 `8%`，小比例至少 `10%` 且不少于 `0.002`，其他百分比至少 `8%` 且不少于 `2` 点。
+- `exit_range_scan` 只用于单个连续型 `EXIT_PARAMS` 的轻量预筛，扫描点也必须满足同一最小步长。
+- Fear & Greed 情绪可作为策略输入，但只应作为环境过滤或确认信号；不要为了情绪字段本身堆规则。
+- 策略复杂度当前是 `hard_cap` 诊断态；复杂度只提示，不自动拒收。后续应优先改旧逻辑、删旧条件、复用现有 helper，避免继续堆大块条件。
 
 ## 降权方向
 
-- 降权继续把主要研究预算放在 `EXIT_PARAMS`、trailing、profit protect、holding time 这类纯退出微调上；只有真实诊断明确说明主堵点在退出层时才继续。
-- 降权把“提高交易次数”直接翻译成“无条件放宽 outer_context / flow / quality gate”。
-- 降权主要让 `train` 或 `val` 其中一边继续变热，但 `train/val` 更不均衡的改动。
-- 降权收益主要来自更晚退出、更大暴露或更早加仓，但真实成交覆盖度和趋势段参与数几乎不变的方案。
+- 降权只在旧路径上做近邻阈值拨动；这类改动现在大概率会被最小步长规则或行为检查拦住。
+- 降权主要研究 `EXIT_PARAMS`、trailing、profit protect、holding time 这类纯退出微调；只有真实诊断明确说明主堵点在退出层时才继续。
+- 降权把“提高 capture”理解成单纯放松所有入场 gate。需要提高真实趋势机会覆盖，同时控制手续费拖累和回撤。
+- 降权主要让 train 或 val 其中一边变热、另一边继续很弱的方案。
+- 降权主要强化单边收益、但 bull/bear 或 train/val 平衡没有改善的方案。
 - 降权只增加局部分支、但不明显改变最终交易路径的改动。
 
 ## 默认动作
 
-- 默认先看真实漏斗，先找限制真实成交的 choke point，再决定改哪一层。
-- 默认先看 `val` 最差块、尾块、连续 `train/val` 多空趋势段数量和捕获落差，再决定是补弱侧还是减强侧。
-- 若要抬交易次数，优先目标是“更多有效入场、更多有效再入场、更多有效加仓机会”，不是硬追月度笔数。
-- 若 smoke 行为不变，下一轮优先换机制层、换 choke point、换最终交易路径，不要继续在同一层局部松紧横移。
-- Fear & Greed 情绪现在可作为策略输入，但只应作为环境过滤或确认信号；不要为了情绪字段本身堆规则，也不要让情绪替代价格、趋势和成交质量判断。
+- 默认先看真实漏斗，找到限制有效入场的 choke point，再决定改哪一层。
+- 默认优先解决 train capture 为负、连续趋势段命中不足、趋势跟随启动太慢或过早退出的问题。
+- 默认把每轮改动做成一个可证伪假设：改哪条路径、期望增加哪些趋势段命中、预期 train/val 哪个指标变化。
+- 若 smoke 行为不变，下一轮优先换机制层、换 choke point 或换最终交易路径，不要继续在同一层横移。
+- 若要调整参数，必须用中等步长；小幅微调不是有效研究动作。
