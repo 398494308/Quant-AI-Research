@@ -152,20 +152,30 @@ def _dedupe_values(key: str, values: list[float | int], max_values: int) -> tupl
     return tuple(output)
 
 
-def _far_enough_from_current(key: str, value: float | int, current_value: float | int) -> bool:
-    if value == current_value:
+def _far_enough_from_reference(
+    key: str,
+    value: float | int,
+    reference_value: float | int,
+    current_value: float | int,
+) -> bool:
+    if value in {reference_value, current_value}:
         return True
-    minimum_delta = minimum_numeric_change_delta(key, current_value, value)
-    return abs(float(value) - float(current_value)) + 1e-12 >= minimum_delta
+    minimum_delta = minimum_numeric_change_delta(key, reference_value, value)
+    return abs(float(value) - float(reference_value)) + 1e-12 >= minimum_delta
 
 
 def _filter_scan_values_by_min_step(
     key: str,
     values: tuple[float | int, ...],
+    reference_value: float | int,
     current_value: float | int,
     max_values: int,
 ) -> tuple[float | int, ...]:
-    filtered = [value for value in values if _far_enough_from_current(key, value, current_value)]
+    filtered = [
+        value
+        for value in values
+        if _far_enough_from_reference(key, value, reference_value, current_value)
+    ]
     if current_value not in filtered:
         filtered.append(current_value)
     return _dedupe_values(key, filtered, max_values + 1)
@@ -246,10 +256,11 @@ def infer_exit_range_scan_spec(
     except Exception:
         return None
     if explicit is not None:
+        reference = _coerce_number(base_exit.get(explicit.param))
         current = _coerce_number(candidate_exit.get(explicit.param))
-        if current is None:
+        if reference is None or current is None:
             return None
-        values = _filter_scan_values_by_min_step(explicit.param, explicit.values, current, max_values)
+        values = _filter_scan_values_by_min_step(explicit.param, explicit.values, reference, current, max_values)
         if len(values) < 2:
             return None
         return ExitRangeScanSpec(param=explicit.param, values=values, reason=explicit.reason)
@@ -265,9 +276,10 @@ def infer_exit_range_scan_spec(
     changed.sort(key=lambda key: SCAN_KEY_PRIORITY.index(key) if key in SCAN_KEY_PRIORITY else len(SCAN_KEY_PRIORITY))
     key = changed[0]
     current = _coerce_number(candidate_exit.get(key))
-    if current is None:
+    reference = _coerce_number(base_exit.get(key))
+    if reference is None or current is None:
         return None
-    values = _filter_scan_values_by_min_step(key, _auto_values(key, current, max_values), current, max_values)
+    values = _filter_scan_values_by_min_step(key, _auto_values(key, current, max_values), reference, current, max_values)
     if len(values) < 2:
         return None
     return ExitRangeScanSpec(param=key, values=values, reason="系统根据本轮改动的退出参数自动生成 3 点轻量扫描")

@@ -6935,6 +6935,26 @@ EXIT_PARAMS = {
         self.assertEqual(spec.param, "trailing_activation_pct")
         self.assertIn(24.0, spec.values)
 
+    def test_infer_exit_range_scan_filters_values_against_base_min_step(self):
+        from research_v2.exit_range_scan import infer_exit_range_scan_spec
+
+        base = """
+# PARAMS_START
+PARAMS = {}
+# PARAMS_END
+# EXIT_PARAMS_START
+EXIT_PARAMS = {
+    "short_breakdown_stop_atr_mult": 3.4,
+}
+# EXIT_PARAMS_END
+"""
+        candidate = base.replace('"short_breakdown_stop_atr_mult": 3.4', '"short_breakdown_stop_atr_mult": 1.4')
+        spec = infer_exit_range_scan_spec(base, candidate, None, max_values=3)
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.param, "short_breakdown_stop_atr_mult")
+        self.assertIn(1.4, spec.values)
+        self.assertNotIn(1.61, spec.values)
+
 class ResearchRuntimeLeanPipelineTest(unittest.TestCase):
     def test_context_cache_key_ignores_execution_irrelevant_exit_params(self):
         original_cache = research_script.prepared_backtest_context_cache
