@@ -6218,6 +6218,24 @@ class ReferenceStateFixesTest(unittest.TestCase):
         self.assertEqual(trigger["kind"], "large_complexity_growth")
         self.assertIn("factor_slot_logic", trigger["items"][0])
 
+    def test_structural_audit_trigger_ignores_moderate_complexity_growth(self):
+        entry = {
+            "iteration": 7,
+            "candidate_id": "bsc_l21_long_followthrough_ease",
+            "outcome": "rejected",
+            "stop_stage": "full_eval",
+            "reference_code_hash": "ref1",
+            "cluster_key": "followthrough",
+            "system_complexity_families": {
+                "factor_slot_logic": {"delta_lines": 13, "delta_bool_ops": 3, "delta_ifs": 2},
+            },
+            "system_complexity_functions": {},
+        }
+
+        trigger = research_script._structural_audit_trigger_from_entry(entry, [])
+
+        self.assertIsNone(trigger)
+
     def test_structural_audit_trigger_detects_consecutive_slot_failures(self):
         def make_entry(iteration):
             return {

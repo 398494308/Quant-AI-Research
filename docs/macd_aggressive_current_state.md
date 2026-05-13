@@ -140,7 +140,7 @@ promotion_score = main_score
 
 触发条件保持中等敏感：
 
-- 普通轮完整评估后没有晋级，且任一函数或 family 单轮增长达到 `lines >= 12`、`bool_ops >= 5` 或 `ifs >= 2`。
+- 普通轮完整评估后没有晋级，且任一函数或 family 单轮增长达到 `lines >= 24`、`bool_ops >= 10` 或 `ifs >= 4`。
 - 同一 slot / cluster 在当前 reference 下连续失败 3 次。
 
 自检轮只做删减和泛化：
