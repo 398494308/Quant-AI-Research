@@ -18,22 +18,22 @@
 | 研究器 | 已启动 |
 | score regime | `robust_block_v26_activity_mean` |
 | active reference | champion |
-| reference hash | `660e09d6e45e3ac676d54fcbd912853705eac2e9b0deffab3fdf63b9b9581409` |
-| 来源 | 当前结构化 champion，经 v26 重算 |
+| reference hash | `e4f3d0352b5f753c0bdd18f56dd1e69a94db6c7c66426935fd6045bee3ae9d3a` |
+| 来源 | `sc_b6_long_reaccel_arrival` |
 | gate | 通过 |
-| quality_score | `0.0373` |
-| promotion_score | `-0.3568` |
-| main_score / robust_time_score | `-0.0815 / -0.0680` |
-| raw robust_time_score | `-0.0674` |
-| train/val robust block | `0.0383 / -0.1732` |
-| train/val activity multiplier | `0.9720 / 1.0000` |
+| quality_score | `0.0409` |
+| promotion_score | `-0.1661` |
+| main_score / robust_time_score | `-0.0030 / 0.0106` |
+| raw robust_time_score | `0.0295` |
+| train/val robust block | `0.0789 / -0.0198` |
+| train/val activity multiplier | `0.5193 / 1.0000` |
 | benchmark_hurdle_score | `0.0136` |
-| drawdown / robustness / idle penalty | `0.1753 / 0.0000 / 0.1000` |
-| capture_score / capture_core_score | `0.0273 / 0.0138` |
-| train/val 非加仓开仓 | `254 / 233` |
-| train/val 月非加仓开仓 | `14.06 / 19.43` |
-| val path return | `-30.19%` |
-| worst drawdown / fee drag | `31.34% / 3.43%` |
+| drawdown / robustness / idle penalty | `0.0631 / 0.0000 / 0.1000` |
+| capture_score / capture_core_score | `0.0776 / 0.0690` |
+| train/val 非加仓开仓 | `153 / 188` |
+| train/val 月非加仓开仓 | `8.47 / 15.68` |
+| val path return | `8.45%` |
+| worst drawdown / fee drag | `21.03% / 2.31%` |
 | test / demo | 只做人工只读观察，不进入 prompt、评分或晋升 |
 | Sharpe | 只做人工筛选和通知展示，不进入主评分 |
 | capture | 只做趋势诊断，不进入主评分，不再给收益做倍率 |
