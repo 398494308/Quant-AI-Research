@@ -4,7 +4,7 @@
 
 ## 当前快照
 
-截至 `2026-05-13`（Asia/Shanghai），策略已完成结构化重构：当前 active champion 是历史第 30 轮 `planner_040` 的 `bc1b...` 快照迁移版。迁移后保留原策略行为口径，同时新增固定因子槽和硬框架校验。研究器现在额外带一个一次性结构自检修复轮，用于处理明显结构膨胀或同一 slot / cluster 连续失败。
+截至 `2026-05-13`（Asia/Shanghai），策略已完成结构化重构：迁移后保留原策略行为口径，同时新增固定因子槽和硬框架校验。研究器现在额外带一个周期性结构自检修复轮，用于定期整理明显局部过拟合或结构膨胀。
 
 当前策略源码位置：
 
@@ -134,14 +134,15 @@ promotion_score = main_score
 
 晋升规则没有改变：候选必须先过 gate；已有 champion 时，`promotion_score` 必须严格高于当前 active reference，才会刷新 champion。取消的是额外晋级边际，不是取消“更高分才替换”。
 
-结构自检修复轮是唯一例外：它由普通轮评估后的系统诊断排队，不是 planner 主动选择的模式。自检轮候选仍必须通过源码校验、smoke、完整评估和现有 gate；通过后跳过 `promotion_score` 比较，直接替换 active reference，并在 journal 标记 `reference_update_kind=structural_audit_replace`。
+结构自检修复轮是唯一例外：它由周期计数排队，不是 planner 主动选择的模式。自检轮候选仍必须通过源码校验、smoke、完整评估和现有 gate；通过后跳过 `promotion_score` 比较，直接替换 active reference，并在 journal 标记 `reference_update_kind=structural_audit_replace`。
 
 ## 结构自检修复
 
-触发条件保持中等敏感：
+触发条件改为定期整理：
 
-- 普通轮完整评估后没有晋级，且任一函数或 family 单轮增长达到 `lines >= 24`、`bool_ops >= 10` 或 `ifs >= 4`。
-- 同一 slot / cluster 在当前 reference 下连续失败 3 次。
+- 自上次 champion 刷新或结构自检尝试后，普通轮累计完成 `15` 次 full eval / duplicate-result eval。
+- champion 刷新会重置计数；结构自检轮无论成功或失败，也会重置计数。
+- 复杂度增长和同一 slot / cluster 连续失败只做诊断，不再直接排队自检。
 
 自检轮只做删减和泛化：
 

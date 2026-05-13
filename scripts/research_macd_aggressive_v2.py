@@ -165,12 +165,9 @@ BEHAVIOR_FUNNEL_REL_DELTA = 0.08
 BEHAVIOR_FUNNEL_REL_MIN_ABS_DELTA = 5
 BEHAVIOR_FUNNEL_STAGES = ("outer_context_pass", "path_pass", "final_veto_pass", "filled_entries")
 REJECT_TEST_ELIGIBLE_OUTCOMES = frozenset({"rejected", "duplicate_skipped"})
-STRUCTURAL_AUDIT_LINE_GROWTH_TRIGGER = 24
-STRUCTURAL_AUDIT_BOOL_GROWTH_TRIGGER = 10
-STRUCTURAL_AUDIT_IF_GROWTH_TRIGGER = 4
-STRUCTURAL_AUDIT_CONSECUTIVE_FAILURES = 3
-STRUCTURAL_AUDIT_FAILURE_OUTCOMES = frozenset({"rejected", "duplicate_skipped"})
-STRUCTURAL_AUDIT_FAILURE_STOP_STAGES = frozenset({"full_eval", "duplicate_result_basin"})
+STRUCTURAL_AUDIT_PERIOD_FULL_EVALS = 15
+STRUCTURAL_AUDIT_COUNTED_STOP_STAGES = frozenset({"full_eval", "duplicate_result_basin"})
+STRUCTURAL_AUDIT_RESET_UPDATE_KINDS = frozenset({"champion", "structural_audit_replace"})
 
 best_source = ""
 best_report: EvaluationReport | None = None
@@ -3199,84 +3196,30 @@ def _as_int(value: Any) -> int:
         return 0
 
 
-def _complexity_growth_trigger_items(entry: dict[str, Any]) -> list[str]:
-    items: list[str] = []
-    for group_label, group_key in (
-        ("family", "system_complexity_families"),
-        ("function", "system_complexity_functions"),
-    ):
-        group = entry.get(group_key, {})
-        if not isinstance(group, dict):
-            continue
-        for item_name, metrics in group.items():
-            if not isinstance(metrics, dict):
-                continue
-            delta_lines = _as_int(metrics.get("delta_lines"))
-            delta_bool_ops = _as_int(metrics.get("delta_bool_ops"))
-            delta_ifs = _as_int(metrics.get("delta_ifs"))
-            if (
-                delta_lines >= STRUCTURAL_AUDIT_LINE_GROWTH_TRIGGER
-                or delta_bool_ops >= STRUCTURAL_AUDIT_BOOL_GROWTH_TRIGGER
-                or delta_ifs >= STRUCTURAL_AUDIT_IF_GROWTH_TRIGGER
-            ):
-                items.append(
-                    f"{group_label} `{item_name}` "
-                    f"L{delta_lines:+d}/B{delta_bool_ops:+d}/I{delta_ifs:+d}"
-                )
-    return items
-
-
-def _entry_has_large_complexity_growth(entry: dict[str, Any]) -> bool:
-    return bool(_complexity_growth_trigger_items(entry))
-
-
-def _structural_failure_tokens(entry: dict[str, Any]) -> set[str]:
-    tokens: set[str] = set()
-    cluster_key = str(entry.get("cluster_key", "")).strip()
-    if cluster_key:
-        tokens.add(f"cluster:{cluster_key}")
-    for region in entry.get("system_ordinary_changed_regions", ()) or ():
-        region_text = str(region).strip()
-        if region_text:
-            tokens.add(f"region:{region_text}")
-    for family in entry.get("system_ordinary_region_families", ()) or ():
-        family_text = str(family).strip()
-        if family_text:
-            tokens.add(f"family:{family_text}")
-    target_family = str(entry.get("target_family", "")).strip()
-    if target_family:
-        tokens.add(f"target:{target_family}")
-    return tokens
-
-
-def _is_structural_failure_entry(entry: dict[str, Any]) -> bool:
+def _entry_resets_structural_audit_period(entry: dict[str, Any]) -> bool:
     if bool(entry.get("structural_audit_round")):
+        return True
+    if str(entry.get("reference_update_kind", "")).strip() in STRUCTURAL_AUDIT_RESET_UPDATE_KINDS:
+        return True
+    return str(entry.get("outcome", "")).strip() == "accepted"
+
+
+def _is_periodic_structural_audit_counted_entry(entry: dict[str, Any]) -> bool:
+    if _entry_resets_structural_audit_period(entry):
         return False
-    outcome = str(entry.get("outcome", "")).strip()
-    stop_stage = str(entry.get("stop_stage", "")).strip()
-    return (
-        outcome in STRUCTURAL_AUDIT_FAILURE_OUTCOMES
-        and stop_stage in STRUCTURAL_AUDIT_FAILURE_STOP_STAGES
-    )
+    return str(entry.get("stop_stage", "")).strip() in STRUCTURAL_AUDIT_COUNTED_STOP_STAGES
 
 
-def _count_consecutive_structural_failures(
+def _periodic_structural_audit_count_since_reset(
     recent_entries: list[dict[str, Any]],
     current_entry: dict[str, Any],
 ) -> int:
-    current_tokens = _structural_failure_tokens(current_entry)
-    if not current_tokens or not _is_structural_failure_entry(current_entry):
-        return 0
-    current_reference_hash = str(current_entry.get("reference_code_hash", "")).strip()
     count = 0
     for entry in reversed([*recent_entries, current_entry]):
-        if not _is_structural_failure_entry(entry):
+        if _entry_resets_structural_audit_period(entry):
             break
-        if current_reference_hash and str(entry.get("reference_code_hash", "")).strip() != current_reference_hash:
-            break
-        if not (_structural_failure_tokens(entry) & current_tokens):
-            break
-        count += 1
+        if _is_periodic_structural_audit_counted_entry(entry):
+            count += 1
     return count
 
 
@@ -3284,30 +3227,22 @@ def _structural_audit_trigger_from_entry(
     entry: dict[str, Any],
     recent_entries: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    if bool(entry.get("structural_audit_round")) or not _is_structural_failure_entry(entry):
+    if bool(entry.get("structural_audit_round")) or _entry_resets_structural_audit_period(entry):
         return None
 
-    growth_items = _complexity_growth_trigger_items(entry)
-    if growth_items:
+    completed_count = _periodic_structural_audit_count_since_reset(recent_entries, entry)
+    if completed_count >= STRUCTURAL_AUDIT_PERIOD_FULL_EVALS:
         return {
-            "kind": "large_complexity_growth",
-            "reason": "单轮结构复杂度明显增长但没有晋级",
-            "items": tuple(growth_items[:5]),
+            "kind": "periodic_full_eval",
+            "reason": f"普通完整评估累计 {completed_count} 轮，定期结构整理",
+            "items": (
+                f"普通完整评估轮次={completed_count}",
+                f"周期={STRUCTURAL_AUDIT_PERIOD_FULL_EVALS}",
+            ),
             "source_iteration": entry.get("iteration"),
             "source_candidate_id": entry.get("candidate_id", ""),
             "reference_code_hash": entry.get("reference_code_hash", ""),
-        }
-
-    failure_count = _count_consecutive_structural_failures(recent_entries, entry)
-    if failure_count >= STRUCTURAL_AUDIT_CONSECUTIVE_FAILURES:
-        return {
-            "kind": "consecutive_structural_failures",
-            "reason": f"同一 slot / cluster 在当前 reference 下连续失败 {failure_count} 次",
-            "items": tuple(sorted(_structural_failure_tokens(entry))[:5]),
-            "source_iteration": entry.get("iteration"),
-            "source_candidate_id": entry.get("candidate_id", ""),
-            "reference_code_hash": entry.get("reference_code_hash", ""),
-            "failure_count": failure_count,
+            "completed_full_eval_count": completed_count,
         }
     return None
 
@@ -4257,6 +4192,18 @@ def _promotion_acceptance_decision(
     )
 
 
+def _structural_audit_entry_fields(
+    structural_audit_round: bool = False,
+    structural_audit_trigger: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not structural_audit_round:
+        return {}
+    return {
+        "structural_audit_round": True,
+        "structural_audit_trigger": structural_audit_trigger or {},
+    }
+
+
 def _record_duplicate_skip(
     *,
     iteration_id: int,
@@ -4265,6 +4212,8 @@ def _record_duplicate_skip(
     stop_stage: str,
     gate_reason: str,
     note: str,
+    structural_audit_round: bool = False,
+    structural_audit_trigger: dict[str, Any] | None = None,
 ) -> None:
     _append_research_journal_entry(
         _build_journal_entry(
@@ -4276,6 +4225,7 @@ def _record_duplicate_skip(
             stop_stage=stop_stage,
             gate_reason=gate_reason,
             note=note,
+            extra_fields=_structural_audit_entry_fields(structural_audit_round, structural_audit_trigger),
         ),
         strategy_source=candidate.strategy_code,
     )
@@ -4290,7 +4240,17 @@ def _record_generation_invalid(
     base_source: str,
     block_info: dict[str, Any],
     note: str,
+    structural_audit_round: bool = False,
+    structural_audit_trigger: dict[str, Any] | None = None,
 ) -> None:
+    extra_fields = {
+        "block_kind": str(block_info.get("block_kind", "")).strip(),
+        "blocked_cluster": str(block_info.get("blocked_cluster", "")).strip(),
+        "technical_generation_invalid": True,
+        "current_locks": list(block_info.get("current_locks", ()) or ()),
+        "invalid_reasons": list(block_info.get("invalid_reasons", ()) or ()),
+    }
+    extra_fields.update(_structural_audit_entry_fields(structural_audit_round, structural_audit_trigger))
     _append_research_journal_entry(
         _build_journal_entry(
             iteration_id=iteration_id,
@@ -4301,13 +4261,7 @@ def _record_generation_invalid(
             stop_stage=str(block_info.get("stop_stage", "blocked_invalid_generation")),
             gate_reason=str(block_info.get("blocked_reason", "")).strip() or "候选未产生真实代码改动",
             note=note,
-            extra_fields={
-                "block_kind": str(block_info.get("block_kind", "")).strip(),
-                "blocked_cluster": str(block_info.get("blocked_cluster", "")).strip(),
-                "technical_generation_invalid": True,
-                "current_locks": list(block_info.get("current_locks", ()) or ()),
-                "invalid_reasons": list(block_info.get("invalid_reasons", ()) or ()),
-            },
+            extra_fields=extra_fields,
         ),
         strategy_source=candidate.strategy_code,
     )
@@ -4321,7 +4275,26 @@ def _record_exploration_block(
     candidate: StrategyCandidate,
     base_source: str,
     block_info: dict[str, Any],
+    structural_audit_round: bool = False,
+    structural_audit_trigger: dict[str, Any] | None = None,
 ) -> None:
+    extra_fields = {
+        "block_kind": str(block_info.get("block_kind", "")).strip(),
+        "blocked_cluster": str(block_info.get("blocked_cluster", "")).strip(),
+        "lock_rounds": int(block_info.get("lock_rounds", 0) or 0),
+        "lock_level": int(block_info.get("lock_level", 0) or 0),
+        "lock_trigger_iteration": int(block_info.get("lock_trigger_iteration", 0) or 0),
+        "lock_expires_before_iteration": int(block_info.get("lock_expires_before_iteration", 0) or 0),
+        "current_locks": list(block_info.get("current_locks", ()) or ()),
+        "low_change_tags": list(block_info.get("low_change_tags", ()) or ()),
+        "low_change_regions": list(block_info.get("low_change_regions", ()) or ()),
+        "low_change_changed_regions": list(block_info.get("low_change_changed_regions", ()) or ()),
+        "low_change_targets": list(block_info.get("low_change_targets", ()) or ()),
+        "low_change_factors": list(block_info.get("low_change_factors", ()) or ()),
+        "low_change_param_families": list(block_info.get("low_change_param_families", ()) or ()),
+        "low_change_structural_tokens": list(block_info.get("low_change_structural_tokens", ()) or ()),
+    }
+    extra_fields.update(_structural_audit_entry_fields(structural_audit_round, structural_audit_trigger))
     _append_research_journal_entry(
         _build_journal_entry(
             iteration_id=iteration_id,
@@ -4332,22 +4305,7 @@ def _record_exploration_block(
             stop_stage=str(block_info.get("stop_stage", "blocked_same_cluster")),
             gate_reason=str(block_info.get("blocked_reason", "")).strip() or "探索方向被系统拒收",
             note=str(block_info.get("blocked_reason", "")).strip() or "探索方向被系统拒收",
-            extra_fields={
-                "block_kind": str(block_info.get("block_kind", "")).strip(),
-                "blocked_cluster": str(block_info.get("blocked_cluster", "")).strip(),
-                "lock_rounds": int(block_info.get("lock_rounds", 0) or 0),
-                "lock_level": int(block_info.get("lock_level", 0) or 0),
-                "lock_trigger_iteration": int(block_info.get("lock_trigger_iteration", 0) or 0),
-                "lock_expires_before_iteration": int(block_info.get("lock_expires_before_iteration", 0) or 0),
-                "current_locks": list(block_info.get("current_locks", ()) or ()),
-                "low_change_tags": list(block_info.get("low_change_tags", ()) or ()),
-                "low_change_regions": list(block_info.get("low_change_regions", ()) or ()),
-                "low_change_changed_regions": list(block_info.get("low_change_changed_regions", ()) or ()),
-                "low_change_targets": list(block_info.get("low_change_targets", ()) or ()),
-                "low_change_factors": list(block_info.get("low_change_factors", ()) or ()),
-                "low_change_param_families": list(block_info.get("low_change_param_families", ()) or ()),
-                "low_change_structural_tokens": list(block_info.get("low_change_structural_tokens", ()) or ()),
-            },
+            extra_fields=extra_fields,
         ),
         strategy_source=candidate.strategy_code,
     )
@@ -4361,7 +4319,11 @@ def _record_behavioral_noop(
     candidate: StrategyCandidate,
     base_source: str,
     behavior_diff: dict[str, Any],
+    structural_audit_round: bool = False,
+    structural_audit_trigger: dict[str, Any] | None = None,
 ) -> None:
+    extra_fields: dict[str, Any] = {"behavior_diff": behavior_diff}
+    extra_fields.update(_structural_audit_entry_fields(structural_audit_round, structural_audit_trigger))
     _append_research_journal_entry(
         _build_journal_entry(
             iteration_id=iteration_id,
@@ -4372,9 +4334,7 @@ def _record_behavioral_noop(
             stop_stage="behavioral_noop",
             gate_reason="smoke 行为指纹与当前主参考完全一致",
             note="候选源码有 diff 且可运行，但 smoke 窗口交易行为完全不变；已跳过 full eval。",
-            extra_fields={
-                "behavior_diff": behavior_diff,
-            },
+            extra_fields=extra_fields,
         ),
         strategy_source=candidate.strategy_code,
     )
@@ -4390,12 +4350,15 @@ def _record_runtime_failure(
     errors: list[str],
     failure_stage: str,
     stop_stage: str,
+    structural_audit_round: bool = False,
+    structural_audit_trigger: dict[str, Any] | None = None,
 ) -> None:
     last_error = errors[-1] if errors else "运行失败"
     extra_fields: dict[str, Any] = {
         "runtime_failure_stage": failure_stage,
         "decision_reason": last_error,
     }
+    extra_fields.update(_structural_audit_entry_fields(structural_audit_round, structural_audit_trigger))
     if _is_complexity_error_message(last_error):
         extra_fields["system_bloat_flag"] = True
     _append_research_journal_entry(
@@ -4692,6 +4655,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 candidate=exc.candidate,
                 base_source=best_source,
                 block_info=exc.block_info,
+                structural_audit_round=structural_audit_round,
+                structural_audit_trigger=structural_audit_trigger,
             )
             log_info(f"第 {iteration_id} 轮 reviewer 打回 planner brief: {exc}")
             write_heartbeat(
@@ -4711,6 +4676,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 "planner/reviewer 未按约定返回合法结果；系统已在同一轮内补正一次，"
                 "仍未拿到可执行摘要，因此按 generation_invalid 记账。"
             ),
+            structural_audit_round=structural_audit_round,
+            structural_audit_trigger=structural_audit_trigger,
         )
         if isinstance(exc, ReviewerRejected):
             log_info(f"第 {iteration_id} 轮 reviewer 结果作废: {exc}")
@@ -4738,6 +4705,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             errors=exc.errors,
             failure_stage=exc.failure_stage or "candidate_validation",
             stop_stage="candidate_validation",
+            structural_audit_round=structural_audit_round,
+            structural_audit_trigger=structural_audit_trigger,
         )
         log_info(f"第 {iteration_id} 轮候选源码校验失败并已记录: {exc}")
         write_heartbeat(
@@ -4770,6 +4739,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                         "候选未产出真实代码改动；该轮已按技术性空转记账，"
                         "并从 failure wiki / 方向风险记忆中隔离。"
                     ),
+                    structural_audit_round=structural_audit_round,
+                    structural_audit_trigger=structural_audit_trigger,
                 )
                 log_info(
                     f"第 {iteration_id} 轮候选作废: "
@@ -4814,6 +4785,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 stop_stage="duplicate_source",
                 gate_reason="候选源码与当前主参考完全相同",
                 note="模型未产生有效代码改动；本轮按重复探索记入研究历史。",
+                structural_audit_round=structural_audit_round,
+                structural_audit_trigger=structural_audit_trigger,
             )
             log_info(f"第 {iteration_id} 轮跳过: 候选源码与当前主参考完全相同")
             write_heartbeat("iteration_skipped", message=f"iteration {iteration_id} duplicate source")
@@ -4826,6 +4799,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 stop_stage="duplicate_history",
                 gate_reason="候选源码命中最近研究历史",
                 note="模型重复产出了最近已出现过的候选源码；本轮按重复探索记入研究历史。",
+                structural_audit_round=structural_audit_round,
+                structural_audit_trigger=structural_audit_trigger,
             )
             log_info(f"第 {iteration_id} 轮跳过: 候选源码命中最近研究历史")
             write_heartbeat("iteration_skipped", message=f"iteration {iteration_id} duplicate journal hash")
@@ -4840,6 +4815,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 stop_stage="empty_diff",
                 gate_reason="候选没有产生有效 diff",
                 note="候选虽然通过了解析，但没有形成可验证的有效改动；本轮按重复探索记入研究历史。",
+                structural_audit_round=structural_audit_round,
+                structural_audit_trigger=structural_audit_trigger,
             )
             log_info(f"第 {iteration_id} 轮跳过: 候选没有产生有效 diff")
             write_heartbeat("iteration_skipped", message=f"iteration {iteration_id} empty diff")
@@ -4867,6 +4844,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 candidate=candidate,
                 base_source=best_source,
                 block_info=block_info,
+                structural_audit_round=structural_audit_round,
+                structural_audit_trigger=structural_audit_trigger,
             )
             log_info(
                 f"第 {iteration_id} 轮候选在评估前被系统拦截: "
@@ -4935,6 +4914,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                             candidate=exc.candidate,
                             base_source=best_source,
                             behavior_diff=exc.behavior_diff,
+                            structural_audit_round=structural_audit_round,
+                            structural_audit_trigger=structural_audit_trigger,
                         )
                         log_info(
                             f"第 {iteration_id} 轮跳过: smoke 行为指纹未变化 "
@@ -4990,6 +4971,10 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                     stop_stage="early_reject",
                     gate_reason="前段稳健时间块收益过差",
                     note=str(exc),
+                    extra_fields=_structural_audit_entry_fields(
+                        structural_audit_round,
+                        structural_audit_trigger,
+                    ),
                 ),
                 strategy_source=candidate.strategy_code,
             )
@@ -5012,6 +4997,8 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 errors=exc.errors,
                 failure_stage=exc.failure_stage or "runtime_error",
                 stop_stage="runtime_error",
+                structural_audit_round=structural_audit_round,
+                structural_audit_trigger=structural_audit_trigger,
             )
             log_info(f"第 {iteration_id} 轮运行失败并已记录: {exc}")
             write_heartbeat(

@@ -69,7 +69,7 @@ flowchart TB
 - walk-forward 诊断按 v26 robust block 分；提前淘汰直接复用已完成的 walk-forward 窗口结果，不再额外重跑累计 train 区间。
 - `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率。capture 仍使用固定 clean trend segments，并保留“段等权均分 50% + 原权重均分 50%”的混合口径。
 - 参数步长现在是高优先级软约束，不是技术 gate：默认避免只做近邻阈值微调；如果需要小步长修正，planner 必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。真正的硬拦截是 smoke 行为不变、源码安全校验、gate 和 promotion。
-- 当前策略源码已做等价压缩；复杂度默认只做诊断，不拦普通候选。若普通轮出现单轮复杂度明显增长但未晋级，或同一 slot / cluster 在当前 reference 下连续失败 3 次，系统会排队下一轮结构自检修复。
+- 当前策略源码已做等价压缩；复杂度默认只做诊断，不拦普通候选。结构自检修复不再按复杂度阈值或连续失败即时触发，而是按周期整理。
 - Fear & Greed 情绪数据只作为策略可选输入暴露在 `market_state`，不进入评分、gate 或强制优化目标。
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标。
 - 交易频率按非加仓开仓数计算，加仓不计入；目标约 `train 180-270 / val 120-180`，也就是 `10-15` 笔/月。低频通过 activity multiplier 折扣正收益，最长无新开仓超过约 `7` 天才扣空窗分；趋势机会覆盖只做诊断。
@@ -102,8 +102,9 @@ flowchart TB
 
 触发条件：
 
-- 普通轮完成 full eval 后没有晋级，且任一函数或 family 单轮增长达到 `lines >= 24`、`bool_ops >= 10` 或 `ifs >= 4`。
-- 同一 slot / cluster 在当前 reference 下连续失败 3 次。
+- 自上次 champion 刷新或结构自检尝试后，普通轮累计完成 `15` 次 full eval / duplicate-result eval。
+- champion 刷新会重置计数；结构自检轮无论成功或失败，也会重置计数。
+- 复杂度增长和同一 slot / cluster 连续失败只保留为诊断信号，不再直接排队自检。
 
 执行方式：
 

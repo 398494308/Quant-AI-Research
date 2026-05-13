@@ -2777,7 +2777,7 @@ class JournalPromptFixesTest(unittest.TestCase):
             evaluation_summary="诊断",
             journal_summary="记忆",
             previous_best_score=1.23,
-            structural_audit_trigger_text="- 触发原因: 单轮结构复杂度明显增长但没有晋级",
+            structural_audit_trigger_text="- 触发原因: 普通完整评估累计 15 轮，定期结构整理",
         )
 
         self.assertIn("结构自检修复轮", prompt)
@@ -3017,7 +3017,7 @@ class JournalPromptFixesTest(unittest.TestCase):
             change_tags=("structural_audit",),
             expected_effects=("减少局部抖动",),
             novelty_proof="由结构自检触发。",
-            structural_audit_trigger_text="- 触发原因: 连续失败 3 次",
+            structural_audit_trigger_text="- 触发原因: 普通完整评估累计 15 轮，定期结构整理",
         )
 
         self.assertIn("结构自检修复轮硬约束", prompt)
@@ -6198,36 +6198,16 @@ class ReferenceStateFixesTest(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertEqual("val命中率偏低(7%)", reason)
 
-    def test_structural_audit_trigger_detects_large_complexity_growth(self):
+    def test_structural_audit_trigger_ignores_large_complexity_growth_before_period(self):
         entry = {
-            "iteration": 5,
+            "iteration": 7,
             "candidate_id": "bsc_l6_pullback_ease",
             "outcome": "rejected",
             "stop_stage": "full_eval",
             "reference_code_hash": "ref1",
             "cluster_key": "pullback",
             "system_complexity_families": {
-                "factor_slot_logic": {"delta_lines": 34, "delta_bool_ops": 18, "delta_ifs": 0},
-            },
-            "system_complexity_functions": {},
-        }
-
-        trigger = research_script._structural_audit_trigger_from_entry(entry, [])
-
-        self.assertIsNotNone(trigger)
-        self.assertEqual(trigger["kind"], "large_complexity_growth")
-        self.assertIn("factor_slot_logic", trigger["items"][0])
-
-    def test_structural_audit_trigger_ignores_moderate_complexity_growth(self):
-        entry = {
-            "iteration": 7,
-            "candidate_id": "bsc_l21_long_followthrough_ease",
-            "outcome": "rejected",
-            "stop_stage": "full_eval",
-            "reference_code_hash": "ref1",
-            "cluster_key": "followthrough",
-            "system_complexity_families": {
-                "factor_slot_logic": {"delta_lines": 13, "delta_bool_ops": 3, "delta_ifs": 2},
+                "factor_slot_logic": {"delta_lines": 43, "delta_bool_ops": 19, "delta_ifs": 0},
             },
             "system_complexity_functions": {},
         }
@@ -6236,7 +6216,7 @@ class ReferenceStateFixesTest(unittest.TestCase):
 
         self.assertIsNone(trigger)
 
-    def test_structural_audit_trigger_detects_consecutive_slot_failures(self):
+    def test_structural_audit_trigger_runs_periodically_after_full_evals(self):
         def make_entry(iteration):
             return {
                 "iteration": iteration,
@@ -6244,22 +6224,58 @@ class ReferenceStateFixesTest(unittest.TestCase):
                 "outcome": "rejected",
                 "stop_stage": "full_eval",
                 "reference_code_hash": "ref1",
-                "cluster_key": "long_slot_a",
-                "system_ordinary_changed_regions": ["_slot_long_pullback"],
-                "system_ordinary_region_families": ["factor_slot_logic"],
-                "target_family": "long",
-                "system_complexity_families": {},
-                "system_complexity_functions": {},
+                "reference_update_kind": "none",
+                "structural_audit_round": False,
             }
 
         trigger = research_script._structural_audit_trigger_from_entry(
-            make_entry(3),
-            [make_entry(1), make_entry(2)],
+            make_entry(15),
+            [make_entry(iteration) for iteration in range(1, 15)],
         )
 
         self.assertIsNotNone(trigger)
-        self.assertEqual(trigger["kind"], "consecutive_structural_failures")
-        self.assertEqual(trigger["failure_count"], 3)
+        self.assertEqual(trigger["kind"], "periodic_full_eval")
+        self.assertEqual(trigger["completed_full_eval_count"], 15)
+
+    def test_structural_audit_period_resets_after_champion(self):
+        def make_entry(iteration, *, update="none", outcome="rejected"):
+            return {
+                "iteration": iteration,
+                "candidate_id": f"candidate_{iteration}",
+                "outcome": outcome,
+                "stop_stage": "full_eval",
+                "reference_code_hash": "ref1",
+                "reference_update_kind": update,
+                "structural_audit_round": False,
+            }
+
+        recent_entries = [make_entry(iteration) for iteration in range(1, 10)]
+        recent_entries.append(make_entry(10, update="champion", outcome="accepted"))
+        recent_entries.extend(make_entry(iteration) for iteration in range(11, 15))
+
+        trigger = research_script._structural_audit_trigger_from_entry(make_entry(15), recent_entries)
+
+        self.assertIsNone(trigger)
+
+    def test_structural_audit_period_resets_after_audit_attempt(self):
+        def make_entry(iteration, *, structural_audit_round=False):
+            return {
+                "iteration": iteration,
+                "candidate_id": f"candidate_{iteration}",
+                "outcome": "runtime_failed" if structural_audit_round else "rejected",
+                "stop_stage": "runtime_error" if structural_audit_round else "full_eval",
+                "reference_code_hash": "ref1",
+                "reference_update_kind": "none",
+                "structural_audit_round": structural_audit_round,
+            }
+
+        recent_entries = [make_entry(iteration) for iteration in range(1, 15)]
+        recent_entries.append(make_entry(15, structural_audit_round=True))
+        recent_entries.extend(make_entry(iteration) for iteration in range(16, 29))
+
+        trigger = research_script._structural_audit_trigger_from_entry(make_entry(29), recent_entries)
+
+        self.assertIsNone(trigger)
 
     def test_initialize_best_state_falls_back_when_saved_reference_source_is_invalid(self):
         valid_source = (REPO_ROOT / "src/strategy_macd_aggressive.py").read_text()
