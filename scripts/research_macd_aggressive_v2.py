@@ -60,7 +60,7 @@ from research_v2.exit_range_scan import (
 from research_v2.evaluation import (
     EvaluationReport,
     normalize_test_metrics_payload,
-    partial_eval_gate_snapshot,
+    partial_eval_gate_snapshot_from_results,
     summarize_evaluation,
     summarize_test_result,
 )
@@ -142,7 +142,7 @@ DISCORD_CONFIG = load_discord_config()
 EVAL_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "eval")
 VALIDATION_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "validation")
 TEST_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "test")
-SCORE_REGIME = "trend_capture_v24_multiplicative_capture_core"
+SCORE_REGIME = "robust_block_v26_activity_mean"
 MODEL_WORKSPACE_STRATEGY_PATH = Path("src/strategy_macd_aggressive.py")
 PRIMARY_DIRECTION_DOMAINS = frozenset({"long", "short", "mixed", "structure"})
 PLANNER_BRIEF_REQUIRED_FIELDS = ("primary_direction", "hypothesis", "change_plan", "novelty_proof", "change_tags")
@@ -165,6 +165,12 @@ BEHAVIOR_FUNNEL_REL_DELTA = 0.08
 BEHAVIOR_FUNNEL_REL_MIN_ABS_DELTA = 5
 BEHAVIOR_FUNNEL_STAGES = ("outer_context_pass", "path_pass", "final_veto_pass", "filled_entries")
 REJECT_TEST_ELIGIBLE_OUTCOMES = frozenset({"rejected", "duplicate_skipped"})
+STRUCTURAL_AUDIT_LINE_GROWTH_TRIGGER = 12
+STRUCTURAL_AUDIT_BOOL_GROWTH_TRIGGER = 5
+STRUCTURAL_AUDIT_IF_GROWTH_TRIGGER = 2
+STRUCTURAL_AUDIT_CONSECUTIVE_FAILURES = 3
+STRUCTURAL_AUDIT_FAILURE_OUTCOMES = frozenset({"rejected", "duplicate_skipped"})
+STRUCTURAL_AUDIT_FAILURE_STOP_STAGES = frozenset({"full_eval", "duplicate_result_basin"})
 
 best_source = ""
 best_report: EvaluationReport | None = None
@@ -178,6 +184,7 @@ research_session_state: dict[str, Any] = {}
 rejected_test_executor: ProcessPoolExecutor | None = None
 rejected_test_futures: dict[Any, dict[str, Any]] = {}
 queued_rejected_test_round_dirs: set[str] = set()
+pending_structural_audit_trigger: dict[str, Any] | None = None
 
 
 def active_exit_params() -> dict[str, Any]:
@@ -1293,7 +1300,6 @@ def _run_base_backtests(
     early_reject_milestones = set(getattr(RUNTIME, "early_reject_milestones", tuple()) or tuple())
     active_windows = windows or _scored_windows()
     runtime_context = prepared_context or _prepare_backtest_context()
-    eval_start_date: str | None = None
 
     for index, window in enumerate(active_windows, start=1):
         write_heartbeat(
@@ -1319,35 +1325,21 @@ def _run_base_backtests(
 
         if allow_early_reject and window.group == "eval":
             eval_count += 1
-            if eval_start_date is None:
-                eval_start_date = window.start_date
             should_check_early_reject = (
                 check_at > 0
                 and eval_count >= check_at
                 and (not early_reject_milestones or eval_count in early_reject_milestones)
             )
             if should_check_early_reject:
-                snapshot_result = backtest_module.backtest_macd_aggressive(
-                    strategy_func=strategy_module.strategy,
-                    intraday_file=backtest_module.DEFAULT_INTRADAY_FILE,
-                    hourly_file=backtest_module.DEFAULT_HOURLY_FILE,
-                    start_date=eval_start_date or window.start_date,
-                    end_date=window.end_date,
-                    strategy_params=strategy_module.PARAMS,
-                    exit_params=active_exit_params(),
-                    include_diagnostics=True,
-                    prepared_context=runtime_context,
-                )
-                snapshot = partial_eval_gate_snapshot(snapshot_result)
+                snapshot = partial_eval_gate_snapshot_from_results(results, RUNTIME.scoring)
                 if (
-                    snapshot["segment_count"] >= float(RUNTIME.early_reject_min_segments)
-                    and snapshot["trend_score"] < RUNTIME.early_reject_trend_score_threshold
-                    and snapshot["period_score"] < RUNTIME.early_reject_trend_score_threshold
-                    and snapshot["hit_rate"] < RUNTIME.early_reject_hit_rate_threshold
+                    snapshot["robust_block_count"] >= 2.0
+                    and snapshot["robust_block_score"] < RUNTIME.early_reject_trend_score_threshold
+                    and snapshot["return_score"] < RUNTIME.early_reject_trend_score_threshold
                 ):
                     raise EarlyRejection(
-                        f"前{eval_count}个eval窗口趋势捕获分={snapshot['trend_score']:.2f}，"
-                        f"命中率={snapshot['hit_rate']:.0%}，趋势段={int(snapshot['segment_count'])}，提前淘汰"
+                        f"前{eval_count}个eval窗口稳健时间块分={snapshot['robust_block_score']:.2f}，"
+                        f"收益分={snapshot['return_score']:.2f}，提前淘汰"
                     )
     return results
 
@@ -3200,6 +3192,168 @@ def _review_and_revise_round_brief(
     raise StrategySourceError("reviewer revise loop exhausted")
 
 
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _complexity_growth_trigger_items(entry: dict[str, Any]) -> list[str]:
+    items: list[str] = []
+    for group_label, group_key in (
+        ("family", "system_complexity_families"),
+        ("function", "system_complexity_functions"),
+    ):
+        group = entry.get(group_key, {})
+        if not isinstance(group, dict):
+            continue
+        for item_name, metrics in group.items():
+            if not isinstance(metrics, dict):
+                continue
+            delta_lines = _as_int(metrics.get("delta_lines"))
+            delta_bool_ops = _as_int(metrics.get("delta_bool_ops"))
+            delta_ifs = _as_int(metrics.get("delta_ifs"))
+            if (
+                delta_lines >= STRUCTURAL_AUDIT_LINE_GROWTH_TRIGGER
+                or delta_bool_ops >= STRUCTURAL_AUDIT_BOOL_GROWTH_TRIGGER
+                or delta_ifs >= STRUCTURAL_AUDIT_IF_GROWTH_TRIGGER
+            ):
+                items.append(
+                    f"{group_label} `{item_name}` "
+                    f"L{delta_lines:+d}/B{delta_bool_ops:+d}/I{delta_ifs:+d}"
+                )
+    return items
+
+
+def _entry_has_large_complexity_growth(entry: dict[str, Any]) -> bool:
+    return bool(_complexity_growth_trigger_items(entry))
+
+
+def _structural_failure_tokens(entry: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    cluster_key = str(entry.get("cluster_key", "")).strip()
+    if cluster_key:
+        tokens.add(f"cluster:{cluster_key}")
+    for region in entry.get("system_ordinary_changed_regions", ()) or ():
+        region_text = str(region).strip()
+        if region_text:
+            tokens.add(f"region:{region_text}")
+    for family in entry.get("system_ordinary_region_families", ()) or ():
+        family_text = str(family).strip()
+        if family_text:
+            tokens.add(f"family:{family_text}")
+    target_family = str(entry.get("target_family", "")).strip()
+    if target_family:
+        tokens.add(f"target:{target_family}")
+    return tokens
+
+
+def _is_structural_failure_entry(entry: dict[str, Any]) -> bool:
+    if bool(entry.get("structural_audit_round")):
+        return False
+    outcome = str(entry.get("outcome", "")).strip()
+    stop_stage = str(entry.get("stop_stage", "")).strip()
+    return (
+        outcome in STRUCTURAL_AUDIT_FAILURE_OUTCOMES
+        and stop_stage in STRUCTURAL_AUDIT_FAILURE_STOP_STAGES
+    )
+
+
+def _count_consecutive_structural_failures(
+    recent_entries: list[dict[str, Any]],
+    current_entry: dict[str, Any],
+) -> int:
+    current_tokens = _structural_failure_tokens(current_entry)
+    if not current_tokens or not _is_structural_failure_entry(current_entry):
+        return 0
+    current_reference_hash = str(current_entry.get("reference_code_hash", "")).strip()
+    count = 0
+    for entry in reversed([*recent_entries, current_entry]):
+        if not _is_structural_failure_entry(entry):
+            break
+        if current_reference_hash and str(entry.get("reference_code_hash", "")).strip() != current_reference_hash:
+            break
+        if not (_structural_failure_tokens(entry) & current_tokens):
+            break
+        count += 1
+    return count
+
+
+def _structural_audit_trigger_from_entry(
+    entry: dict[str, Any],
+    recent_entries: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if bool(entry.get("structural_audit_round")) or not _is_structural_failure_entry(entry):
+        return None
+
+    growth_items = _complexity_growth_trigger_items(entry)
+    if growth_items:
+        return {
+            "kind": "large_complexity_growth",
+            "reason": "单轮结构复杂度明显增长但没有晋级",
+            "items": tuple(growth_items[:5]),
+            "source_iteration": entry.get("iteration"),
+            "source_candidate_id": entry.get("candidate_id", ""),
+            "reference_code_hash": entry.get("reference_code_hash", ""),
+        }
+
+    failure_count = _count_consecutive_structural_failures(recent_entries, entry)
+    if failure_count >= STRUCTURAL_AUDIT_CONSECUTIVE_FAILURES:
+        return {
+            "kind": "consecutive_structural_failures",
+            "reason": f"同一 slot / cluster 在当前 reference 下连续失败 {failure_count} 次",
+            "items": tuple(sorted(_structural_failure_tokens(entry))[:5]),
+            "source_iteration": entry.get("iteration"),
+            "source_candidate_id": entry.get("candidate_id", ""),
+            "reference_code_hash": entry.get("reference_code_hash", ""),
+            "failure_count": failure_count,
+        }
+    return None
+
+
+def _structural_audit_trigger_text(trigger: dict[str, Any] | None) -> str:
+    if not trigger:
+        return ""
+    items = trigger.get("items", ()) or ()
+    item_text = "；".join(str(item) for item in items if str(item).strip())
+    if not item_text:
+        item_text = "-"
+    return (
+        f"- 触发原因: {str(trigger.get('reason', '')).strip() or '结构自检'}\n"
+        f"- 来源轮次: {trigger.get('source_iteration', '-')}; "
+        f"candidate_id: {str(trigger.get('source_candidate_id', '')).strip() or '-'}\n"
+        f"- 关联证据: {item_text}"
+    )
+
+
+def _validate_structural_audit_candidate_complexity(base_source: str, candidate_source: str) -> None:
+    complexity_delta = build_strategy_complexity_delta(base_source, candidate_source)
+    growth_items: list[str] = []
+    for group_label, group_key in (
+        ("family", "families"),
+        ("function", "functions"),
+    ):
+        group = complexity_delta.get(group_key, {})
+        if not isinstance(group, dict):
+            continue
+        for item_name, metrics in group.items():
+            if not isinstance(metrics, dict):
+                continue
+            delta_lines = _as_int(metrics.get("delta_lines"))
+            delta_bool_ops = _as_int(metrics.get("delta_bool_ops"))
+            delta_ifs = _as_int(metrics.get("delta_ifs"))
+            if delta_lines > 0 or delta_bool_ops > 0 or delta_ifs > 0:
+                growth_items.append(
+                    f"{group_label} `{item_name}` "
+                    f"L{delta_lines:+d}/B{delta_bool_ops:+d}/I{delta_ifs:+d}"
+                )
+    if growth_items:
+        raise StrategySourceError(
+            "结构自检修复轮禁止净增加复杂度: " + "；".join(growth_items[:6])
+        )
+
+
 def _build_model_round_brief(
     base_source: str,
     journal_entries: list[dict[str, Any]],
@@ -3207,6 +3361,7 @@ def _build_model_round_brief(
     workspace_root: Path,
     planner_session_kind: str = "planner",
     use_persistent_planner_session: bool = True,
+    structural_audit_trigger: dict[str, Any] | None = None,
 ) -> StrategyRoundBrief:
     report = best_report
     if report is None:
@@ -3241,6 +3396,7 @@ def _build_model_round_brief(
         benchmark_label=_benchmark_role(),
         current_base_role=_reference_role(),
         score_regime=SCORE_REGIME,
+        structural_audit_trigger_text=_structural_audit_trigger_text(structural_audit_trigger),
         session_mode=session_mode,
         operator_focus_text=_load_operator_focus_text(),
         operator_focus_path="config/research_v2_operator_focus.md",
@@ -3260,11 +3416,15 @@ def _build_model_round_brief(
         trade_activity_train_range_high=RUNTIME.scoring.trade_activity_train_range_high,
         trade_activity_validation_range_low=RUNTIME.scoring.trade_activity_validation_range_low,
         trade_activity_validation_range_high=RUNTIME.scoring.trade_activity_validation_range_high,
-        promotion_timed_return_weight=RUNTIME.scoring.promotion_timed_return_weight,
-        promotion_trade_activity_penalty_weight=RUNTIME.scoring.promotion_trade_activity_penalty_weight,
         trade_idle_penalty_weight=RUNTIME.scoring.trade_idle_penalty_weight,
-        trade_participation_penalty_weight=RUNTIME.scoring.trade_participation_penalty_weight,
         max_trade_idle_days=RUNTIME.scoring.max_trade_idle_days,
+        activity_multiplier_floor_monthly_entries=RUNTIME.scoring.activity_multiplier_floor_monthly_entries,
+        activity_multiplier_low_monthly_entries=RUNTIME.scoring.activity_multiplier_low_monthly_entries,
+        activity_multiplier_preferred_monthly_entries=RUNTIME.scoring.activity_multiplier_preferred_monthly_entries,
+        activity_multiplier_full_monthly_entries=RUNTIME.scoring.activity_multiplier_full_monthly_entries,
+        activity_multiplier_floor_value=RUNTIME.scoring.activity_multiplier_floor_value,
+        activity_multiplier_low_value=RUNTIME.scoring.activity_multiplier_low_value,
+        activity_multiplier_preferred_value=RUNTIME.scoring.activity_multiplier_preferred_value,
     )
     round_brief = _request_validated_round_brief(
         base_source=base_source,
@@ -3331,6 +3491,7 @@ def _run_edit_worker(
     workspace_root: Path,
     phase: str,
     repair_attempt: int | None = None,
+    structural_audit_trigger: dict[str, Any] | None = None,
 ) -> str:
     prompt = build_strategy_edit_worker_prompt(
         candidate_id=round_brief.candidate_id,
@@ -3342,6 +3503,7 @@ def _run_edit_worker(
         novelty_proof=round_brief.novelty_proof,
         exit_range_scan=round_brief.exit_range_scan,
         evaluation_digest_text=_build_edit_worker_evaluation_digest(best_report),
+        structural_audit_trigger_text=_structural_audit_trigger_text(structural_audit_trigger),
     )
     return _run_model_text_request(
         prompt=prompt,
@@ -3418,7 +3580,14 @@ def _regenerate_model_round_brief(
     workspace_root: Path,
     planner_session_kind: str = "planner",
     use_persistent_planner_session: bool = True,
+    structural_audit_trigger: dict[str, Any] | None = None,
 ) -> StrategyRoundBrief:
+    feedback_note = str(block_info.get("feedback_note", "")).strip()
+    structural_audit_text = _structural_audit_trigger_text(structural_audit_trigger)
+    if structural_audit_text:
+        feedback_note = (
+            f"结构自检修复轮继续有效：\n{structural_audit_text}\n\n{feedback_note}"
+        ).strip()
     prompt = build_strategy_exploration_repair_prompt(
         candidate_id=failed_candidate.candidate_id,
         primary_direction=failed_candidate.primary_direction,
@@ -3433,7 +3602,7 @@ def _regenerate_model_round_brief(
         blocked_reason=str(block_info.get("blocked_reason", "")).strip() or "系统拒收",
         locked_clusters=tuple(block_info.get("current_locks", ()) or ()),
         regeneration_attempt=regeneration_attempt,
-        feedback_note=str(block_info.get("feedback_note", "")).strip(),
+        feedback_note=feedback_note,
     )
     round_brief = _request_validated_round_brief(
         base_source=base_source,
@@ -3560,6 +3729,7 @@ def _build_model_candidate(
     workspace_root: Path,
     planner_session_kind: str = "planner",
     use_persistent_planner_session: bool = True,
+    structural_audit_trigger: dict[str, Any] | None = None,
 ) -> StrategyCandidate:
     workspace_strategy_file = workspace_root / MODEL_WORKSPACE_STRATEGY_PATH
     round_brief = _build_model_round_brief(
@@ -3568,12 +3738,14 @@ def _build_model_candidate(
         workspace_root=workspace_root,
         planner_session_kind=planner_session_kind,
         use_persistent_planner_session=use_persistent_planner_session,
+        structural_audit_trigger=structural_audit_trigger,
     )
     last_response_text = _run_edit_worker(
         base_source=base_source,
         round_brief=round_brief,
         workspace_root=workspace_root,
         phase="model_edit_worker",
+        structural_audit_trigger=structural_audit_trigger,
     )
     no_edit_errors: list[str] = []
     try:
@@ -3653,6 +3825,7 @@ def _regenerate_model_candidate(
     workspace_root: Path,
     planner_session_kind: str = "planner",
     use_persistent_planner_session: bool = True,
+    structural_audit_trigger: dict[str, Any] | None = None,
 ) -> StrategyCandidate:
     _persist_last_rejected_candidate_snapshot(
         memory_root=RUNTIME.paths.memory_dir,
@@ -3672,6 +3845,7 @@ def _regenerate_model_candidate(
         workspace_root=workspace_root,
         planner_session_kind=planner_session_kind,
         use_persistent_planner_session=use_persistent_planner_session,
+        structural_audit_trigger=structural_audit_trigger,
     )
     _run_edit_worker(
         base_source=base_source,
@@ -3679,6 +3853,7 @@ def _regenerate_model_candidate(
         workspace_root=workspace_root,
         phase="model_regenerate_edit_worker",
         repair_attempt=regeneration_attempt,
+        structural_audit_trigger=structural_audit_trigger,
     )
     return _candidate_from_round_brief_with_validation_repair(
         round_brief=round_brief,
@@ -3717,6 +3892,7 @@ def build_strategy_candidate(
     workspace_root: Path,
     planner_session_kind: str = "planner",
     use_persistent_planner_session: bool = True,
+    structural_audit_trigger: dict[str, Any] | None = None,
 ) -> StrategyCandidate:
     try:
         return _build_model_candidate(
@@ -3725,6 +3901,7 @@ def build_strategy_candidate(
             workspace_root=workspace_root,
             planner_session_kind=planner_session_kind,
             use_persistent_planner_session=use_persistent_planner_session,
+            structural_audit_trigger=structural_audit_trigger,
         )
     except StrategyGenerationTransientError:
         raise
@@ -4051,11 +4228,18 @@ def _build_journal_entry(
     return entry
 
 
-def _promotion_acceptance_decision(report: EvaluationReport) -> tuple[bool, str]:
+def _promotion_acceptance_decision(
+    report: EvaluationReport,
+    *,
+    structural_audit: bool = False,
+) -> tuple[bool, str]:
     if best_report is None:
         return False, "reference state is not initialized"
     if not report.gate_passed:
         return False, report.gate_reason
+
+    if structural_audit:
+        return True, "结构自检修复通过，跳过 promotion 比较"
 
     if not best_report.gate_passed:
         return True, "通过(首个 gate-passed champion)"
@@ -4442,6 +4626,7 @@ def _candidate_with_repair(
 def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str:
     global best_source, best_report, champion_source, champion_report
     global champion_test_metrics, reference_stage_started_at, reference_stage_iteration
+    global pending_structural_audit_trigger
 
     if best_report is None:
         raise RuntimeError("reference state is not initialized")
@@ -4462,12 +4647,25 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         return "evaluation_only"
 
     journal_entries = load_journal_entries(RUNTIME.paths.journal_file)
-    planner_session_kind = "planner"
-    use_persistent_planner_session = True
+    structural_audit_trigger = pending_structural_audit_trigger
+    structural_audit_round = structural_audit_trigger is not None
+    pending_structural_audit_trigger = None
+    planner_session_kind = "planner_structural_audit" if structural_audit_round else "planner"
+    use_persistent_planner_session = not structural_audit_round
     write_heartbeat(
-        "iteration_preparing",
-        message=f"iteration {iteration_id} preparing candidate",
+        "structural_audit_preparing" if structural_audit_round else "iteration_preparing",
+        message=(
+            f"iteration {iteration_id} preparing structural audit candidate"
+            if structural_audit_round
+            else f"iteration {iteration_id} preparing candidate"
+        ),
+        structural_audit_round=structural_audit_round,
     )
+    if structural_audit_round:
+        log_info(
+            f"第 {iteration_id} 轮进入结构自检修复: "
+            f"{str(structural_audit_trigger.get('reason', '')).strip()}"
+        )
     if use_persistent_planner_session:
         _align_research_session_scope(force_reset=False)
     workspace_root = _prepare_agent_workspace(
@@ -4482,6 +4680,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             workspace_root=workspace_root,
             planner_session_kind=planner_session_kind,
             use_persistent_planner_session=use_persistent_planner_session,
+            structural_audit_trigger=structural_audit_trigger,
         )
     except (PlannerBriefInvalid, ReviewerRejected) as exc:
         write_strategy_source(RUNTIME.paths.strategy_file, best_source)
@@ -4601,6 +4800,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 workspace_root=workspace_root,
                 planner_session_kind=planner_session_kind,
                 use_persistent_planner_session=use_persistent_planner_session,
+                structural_audit_trigger=structural_audit_trigger,
             )
             continue
 
@@ -4700,6 +4900,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                 workspace_root=workspace_root,
                 planner_session_kind=planner_session_kind,
                 use_persistent_planner_session=use_persistent_planner_session,
+                structural_audit_trigger=structural_audit_trigger,
             )
             continue
 
@@ -4711,6 +4912,18 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                         candidate,
                         workspace_root=workspace_root,
                     )
+                    if structural_audit_round:
+                        try:
+                            _validate_structural_audit_candidate_complexity(
+                                best_source,
+                                candidate.strategy_code,
+                            )
+                        except StrategySourceError as exc:
+                            raise CandidateRepairExhausted(
+                                candidate,
+                                [str(exc)],
+                                failure_stage="candidate_validation",
+                            ) from exc
                     break
                 except CandidateBehavioralNoop as exc:
                     write_strategy_source(RUNTIME.paths.strategy_file, best_source)
@@ -4761,6 +4974,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                         workspace_root=workspace_root,
                         planner_session_kind=planner_session_kind,
                         use_persistent_planner_session=use_persistent_planner_session,
+                        structural_audit_trigger=structural_audit_trigger,
                     )
                     break
         except EarlyRejection as exc:
@@ -4774,7 +4988,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
                     candidate_report=None,
                     outcome="early_rejected",
                     stop_stage="early_reject",
-                    gate_reason="前段趋势捕获过差",
+                    gate_reason="前段稳健时间块收益过差",
                     note=str(exc),
                 ),
                 strategy_source=candidate.strategy_code,
@@ -4785,7 +4999,7 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             write_heartbeat(
                 "iteration_early_rejected",
                 message=f"iteration {iteration_id} early rejected: {exc}",
-                gate="前段趋势捕获过差",
+                gate="前段稳健时间块收益过差",
             )
             return "early_rejected"
         except CandidateRepairExhausted as exc:
@@ -4817,7 +5031,10 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             continue
         break
 
-    champion_accepted, decision_reason = _promotion_acceptance_decision(candidate_report)
+    champion_accepted, decision_reason = _promotion_acceptance_decision(
+        candidate_report,
+        structural_audit=structural_audit_round,
+    )
     accepted = champion_accepted
     entry_note = ""
     if not accepted and candidate_report.gate_passed:
@@ -4833,7 +5050,15 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         gate_reason=decision_reason if not accepted else None,
         note=entry_note,
         extra_fields={
-            "reference_update_kind": "champion" if champion_accepted else "none",
+            "reference_update_kind": (
+                "structural_audit_replace"
+                if champion_accepted and structural_audit_round
+                else "champion"
+                if champion_accepted
+                else "none"
+            ),
+            "structural_audit_round": structural_audit_round,
+            "structural_audit_trigger": structural_audit_trigger or {},
         },
     )
     if accepted:
@@ -4900,19 +5125,25 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         )
         if maybe_compact(RUNTIME.paths.journal_file):
             log_info("研究日志已压缩")
+        accepted_label = "结构自检修复替换" if structural_audit_round else "新 champion"
         log_info(
-            f"🚀 第 {iteration_id} 轮产生新 champion: "
+            f"🚀 第 {iteration_id} 轮产生{accepted_label}: "
             f"quality={best_report.metrics['quality_score']:.2f}, "
             f"promotion={best_report.metrics['promotion_score']:.2f}"
         )
         log_info(candidate_report.summary_text)
         write_heartbeat(
-            "new_champion",
-            message=f"iteration {iteration_id} champion accepted",
+            "structural_audit_replaced" if structural_audit_round else "new_champion",
+            message=(
+                f"iteration {iteration_id} structural audit replacement accepted"
+                if structural_audit_round
+                else f"iteration {iteration_id} champion accepted"
+            ),
             reference_role=_reference_role(),
             promotion=best_report.metrics["promotion_score"],
             quality=best_report.metrics["quality_score"],
             gate=best_report.gate_reason,
+            structural_audit_round=structural_audit_round,
         )
         chart_paths = PerformanceChartPaths(validation_chart=None, selection_chart=None)
         champion_snapshot_dir: Path | None = None
@@ -4961,7 +5192,11 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
             log_info(f"新 champion round artifact 归档失败: {exc}")
             logging.exception("new champion round artifact persist failed(iteration=%s)", iteration_id)
         discord_message = build_discord_summary_message(
-            title=f"🚀 研究器 v2 新 champion #{iteration_id}",
+            title=(
+                f"🔧 研究器 v2 结构自检替换 #{iteration_id}"
+                if structural_audit_round
+                else f"🚀 研究器 v2 新 champion #{iteration_id}"
+            ),
             report=best_report,
             eval_window_count=EVAL_WINDOW_COUNT,
             validation_window_count=VALIDATION_WINDOW_COUNT,
@@ -4990,6 +5225,19 @@ def run_iteration(iteration_id: int, use_model_optimization: bool = True) -> str
         log_info("研究日志已压缩")
     write_strategy_source(RUNTIME.paths.strategy_file, best_source)
     reload_strategy_module()
+    if not structural_audit_round:
+        next_audit_trigger = _structural_audit_trigger_from_entry(entry_base, recent_entries)
+        if next_audit_trigger is not None:
+            pending_structural_audit_trigger = next_audit_trigger
+            reason = str(next_audit_trigger.get("reason", "")).strip() or "结构自检"
+            log_info(f"下一轮进入结构自检修复: {reason}")
+            write_heartbeat(
+                "structural_audit_queued",
+                message=f"iteration {iteration_id} queued structural audit",
+                reason=reason,
+                source_iteration=next_audit_trigger.get("source_iteration"),
+                source_candidate_id=str(next_audit_trigger.get("source_candidate_id", "")).strip(),
+            )
     if str(entry_base.get("outcome", "")).strip() == "duplicate_skipped":
         log_info(
             f"第 {iteration_id} 轮跳过: 候选完整评估后命中最近重复结果盆地 "

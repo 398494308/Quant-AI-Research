@@ -31,7 +31,7 @@
 - 事实层：`15m`
 - `1h / 4h` 由 `15m` 聚合得到，只做趋势和环境确认
 - 回测执行价优先使用 `1m`
-- 当前评分口径：`trend_capture_v20_clean_trend_segments`
+- 当前评分口径：`robust_block_v26_activity_mean`
 
 时间窗口：
 
@@ -43,16 +43,20 @@
 
 - 候选必须先过 `gate`
 - 已有 champion 时，候选还必须 `promotion_score` 严格高于当前 active reference 才能刷新；当前取消的是额外晋级边际，不是“过 gate 就替换”
-- `promotion_score = 0.60 * capture_score + 0.40 * timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`
-- `capture_score` 使用固定的 clean trend segments：先用中度放开的阈值找候选趋势段，再用趋势效率和方向一致性过滤震荡段；主评分使用连续 `train / val` 数据源，`train` 从已有 `train+val` 连续回测按 `val` 起点切出，不新增回测；每侧趋势抓取分仍是“段等权均分 50% + 原权重均分 50%”的混合方式；`test_trend_capture_score` 也使用同一混合口径；bull 和 bear 都只奖励账户正收益
+- v26 主分使用活跃度调整后的稳健时间块收益：train/val 各自用 `28` 天收益块的 `mean/median/P25` 聚合，`min` 只做诊断；低交易月频只折扣正收益，负收益不打折
+- `main_score = robust_time_score - benchmark_hurdle_score`，其中正向 buy&hold 稳健分按 `0.25` 形成轻量基准扣分
+- `promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score - trade_idle_penalty`
+- `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率；capture 仍使用固定 clean trend segments，并保留“段等权均分 50% + 原权重均分 50%”的混合口径
 - Fear & Greed 情绪数据现在只作为可选 `market_state` 信息源暴露给策略，字段包括 `sentiment`、`fear_greed_value`、`fear_greed_ema7`、`fear_greed_delta1/3/7`；它不进入评分、gate 或 planner 强制目标
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标
-- `trade_activity_penalty` 是低频与长空窗惩罚：交易频率按非加仓开仓数计算，加仓不计入；希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天；低于交易数下沿或超过空窗上限才扣分，不单独做交易数硬 gate
+- 交易频率按非加仓开仓数计算，加仓不计入；目标约 `10-15` 笔/月，低于目标会通过 activity multiplier 折扣正收益，最长无新开仓超过约 `7` 天才产生空窗扣分；交易数短缺不再重复扣分
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position
-- 鲁棒性软惩罚不额外回测；它复用已有 `train` 滚动分数、`val` 分块分数和 `train/val` 固定窗口 Ulcer，检查 `val` 是否明显跑出 `train` 的宽分布包络，以及两侧波动或回撤结构是否严重不一致
-- `train` 滚动窗口均值/中位数只做诊断；`val` 分块稳定性和严重过拟合集中度继续用于 gate
+- Regime scorecard 只做解释工具，不进入评分或 gate；它复用已有 ADX/CHOP/ATR、flow、成交量代理、Fear & Greed 和价格自身波动，帮助判断什么时候适合动量、什么时候应该缩手
+- 鲁棒性软惩罚不额外回测；它复用已有 train/val 稳健收益块和 `train/val` Ulcer，检查两侧分布是否严重不一致
+- `train` walk-forward 均值/中位数现在按 robust block 分计算，只做诊断；严重过拟合集中度继续用于 gate
+- 明显差候选的提前淘汰会复用已完成的 walk-forward 窗口结果，不再额外重跑累计 train 区间
 - `test` 对新 champion 同步运行；对已完成完整评估但未保留的候选会后台异步补跑关键指标，只做观察记录，不参与晋升，也不进入 prompt
-- 复杂度信息现在只做只读诊断，只写入 `journal / wiki` 供人工查看，不再进入 `planner / reviewer` prompt，也不再自动触发压缩任务
+- 复杂度默认只做诊断，不拦普通候选；若普通轮出现明显复杂度增长但未晋级，或同一 slot / cluster 连续失败 3 次，系统会排队下一轮结构自检修复。自检轮通过现有基础安全门后跳过 `promotion_score` 比较并替换 active reference
 - `config/research_v2_champion_review.md` 是绑定当前 champion hash 的人工观察卡，只给 planner 做软引导；新 champion 后自动忽略，直到人工更新 hash。
 
 ## 研究器工作流
@@ -65,11 +69,12 @@
 
 关键点：
 
-- `planner` 是唯一持久 session，只负责想方向和写 `draft brief`。
+- 普通研究轮的 `planner` 是唯一持久 session，只负责想方向和写 `draft brief`；结构自检修复轮使用独立短 session。
 - `reviewer` 每轮 fresh，只判断 draft 是否值得落码，结论只有 `PASS / REVISE`。
 - `edit_worker` 只改 [src/strategy_macd_aggressive.py](src/strategy_macd_aggressive.py)。
 - 主进程负责 `diff / smoke / behavioral_noop / exit_range_scan / full eval / gate / 归档 / 播报`；`exit_range_scan` 只做单参数 3 点轻量预筛。
 - 没有刷新 `champion` 时，结果写回 `journal / wiki / reviewer_summary_card / direction_board`；若该轮已完成 full eval，还会后台异步补跑 `test` 关键指标留档，然后继续同一 stage。
+- 如果普通轮触发结构自检，下一轮只做删减、合并、参数化泛化或移除无效分支；自检轮仍必须过源码校验、smoke、完整评估和 gate。
 - 同一 stage 内，即使出现 reviewer 打回、`behavioral_noop`、同轮重生或方向切换，`planner` 也不自动重置 session；只有手工重开 stage 或刷新 `champion` 才重置。
 - 刷新 `champion` 时，会同步跑 `test`、归档快照，然后重置 stage 和 planner session。
 - `config/research_v2_champion_review.md` 是绑定当前 champion hash 的短人工观察卡；新 champion 后自动失效。
@@ -126,7 +131,7 @@ flowchart TB
 - `GPT` 更适合固定框架、规则严密、执行链稳定的角色，例如 `reviewer / edit_worker / repair_worker / summary_worker`
 - `DeepSeek` 在发散找方向、提出新假设、快速换研究层级这类 `planner` 任务里，当前表现更好
 
-这个结论只针对当前仓库、当前评分口径 `trend_capture_v20_clean_trend_segments` 和当前这组实验流程成立，不把它外推成所有任务的一般结论。
+这个结论只针对当前仓库、当前评分口径 `robust_block_v26_activity_mean` 和当前这组实验流程成立，不把它外推成所有任务的一般结论。
 
 ### 为什么保留混合架构
 
@@ -139,19 +144,22 @@ flowchart TB
 
 ## 手工瘦身 SOP
 
-当前复杂度不再由系统自动压缩。推荐人工 SOP：
+普通轮不会因为复杂度诊断直接被系统拒收；系统只在明显结构膨胀或同一 slot / cluster 连续失败后排队一次结构自检修复。人工仍可主动瘦身，推荐 SOP：
 
 1. 停掉研究器
 2. 手工瘦身当前策略，或手工替换 active reference
-3. 执行 [scripts/reset_research_macd_aggressive_v2_stage.sh](scripts/reset_research_macd_aggressive_v2_stage.sh)
-4. 重新启动研究器，进入新 stage
+3. 若替换旧 source，先迁移到当前固定因子槽结构
+4. 执行 `python3 scripts/research_macd_aggressive_v2.py --reset-champion --no-optimize`
+5. 执行 [scripts/reset_research_macd_aggressive_v2_stage.sh](scripts/reset_research_macd_aggressive_v2_stage.sh)
+6. 重新启动研究器，进入新 stage
 
 这个脚本会保留 `memory/raw/*`，但清空 front memory、session、workspace 和当前 stage journal。
 
 补充两条边界：
 
 - 研究器是由 `scripts/run_research_macd_aggressive_v2.sh` 的 supervisor 拉起；手工停机要走 `bash scripts/manage_research_macd_aggressive_v2.sh stop`，不要只杀 python 子进程，否则会被自动拉起。
-- 研究器启动时会先从 `backups/strategy_macd_aggressive_v2_best.py` 载入 active reference 并回写到 `src/strategy_macd_aggressive.py`；手工瘦身当前基底时，要同步 `src` 与 `best/champion` 快照。
+- 当前策略是固定框架 + 固定因子槽结构；研究器只能改 `PARAMS` 既有 key、开放 `EXIT_PARAMS`、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体，不能改 `_strategy_core()` 或新增 slot/helper。
+- 研究器启动时会先从 `backups/strategy_macd_aggressive_v2_best.py` 载入 active reference 并回写到 `src/strategy_macd_aggressive.py`；手工瘦身当前基底后，要用 `--reset-champion --no-optimize` 同步 `src` 与 `best/champion` 快照。
 
 ## 常用命令
 

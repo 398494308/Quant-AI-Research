@@ -6,11 +6,14 @@ import re
 from typing import Any
 
 from research_v2.strategy_code import (
+    FACTOR_SLOT_FUNCTIONS,
+    FRAMEWORK_FUNCTIONS,
+    FRAMEWORK_TOP_LEVEL_CONSTANTS,
     REQUIRED_FUNCTIONS,
     REQUIRED_TOP_LEVEL_CONSTANTS,
 )
 
-# 兼容旧调用：整文件可编辑后，这个白名单常量不再参与任何边界校验。
+# 兼容旧调用：新框架由 strategy_code 按固定 slot 和参数块做硬校验。
 EDITABLE_REGIONS: tuple[str, ...] = ()
 
 _MODEL_VISIBLE_HOLDOUT_TERMS = (
@@ -48,8 +51,11 @@ def _model_visible_lines(lines: list[str]) -> list[str]:
 
 
 def _required_symbol_text() -> str:
-    constant_symbols = "、".join(f"`{name}`" for name in REQUIRED_TOP_LEVEL_CONSTANTS)
-    function_symbols = "、".join(f"`{function_name}()`" for function_name in REQUIRED_FUNCTIONS)
+    constant_symbols = "、".join(
+        f"`{name}`" for name in (*REQUIRED_TOP_LEVEL_CONSTANTS, *FRAMEWORK_TOP_LEVEL_CONSTANTS)
+    )
+    framework_symbols = (*REQUIRED_FUNCTIONS, *FRAMEWORK_FUNCTIONS, *FACTOR_SLOT_FUNCTIONS)
+    function_symbols = "、".join(f"`{function_name}()`" for function_name in framework_symbols)
     return f"`PARAMS`、{constant_symbols}、{function_symbols}"
 
 
@@ -112,14 +118,25 @@ def _markdown_section_bullets(text: str) -> dict[str, list[str]]:
 
 def _compact_operator_focus_text(text: str) -> str:
     sections = _markdown_section_bullets(text)
+    priority_lines = sections.get("优先方向", [])
+    important_terms = ("2025-11", "连续下跌", "连续 bear", "核心短板")
     lines: list[str] = []
-    lines.extend(sections.get("优先方向", [])[:4])
-    lines.extend(sections.get("降权方向", [])[:3])
-    lines.extend(sections.get("默认动作", [])[:2])
+    for line in priority_lines:
+        if any(term in line for term in important_terms) and line not in lines:
+            lines.append(line)
+    for line in priority_lines[:5]:
+        if line not in lines:
+            lines.append(line)
+    for line in sections.get("默认动作", [])[:2]:
+        if line not in lines:
+            lines.append(line)
+    for line in sections.get("降权方向", [])[:2]:
+        if line not in lines:
+            lines.append(line)
     if not lines:
         lines = _bullet_lines(text)
     lines = _model_visible_lines(lines)
-    return _limit_compact_lines(lines, max_lines=9, max_chars=720)
+    return _limit_compact_lines(lines, max_lines=10, max_chars=1000)
 
 
 def _compact_champion_review_text(text: str) -> str:
@@ -260,20 +277,23 @@ def build_strategy_agents_instructions() -> str:
 - 不要 hard code，不要堆屎。
 - 最近结构化失败证据优先级高于 `weak side` 或 champion 缺陷提示；先复盘失败点，再决定是否继续同方向。
 - 每轮只验证一个可证伪假设；改动要能映射到真实交易路径变化，而不是只制造源码 diff。
+- 当前策略已经改成固定框架 + 固定因子槽；主框架不能改，只能在既有参数、开放退出参数、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体里表达假设。
+- 因子槽接近满复杂度时，先删旧、并旧、替换旧；新增或启用因子前，必须说明被替换的是哪条旧条件或为什么不需要增加复杂度。
 - 如果某个主方向已经高热，优先换失败层、关键规则链或真实触达路径；不要只换标签或措辞。
 - 优先保持代码结构化、规则块命名清晰、阈值集中、因果链可解释。
 - 默认先做删减、合并、替换，再考虑新增条件；如果一个新条件只覆盖很窄的历史片段，优先删旧条件或改旧阈值，不要继续叠分叉。
 - 不要把同一侧 path 拆成多个近似微变体；一个 path 没有明显新增交易路径时，应视为失败假设，而不是继续微调同一区间。
-- 允许只改 `strategy()` / `PARAMS` / `EXIT_PARAMS` / 少量新 helper 做结构化重排，但前提是你能明确说明这会改变最终信号集合、退出集合或真实交易路径；否则不要为了造 diff 去动它们。
+- 允许通过 `PARAMS`、开放 `EXIT_PARAMS`、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体表达假设；不要改 `strategy()` / `_strategy_core()` / 候选选择框架。
 - 明确要求：不要“堆屎”。新增前先检查现有规则块、阈值和最终放行链是否已经表达了同一因果。
 - 若现有脚本里已经有近似逻辑，不要换个名字再写一份重复条件；优先删旧、并旧、改旧，禁止把同一因果链在不同 helper / path / veto 里重复实现。
 - 明确允许结构性删减轮：`remove_dead_gate`、`merge_veto`、`widen_outer_context` 都是合法 change_tags；这类轮次的目标是减少死分支、打通真实交易路径。
 
 源码护栏：
-- `src/strategy_macd_aggressive.py` 整份文件都允许修改，但改动必须克制、结构必须准确、添加必须有必要。
+- `src/strategy_macd_aggressive.py` 现在是硬锁框架：`_strategy_core()` 编排、候选生成顺序、slot 名称/数量/签名、`strategy()` / `strategy_decision()` 入口都不能改。
+- 允许修改的区域只有：`PARAMS` 既有 key 的值、开放的 `EXIT_PARAMS` 值、`FACTOR_SLOT_PARAMS` 中既有 slot 的数值、固定 `_slot_*()` 函数体。
 - 你不需要再自报 `edited_regions`；系统会根据真实 diff 自动归类 region / family，并据此做重复探索与结构诊断。
 - 必须保留这些符号，不允许删除、改名或合并回旧结构：{_required_symbol_text()}。
-- 不允许新增 `PARAMS` 键；允许少量结构化 helper / 常量，但不要借这个口子堆新因子。
+- 不允许新增 `PARAMS` 键、`EXIT_PARAMS` 键、slot 名称、top-level 常量或 helper；需要新因子时只能放进现有 `_slot_*()` 槽。
 - `EXIT_PARAMS` 中允许调止损、止盈、保本、追踪、持仓时间、趋势失效退出、`position_fraction`、`max_concurrent_positions`、`pyramid_trigger_pnl`、`pyramid_adx_min`；禁止修改 `leverage`、`position_size_min`、`position_size_max`、`pyramid_enabled`、`pyramid_max_times`、`pyramid_size_ratio`。
 - 不要引入网络、文件写入、随机数、外部依赖，也不要做无关重构、批量改名或大面积格式化。
 - 不要 hard code 针对单个日期、窗口、行情段或历史结果表的特判。
@@ -422,8 +442,9 @@ def build_strategy_research_prompt(
     reference_metrics: dict[str, Any] | None = None,
     benchmark_label: str = "champion",
     current_base_role: str = "champion",
-    score_regime: str = "trend_capture_v24_multiplicative_capture_core",
+    score_regime: str = "robust_block_v26_activity_mean",
     current_complexity_headroom_text: str = "",
+    structural_audit_trigger_text: str = "",
     session_mode: str = "resume",
     operator_focus_text: str = "",
     operator_focus_path: str = "config/research_v2_operator_focus.md",
@@ -446,11 +467,15 @@ def build_strategy_research_prompt(
     trade_activity_train_range_high: int = 270,
     trade_activity_validation_range_low: int = 120,
     trade_activity_validation_range_high: int = 180,
-    promotion_timed_return_weight: float = 0.50,
-    promotion_trade_activity_penalty_weight: float = 0.15,
     trade_idle_penalty_weight: float = 0.10,
-    trade_participation_penalty_weight: float = 0.10,
     max_trade_idle_days: float = 7.0,
+    activity_multiplier_floor_monthly_entries: float = 5.0,
+    activity_multiplier_low_monthly_entries: float = 7.0,
+    activity_multiplier_preferred_monthly_entries: float = 10.0,
+    activity_multiplier_full_monthly_entries: float = 15.0,
+    activity_multiplier_floor_value: float = 0.10,
+    activity_multiplier_low_value: float = 0.35,
+    activity_multiplier_preferred_value: float = 0.70,
 ) -> str:
     _ = (
         current_complexity_headroom_text,
@@ -458,6 +483,30 @@ def build_strategy_research_prompt(
     )
     side_bias_guidance = _side_bias_guidance(reference_metrics)
     side_bias_block = f"\n{side_bias_guidance}\n" if side_bias_guidance else ""
+    structural_audit_block = ""
+    if structural_audit_trigger_text.strip():
+        structural_audit_block = (
+            "\n结构自检修复轮（高优先级）:\n"
+            f"{structural_audit_trigger_text.strip()}\n"
+            "- 本轮目标是检查当前策略是否在某个 slot、规则链或局部阶段过度学习。\n"
+            "- 只提出删窄条件、合并重复条件、参数化泛化或移除无效分支的方案。\n"
+            "- 不要为了追分新增复杂分支；通过基础安全门后系统会跳过 promotion 比较并替换 active reference。\n"
+            "- 仍然不能使用 holdout、部署判断或任何人工只读数据。\n"
+        )
+    promotion_rule_line = (
+        f"- 当前评分口径是 `{score_regime}`；本轮是结构自检修复轮，候选仍必须先过 `gate`，"
+        "但通过基础安全门后会跳过 `promotion_score` 比较并替换 active reference。"
+        if structural_audit_block
+        else (
+            f"- 当前评分口径是 `{score_regime}`；候选必须先过 `gate`，且 `promotion_score` "
+            "严格高于当前 active reference，才有资格刷新 champion；当前不再要求额外晋级边际。"
+        )
+    )
+    promotion_reminder_line = (
+        "- 本轮是结构自检修复例外：仍要过 `gate`，但通过基础安全门后跳过 `promotion_score` 比较；这不是普通低分替换通道。"
+        if structural_audit_block
+        else "- 晋升要求是 `gate` 通过，且 `promotion_score` 严格高于当前 active reference；已取消的是额外晋级边际，不是“低分也可替换”"
+    )
     champion_focus_hint = _champion_focus_hint(reference_metrics)
     champion_focus_block = f"{champion_focus_hint}\n" if champion_focus_hint else ""
     bootstrap_excerpt = _bootstrap_journal_excerpt(journal_summary, max_lines=10, max_chars=900)
@@ -498,16 +547,20 @@ def build_strategy_research_prompt(
     )
     session_label = "stage_bootstrap" if session_mode == "bootstrap" else "stage_resume"
     return f"""当前回合任务：
+{structural_audit_block}
 - session 状态：`{session_label}`；先复盘最近结构化失败证据，再决定继续还是转向。
 - 围绕一个可证伪假设先写 round brief，交给后续 edit worker 落码。
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
-- 当前评分口径是 `{score_regime}`；候选必须先过 `gate`，且 `promotion_score` 严格高于当前 active reference，才有资格刷新 champion；当前不再要求额外晋级边际。
-- `promotion_score` 现在以 `adjusted_timed_return_score` 为唯一主收益项，权重约 `{promotion_timed_return_weight:.2f}`；`timed_return_score` 会按 `capture_core` 连续调整：`capture_core<=0.03` 时只释放低倍率，`0.12` 附近回到 1 倍，超过后继续加成但边际递减，避免低捕获策略只靠收益顶分。`capture_core = period_capture * side_multiplier`：period 看 train/val 是否都抓到，side 只在 bull/bear 偏弱时打折，偏科越大越靠弱项计分。再减去分段回撤惩罚、轻量鲁棒性软惩罚和 `trade_activity_penalty`。Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，开仓数/空窗/趋势机会覆盖惩罚权重约 `{promotion_trade_activity_penalty_weight:.2f}/{trade_idle_penalty_weight:.2f}/{trade_participation_penalty_weight:.2f}`。
-- 参数改动有中等最小步长硬规则：`PARAMS`/`EXIT_PARAMS` 的数值键相对 active reference 改动太小会被拒收；bars/lookback/hold/period 类至少约 15% 且不少于 4 根，0~1 阈值至少 0.01 或 8%，小比例至少 10% 且不少于 0.002，其他百分比至少 8% 且不少于 2 点；`exit_range_scan` 也只扫满足该步长的候选点。
+- 高优先级软约束：默认避免只做近邻阈值微调；如果确实需要小步长参数修正，必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。参数小改不会被技术拒收，但没有行为变化仍会被 `behavioral_noop` 拒收。
+{promotion_rule_line}
+- `promotion_score` 现在以 v26 活跃度调整时间块主分为核心：train/val 各自用 28 天收益块的 mean/median/P25 聚合，min 只做诊断；正收益会按月非加仓开仓频率打倍率，负收益不打折。正向 buy&hold 稳健分会按 0.25 形成轻量基准扣分。最终再减去回撤惩罚、轻量鲁棒性软惩罚和空窗惩罚。
+- `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率。不要再为固定 clean 单边段过拟合；优先让多数时间块稳定，同时用 regime scorecard 判断动量在哪些环境该开、该缩、该停。
+- Regime scorecard 只用已有数据：ADX/CHOP/ATR、flow_imbalance、Fear & Greed 和价格自身波动。它是解释工具，不是硬 gate；不能使用 holdout 或部署判断信息。
+- Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。月非加仓开仓频率低于 `{activity_multiplier_full_monthly_entries:.1f}` 会降低正收益计分：`{activity_multiplier_floor_monthly_entries:.1f}`/月约 `{activity_multiplier_floor_value:.2f}` 倍，`{activity_multiplier_low_monthly_entries:.1f}`/月约 `{activity_multiplier_low_value:.2f}` 倍，`{activity_multiplier_preferred_monthly_entries:.1f}`/月约 `{activity_multiplier_preferred_value:.2f}` 倍，`{activity_multiplier_full_monthly_entries:.1f}`/月及以上为 1.00 倍。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，空窗惩罚权重约 `{trade_idle_penalty_weight:.2f}`。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓不占这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - `capture_score` 只使用 clean trend segments：先用中度放开的趋势段候选，再过滤掉趋势效率或方向一致性不足的震荡段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
 - Fear & Greed 情绪数据已作为可选 `market_state` 输入暴露给策略，可读取 `sentiment`、`fear_greed_value`、`fear_greed_ema7`、`fear_greed_delta1/3/7`；它不进入评分或 gate，不是必须使用的信号。
-- 鲁棒性只做轻量软惩罚：用已有 `train` 滚动分数的 median/IQR/std 和 `val` 分块分数比较分布是否离谱，再轻查 `train/val` Ulcer 比；不额外回测。
+- 鲁棒性只做轻量软惩罚：用已有 train/val 稳健收益块的 median/IQR/std 比较分布是否离谱，再轻查 `train/val` Ulcer 比；不额外回测。
 - `train` 滚动窗口均值/中位数只做诊断；严重过拟合集中度仍保留为 gate；二者都不直接进入 `promotion_score` 主公式。
 
 当前 active reference 角色：`{current_base_role}`
@@ -530,19 +583,15 @@ def build_strategy_research_prompt(
 - 先判断上一版为什么失败，再决定继续还是转向；不要只因为弱侧还是 `long` 就留在旧路线。
 - 若 `primary_direction` 已高热，本轮至少要换失败层、关键规则链或真实触达路径，不要只换标签。
 - 新增 path 不等于新增交易；长侧重点看 `long_signal_path_ok -> long_final_veto_clear -> _trend_followthrough_long()`，空侧重点看 `breakdown_ready -> short_final_veto_clear -> _trend_followthrough_short()`。
-- 如果主要改 `_trend_followthrough_ok()`、`_trend_quality_ok()` 或 `_flow_confirmation_ok()`，必须确认现有 `strategy()` 路径会触达；否则优先改 `strategy()`。
+- 如果主要改 `_trend_followthrough_ok()`、`_trend_quality_ok()` 或 `_flow_confirmation_ok()`，必须确认现有 slot 和候选路径会触达；否则优先改对应 `_slot_*()` 或参数。
 - 若最近连续 `behavioral_noop` 或结果盆地重复，默认必须放大步长：优先换方向簇、换 choke point 或换最终放行链。
 - 若漏斗显示一侧长期 0 交易、outer_context 几乎全死，或 path 能过但 final_veto 基本全死，可以考虑结构性删减轮。
 - 读不到 `{direction_board_path}`、`{duplicate_watchlist_path}`、`{failure_wiki_path}` 或 `{history_package_path}` 不是合法 no-edit 理由；当前源码仍是硬事实源。
 
 当前口径的 gate / 评分提醒：
-- val 趋势段命中率 >= {min_validation_hit_rate:.0%}
-- val 趋势捕获分 >= 0.05
-- 交易活跃度现在会单独惩罚低频、长空窗与趋势机会覆盖不足：希望区间约是 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`；最长无新开仓约束是 `{max_trade_idle_days:.1f}` 天；趋势段命中率低会轻扣，但不要为了刷交易数制造无收益短交易
-- train 与 val 分数落差 <= {max_dev_validation_gap:.2f}
-- val 多头捕获 >= 0.00，val 空头捕获 >= 0.00
-- val 会再切成 {validation_block_count} 个连续时间分块：最差分块 >= {min_validation_block_floor:.2f}，负分块最多 {max_validation_block_failures} 个
-- 晋升要求是 `gate` 通过，且 `promotion_score` 严格高于当前 active reference；已取消的是额外晋级边际，不是“低分也可替换”
+- 交易量现在通过主分倍率约束，不再用交易数短缺重复扣分；目标仍约 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`，也就是约 10-15 笔/月。趋势机会覆盖短缺只做诊断，不要为了刷交易数制造无收益短交易。
+- capture、val趋势命中率、多空捕获、val趋势分块只做诊断，不是硬 gate
+{promotion_reminder_line}
 - 手续费拖累 <= 11.5%
 - train+val 严重集中度过拟合会直接淘汰
 
@@ -634,6 +683,7 @@ def build_strategy_edit_worker_prompt(
     exit_range_scan: dict[str, object] | None = None,
     closest_failed_cluster: str = "",
     current_complexity_headroom_text: str = "",
+    structural_audit_trigger_text: str = "",
     evaluation_digest_text: str = "",
 ) -> str:
     _ = current_complexity_headroom_text
@@ -643,6 +693,15 @@ def build_strategy_edit_worker_prompt(
         if evaluation_digest_text.strip()
         else "\n"
     )
+    structural_audit_block = ""
+    if structural_audit_trigger_text.strip():
+        structural_audit_block = (
+            "\n结构自检修复轮硬约束:\n"
+            f"{structural_audit_trigger_text.strip()}\n"
+            "- 只能删减、合并、参数化泛化或移除无效分支，不能新增复杂分支。\n"
+            "- 本轮改动到的 slot / family 净复杂度不得增加：lines、bool_ops、ifs 都必须小于等于改前。\n"
+            "- 参数值调整可以存在，但不得绕开上面的净复杂度要求。\n"
+        )
     range_scan_text = "none"
     if isinstance(exit_range_scan, dict) and exit_range_scan:
         range_scan_text = str(exit_range_scan.get("raw") or exit_range_scan)
@@ -658,11 +717,12 @@ def build_strategy_edit_worker_prompt(
 - novelty_proof: {novelty_proof or "-"}
 - exit_range_scan: {range_scan_text}
 {digest_block}
+{structural_audit_block}
 
 当前要求：
 - 只修改 `src/strategy_macd_aggressive.py`。
 - 先读取当前源码，再按上面的 brief 落一版真实代码改动。
-- 整份策略文件都允许修改，但必须克制、结构准确、添加有必要。
+- 策略主框架已硬锁；只能改 `PARAMS`、开放 `EXIT_PARAMS`、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体。
 - 优先改已经存在的命名规则块、阈值和最终放行链；不要为了造 diff 新写一套近似逻辑。
 - 如果你判断 brief 指向的 choke point 根本不在当前代码路径上，应在同一主题内改成能真实触达交易路径的实现，但不要改写研究方向本身。
 - 单轮改动预算只是参考，不是硬 gate：典型情况下优先控制为小 diff，少量新增、少量删除、少量参数或条件调整；超出这个范围必须是为了打通真实路径或删除旧冗余。
@@ -905,11 +965,11 @@ def build_strategy_runtime_repair_prompt(
 - 优先做最小必要修复，先保证代码可运行。
 - 若报错明确指向某块代码过胖或结构失控，优先删旧条件或合并旧分支，再继续保留原研究方向。
 - 不要把复杂度从一个函数搬到同 family 的别的 helper；这类“搬家”通常只是在换名字，没有解决问题。
-- 允许少量新 helper/常量做结构化抽离，但它们必须服务于删旧、并旧和提高清晰度，不能借机复制旧因果链。
+- 不允许新增 helper/常量；若需要新因子，必须放进现有固定 `_slot_*()` 函数体。
 - 若报错涉及缺失 helper / 缺失命名规则块，优先恢复缺失的原函数定义，保留拆分后的结构，不要把多个 helper 合并回旧函数。
 - 若报错涉及 `UnboundLocalError` / `NameError` / 条件变量缺失，优先恢复缺失变量定义，或把该变量的所有引用同步替换到新的等价变量；禁止只修一处而留下半残引用。
 - 除非原标签明显不准确，否则尽量保持 `primary_direction`、`change_tags`、`edited_regions` 稳定。
-- 允许修改整份 `src/strategy_macd_aggressive.py`，但不要借修复机会扩散改动。
+- 只能修允许区域；不要借修复机会改 `_strategy_core()`、候选选择、slot 名称或入口签名。
 - 不要引入网络、文件、随机数、外部依赖。
 - 不要趁修复机会重写无关逻辑，也不要 hard code 针对单个窗口或单段行情的特判。
 - 修复后的代码仍必须保持简洁、结构化、可读，避免补丁式堆条件。
@@ -974,7 +1034,7 @@ def build_strategy_exploration_repair_prompt(
 - 先复盘上一版错在目标层、choke point 还是步长；先决定继续还是转向，再写新方案。
 - 优先切到不同方向簇；若留在同簇，至少换外层 choke point、最终放行链、目标侧或核心规则块中的一项。
 - 若上一版是 `behavioral_noop`，默认说明局部假设没有触达真实行为层；不要沿用原 hypothesis / change_plan 只换表述。
-- 重生后的候选必须预计改变 smoke 窗口实际交易路径；如果上一版只是 helper / followthrough 变化但没有触发新交易，优先改 `strategy()` 的最终路径。
+- 重生后的候选必须预计改变 smoke 窗口实际交易路径；如果上一版只是 helper / followthrough 变化但没有触发新交易，优先改对应 `_slot_*()`、`FACTOR_SLOT_PARAMS` 或参数阈值。
 - 若附加反馈显示漏斗堵点仍在 `outer_context` 或 `final_veto`，允许直接做结构性删减轮：`remove_dead_gate`、`merge_veto`、`widen_outer_context`。
 - 动手前先看 `wiki/last_rejected_snapshot.md` 与 `wiki/reviewer_summary_card.md`；提交前再核对 `wiki/duplicate_watchlist.md` 与 `wiki/failure_wiki.md`。
 - 不要引入网络、文件、随机数、外部依赖；代码仍必须简洁、结构化、可读。

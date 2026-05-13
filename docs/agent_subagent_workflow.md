@@ -55,23 +55,28 @@ flowchart TB
 - 标的：`BTC-USDT-SWAP`，策略按 `20x` 合约研究。
 - 事实层：`15m`；`1h / 4h` 由 `15m` 聚合，只做确认层。
 - 执行层：优先使用 `1m` 回测成交。
-- 评分口径：`trend_capture_v24_multiplicative_capture_core`。
+- 评分口径：`robust_block_v26_activity_mean`。
 - `train`：`2023-07-01` 到 `2024-12-31`。
 - `val`：`2025-01-01` 到 `2025-12-31`。
 - `test`：`2026-01-01` 到 `2026-04-30`。
 - 晋升条件：候选先过 `gate`；已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference。当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则。
-- `promotion_score = 0.50 * adjusted_timed_return_score - drawdown_penalty_score - robustness_penalty_score - trade_activity_penalty`；`adjusted_timed_return_score` 会按 `capture_core` 连续调整，`capture_core<=0.03` 时低倍率，`0.12` 附近回到 1 倍，超过后继续加成但边际递减。低捕获或偏科策略不能只靠收益顶分。
-- 主评分使用连续 `train / val` 数据源；`train` 从已有 `train+val` 连续回测按 `val` 起点切出，walk-forward 继续用于诊断、鲁棒性和早停。
-- `capture_score` 使用固定的 clean trend segments：先用中度放开的阈值找候选趋势段，再用趋势效率和方向一致性过滤震荡段；最终仍按“段等权均分 50% + 原权重均分 50%”混合，减少少数最大趋势段的主导；bull 和 bear 都只奖励账户正收益。
-- `capture_core = period_capture * side_multiplier`：`period_capture` 是 train/val 平衡分；`side_multiplier` 由 bull/bear 平衡分决定，`side<=0.02` 时为 `0.35`，`0.02~0.10` 平滑升到 `1.00`，`side>=0.10` 后不再打折。
-- `PARAMS` / `EXIT_PARAMS` 数值改动有最小步长硬规则；bars/lookback/hold/period 类至少约 `15%` 且不少于 `4` 根，0 到 1 阈值至少 `0.01` 或 `8%`，小比例至少 `10%` 且不少于 `0.002`，其他百分比至少 `8%` 且不少于 `2` 点。`exit_range_scan` 的扫描点也必须满足同一规则。
-- 当前策略源码已做等价压缩，复杂度诊断从 `hard_cap` 降到 `warning_2`；复杂度仍只做人工诊断，不作为自动 gate。
+- 唯一例外是系统排队的“结构自检修复轮”：它不是普通追分轮，只在通过现有基础安全门后跳过 `promotion_score` 比较，用来替换掉明显局部过拟合或结构膨胀的 active reference。
+- v26 主分是活跃度调整后的稳健时间块收益：train/val 各自用 `28` 天收益块的 `mean/median/P25` 聚合，`min` 只做诊断；低月频只折扣正收益。
+- `benchmark_hurdle_score = max(0, buy_hold_robust_score) * 0.25`，只在 buy&hold 自身稳健分为正时形成轻量基准扣分。
+- `main_score = robust_time_score - benchmark_hurdle_score`。
+- `promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score - trade_idle_penalty`。
+- 主评分使用连续 `train / val` 数据源；`train` 从已有 `train+val` 连续回测按 `val` 起点切出，walk-forward 继续用于诊断和早停。
+- walk-forward 诊断按 v26 robust block 分；提前淘汰直接复用已完成的 walk-forward 窗口结果，不再额外重跑累计 train 区间。
+- `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率。capture 仍使用固定 clean trend segments，并保留“段等权均分 50% + 原权重均分 50%”的混合口径。
+- 参数步长现在是高优先级软约束，不是技术 gate：默认避免只做近邻阈值微调；如果需要小步长修正，planner 必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。真正的硬拦截是 smoke 行为不变、源码安全校验、gate 和 promotion。
+- 当前策略源码已做等价压缩；复杂度默认只做诊断，不拦普通候选。若普通轮出现单轮复杂度明显增长但未晋级，或同一 slot / cluster 在当前 reference 下连续失败 3 次，系统会排队下一轮结构自检修复。
 - Fear & Greed 情绪数据只作为策略可选输入暴露在 `market_state`，不进入评分、gate 或强制优化目标。
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标。
-- `trade_activity_penalty` 是低频、长空窗与趋势机会覆盖不足惩罚：交易频率按非加仓开仓数计算，加仓不计入；希望区间约是 `train 180-270 / val 120-180`，最长无新开仓约束是 `7` 天，clean trend 命中率不足会轻扣；当前只在主评分里减分，不再做硬 gate，且总上限为 `0.35`。
+- 交易频率按非加仓开仓数计算，加仓不计入；目标约 `train 180-270 / val 120-180`，也就是 `10-15` 笔/月。低频通过 activity multiplier 折扣正收益，最长无新开仓超过约 `7` 天才扣空窗分；趋势机会覆盖只做诊断。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - 交易数、`filled_entries` 和漏斗通过量只保留观察价值，不再作为下一轮方向的默认软触发。
-- 鲁棒性软惩罚不额外回测；它复用已有 `train` 滚动分数、`val` 分块分数和 `train/val` 固定窗口 Ulcer，检查 `val` 是否明显跑出 `train` 的宽分布包络，以及两侧波动或回撤结构是否严重不一致。
+- Regime scorecard 只做解释工具，不进入评分或 gate；它复用已有 ADX/CHOP/ATR、flow、成交量代理、Fear & Greed 和价格自身波动，帮助判断什么时候适合动量、什么时候应该缩手。
+- 鲁棒性软惩罚不额外回测；它复用已有 train/val 稳健收益块和 `train/val` Ulcer，检查两侧分布是否严重不一致。
 - `test` 只做人工只读观察；reject / duplicate_skipped 的异步 `test` 只进留档，不进 prompt、不进晋升；demo 是否可用也只由人工判断，不写进模型方向卡。
 
 ## 每一轮怎么跑
@@ -84,18 +89,36 @@ flowchart TB
 6. 若 `PASS`，`edit_worker` 把方向落到策略源码。
 7. 若出现 no-edit、语法错误、缺 helper、校验失败等技术问题，`repair_worker` 只修技术错误。
 8. 主进程检查真实 diff、重复源码、smoke 行为和关键漏斗变化。
-9. 如果 brief 指定单个连续型 `EXIT_PARAMS` 的 `exit_range_scan`，主进程最多扫 3 个值，只做轻量预筛；扫描点必须满足最小步长规则。
-10. 主进程跑完整 `train walk-forward + val`；评分阶段只使用已有评估结果和轻量预筛结果。
+9. 如果 brief 指定单个连续型 `EXIT_PARAMS` 的 `exit_range_scan`，主进程最多扫 3 个值，只做轻量预筛。
+10. 主进程跑完整 `train walk-forward + val`；评分阶段只使用已有评估结果和轻量预筛结果。若候选在前段 walk-forward robust 分与收益分都很差，会直接提前淘汰。
 11. 主进程执行 gate 与 promotion 判断。
 12. `summary_worker` 按最终真实 diff 回写候选摘要。
 13. 没有刷新 champion：写回 `journal / wiki / reviewer_summary_card / direction_board`；若该轮已完成 full eval，则后台异步补跑 `test` 关键指标留档，然后进入下一轮。
 14. 刷新 champion：更新策略快照，同步跑 `test`；图表优先复用本轮已评估的 `validation` 与 `train+val` 曲线，避免重复回测；随后 Discord 播报，归档 `champion_history`，然后重置 stage 与 planner session。
 
+## 结构自检修复轮
+
+这是一个轻量安全阀，不是长期模式，也不是新的评分目标。
+
+触发条件：
+
+- 普通轮完成 full eval 后没有晋级，且任一函数或 family 单轮增长达到 `lines >= 12`、`bool_ops >= 5` 或 `ifs >= 2`。
+- 同一 slot / cluster 在当前 reference 下连续失败 3 次。
+
+执行方式：
+
+- 下一轮进入一次性结构自检修复；使用独立 planner session，避免普通研究上下文把注意力继续带回旧方向。
+- planner 只判断是否某个 slot、规则链或局部阶段过度学习；只能提出删窄条件、合并重复条件、参数化泛化或移除无效分支。
+- edit_worker 仍只能改 `PARAMS`、开放 `EXIT_PARAMS`、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体；自检轮改动后的 `lines / bool_ops / ifs` 净复杂度不得增加。
+- 候选仍必须通过源码校验、smoke 行为变化、完整评估和现有 gate。
+- 通过基础安全门后，自检轮跳过 `promotion_score` 比较，直接替换 active reference，并把 journal 的 `reference_update_kind` 记为 `structural_audit_replace`。
+- 自检轮失败后回到当前 active reference，不连环触发自检。
+
 ## 各角色职责
 
 ### planner
 
-- 唯一持久 session。
+- 普通研究轮是唯一持久 session；结构自检修复轮使用独立短 session。
 - 负责提出研究方向和单一可证伪假设。
 - 必须先读当前人工卡、reviewer 卡、direction board 和前台记忆。
 - 如果 reviewer 打回，必须先吸收打回理由再重写。
@@ -112,7 +135,8 @@ flowchart TB
 
 - 只接收 reviewer 放行后的 brief。
 - 只改 `src/strategy_macd_aggressive.py`。
-- `PARAMS` 和开放的 `EXIT_PARAMS` 都可调整。
+- 当前策略是固定框架 + 固定因子槽结构；只能调整 `PARAMS` 既有 key、开放的 `EXIT_PARAMS`、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体。
+- 不允许改 `_strategy_core()`、候选生成顺序、slot 名称/数量/签名、`strategy()` / `strategy_decision()` 入口，也不允许新增 top-level helper 或参数 key。
 - 杠杆、单仓上下限和加仓规模保持固定；`position_fraction` 与 `max_concurrent_positions` 现在允许研究器探索。
 
 ### repair_worker
@@ -167,9 +191,11 @@ champion_code_hash: <当前 champion hash>
 
 1. 停掉研究器：`bash scripts/manage_research_macd_aggressive_v2.sh stop`
 2. 手工修改策略或替换 active reference。
-3. 重开 stage：`bash scripts/reset_research_macd_aggressive_v2_stage.sh`
-4. 启动研究器：`bash scripts/manage_research_macd_aggressive_v2.sh start`
-5. 跟状态：`bash scripts/manage_research_macd_aggressive_v2.sh status`
+3. 如果替换的是旧 source，先迁移到当前固定因子槽结构，并确认 `validate_strategy_source()` 能通过。
+4. 用当前源码重建 reference：`python3 scripts/research_macd_aggressive_v2.py --reset-champion --no-optimize`
+5. 重开 stage：`bash scripts/reset_research_macd_aggressive_v2_stage.sh`
+6. 启动研究器：`bash scripts/manage_research_macd_aggressive_v2.sh start`
+7. 跟状态：`bash scripts/manage_research_macd_aggressive_v2.sh status`
 
 补充约束：
 

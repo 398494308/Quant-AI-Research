@@ -1,3 +1,4 @@
+import contextlib
 import json
 import subprocess
 import sys
@@ -34,26 +35,27 @@ from research_v2.charting import PerformanceChartPaths, charts_available, render
 from research_v2.config import GateConfig, ScoringConfig
 from research_v2.evaluation import (
     EvaluationReport,
+    _activity_multiplier_from_monthly_entries,
     _annualized_return_score,
     _balanced_pair_score,
     _collect_daily_path,
     _collect_trend_path,
     _capture_core_score,
-    _capture_return_multiplier,
     _capture_ratio,
     _detect_major_trend_segments,
     _entry_side_counts,
     _max_trade_idle_days_from_timestamps,
     _normalize_trend_points,
     _period_months_from_timestamps,
+    _robust_block_report,
     _trend_clean_quality,
     _robustness_penalty_payload,
-    _trade_activity_shortfall,
     _trade_idle_shortfall,
     _trend_participation_penalty,
     _trend_participation_shortfall,
     _trend_score_report,
     partial_eval_gate_snapshot,
+    partial_eval_gate_snapshot_from_results,
     summarize_evaluation,
     summarize_test_result,
 )
@@ -904,12 +906,8 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertIn("period_capture_weak_weight", report.metrics)
         self.assertIn("side_capture_weak_weight", report.metrics)
         self.assertAlmostEqual(
-            report.metrics["capture_return_multiplier"],
-            _capture_return_multiplier(report.metrics["capture_core_score"], ScoringConfig()),
-        )
-        self.assertAlmostEqual(
             report.metrics["quality_score"],
-            expected_train_capture_score,
+            report.metrics["train_activity_adjusted_robust_block_score"],
         )
         self.assertAlmostEqual(
             report.metrics["validation_score"],
@@ -922,31 +920,31 @@ class EvaluationFixesTest(unittest.TestCase):
             0.50 * (expected_train_timed_return_score + expected_validation_timed_return_score),
         )
         self.assertAlmostEqual(
-            report.metrics["adjusted_timed_return_score"],
-            (
-                report.metrics["timed_return_score"] * report.metrics["capture_return_multiplier"]
-                if report.metrics["timed_return_score"] >= 0.0
-                else report.metrics["timed_return_score"]
-            ),
-        )
-        self.assertAlmostEqual(
             report.metrics["promotion_gap"],
-            report.metrics["train_capture_score"] - report.metrics["validation_capture_score"],
+            report.metrics["train_robust_block_score"] - report.metrics["validation_robust_block_score"],
         )
         expected_drawdown_penalty = (
             0.20 * report.metrics["drawdown_risk_score"]
             + 1.00 * max(report.metrics["drawdown_risk_score"] - 1.25, 0.0)
         )
         expected_promotion_score = (
-            0.50 * report.metrics["adjusted_timed_return_score"]
+            report.metrics["main_score"]
             - expected_drawdown_penalty
             - report.metrics["robustness_penalty_score"]
-            - report.metrics["trade_activity_penalty"]
+            - report.metrics["trade_idle_penalty"]
         )
+        self.assertIn("train_robust_block_score", report.metrics)
+        self.assertIn("validation_robust_block_score", report.metrics)
+        self.assertIn("buy_hold_robust_score", report.metrics)
+        self.assertIn("benchmark_hurdle_score", report.metrics)
+        self.assertIn("raw_robust_time_score", report.metrics)
+        self.assertIn("train_robust_block_mean_score", report.metrics)
+        self.assertIn("validation_robust_block_mean_score", report.metrics)
+        self.assertIn("train_activity_multiplier", report.metrics)
+        self.assertIn("validation_activity_multiplier", report.metrics)
         self.assertAlmostEqual(report.metrics["drawdown_penalty_score"], expected_drawdown_penalty)
         self.assertAlmostEqual(report.metrics["promotion_score"], expected_promotion_score)
-        self.assertIn("trade_activity_penalty", report.metrics)
-        self.assertLessEqual(report.metrics["trade_activity_penalty"], 0.35)
+        self.assertNotIn("trade_activity_penalty", report.metrics)
         self.assertGreaterEqual(report.metrics["drawdown_risk_score"], 0.0)
         self.assertEqual(report.metrics["validation_block_count_used"], 0.0)
         self.assertEqual(report.metrics["eval_unique_trend_points"], 15.0)
@@ -1079,7 +1077,7 @@ class EvaluationFixesTest(unittest.TestCase):
             _annualized_return_score([0.05, 0.02]),
         )
 
-    def test_summarize_evaluation_rejects_large_quality_promotion_gap(self):
+    def test_summarize_evaluation_does_not_gate_on_train_validation_capture_gap(self):
         eval_window = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-01-12"})()
         validation_window = type("Window", (), {"group": "validation", "label": "val1", "start_date": "2026-01-13", "end_date": "2026-01-23"})()
         eval_points = [
@@ -1149,8 +1147,7 @@ class EvaluationFixesTest(unittest.TestCase):
             full_period_result={"return": 18.0, "max_drawdown": 8.0, "trend_capture_points": eval_points + validation_points},
         )
 
-        self.assertFalse(report.gate_passed)
-        self.assertIn("train/val分数落差过大", report.gate_reason)
+        self.assertNotIn("train/val分数落差过大", report.gate_reason)
 
     def test_summarize_evaluation_rejects_severe_overfit_concentration(self):
         eval_window = type("Window", (), {"group": "eval", "label": "train1", "start_date": "2026-01-01", "end_date": "2026-02-10"})()
@@ -1246,18 +1243,24 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(
             report.metrics["promotion_score"],
             (
-                0.50 * report.metrics["adjusted_timed_return_score"]
+                report.metrics["main_score"]
                 - expected_drawdown_penalty
                 - report.metrics["robustness_penalty_score"]
-                - report.metrics["trade_activity_penalty"]
+                - report.metrics["trade_idle_penalty"]
             ),
         )
 
-    def test_trade_activity_shortfall_only_penalizes_below_floor(self):
-        self.assertAlmostEqual(_trade_activity_shortfall(320, 270), 0.0)
-        self.assertAlmostEqual(_trade_activity_shortfall(270, 270), 0.0)
-        self.assertAlmostEqual(_trade_activity_shortfall(180, 270), 90.0 / 270.0)
-        self.assertAlmostEqual(_trade_activity_shortfall(0, 180), 1.0)
+    def test_activity_multiplier_smoothly_limits_low_monthly_entries(self):
+        scoring = ScoringConfig()
+
+        self.assertAlmostEqual(_activity_multiplier_from_monthly_entries(0.0, scoring), 0.0)
+        self.assertAlmostEqual(_activity_multiplier_from_monthly_entries(5.0, scoring), 0.10)
+        self.assertAlmostEqual(_activity_multiplier_from_monthly_entries(7.0, scoring), 0.35)
+        self.assertAlmostEqual(_activity_multiplier_from_monthly_entries(10.0, scoring), 0.70)
+        self.assertAlmostEqual(_activity_multiplier_from_monthly_entries(15.0, scoring), 1.0)
+        self.assertAlmostEqual(_activity_multiplier_from_monthly_entries(30.0, scoring), 1.0)
+        self.assertGreater(_activity_multiplier_from_monthly_entries(8.5, scoring), 0.35)
+        self.assertLess(_activity_multiplier_from_monthly_entries(8.5, scoring), 0.70)
 
     def test_balanced_pair_score_only_leans_on_weak_side_after_gap_tolerance(self):
         scoring = ScoringConfig()
@@ -1295,23 +1298,7 @@ class EvaluationFixesTest(unittest.TestCase):
             weak_side_period_score * 0.35,
         )
 
-    def test_capture_return_multiplier_is_smooth_then_diminishing(self):
-        scoring = ScoringConfig()
-
-        self.assertAlmostEqual(_capture_return_multiplier(0.00, scoring), 0.25)
-        self.assertAlmostEqual(_capture_return_multiplier(0.03, scoring), 0.25)
-        self.assertAlmostEqual(_capture_return_multiplier(0.075, scoring), 0.625)
-        self.assertAlmostEqual(_capture_return_multiplier(0.12, scoring), 1.00)
-        tail_022 = _capture_return_multiplier(0.22, scoring)
-        tail_032 = _capture_return_multiplier(0.32, scoring)
-        tail_042 = _capture_return_multiplier(0.42, scoring)
-        self.assertGreater(tail_022, 1.00)
-        self.assertGreater(tail_032, tail_022)
-        self.assertGreater(tail_042, tail_032)
-        self.assertLess(tail_042, 1.45)
-        self.assertGreater(tail_032 - tail_022, tail_042 - tail_032)
-
-    def test_trend_participation_penalty_uses_existing_hit_rates_and_caps_component(self):
+    def test_trend_participation_diagnostic_uses_existing_hit_rates_without_penalty(self):
         scoring = ScoringConfig()
 
         self.assertAlmostEqual(
@@ -1325,7 +1312,7 @@ class EvaluationFixesTest(unittest.TestCase):
         penalty, train_shortfall, validation_shortfall = _trend_participation_penalty(0.12, 0.15, scoring)
         self.assertAlmostEqual(train_shortfall, 1.0)
         self.assertAlmostEqual(validation_shortfall, 1.0)
-        self.assertAlmostEqual(penalty, 0.10)
+        self.assertAlmostEqual(penalty, 0.0)
 
     def test_entry_side_counts_prefers_filled_entries_and_ignores_pyramids(self):
         result = {
@@ -1412,10 +1399,13 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertEqual(report.metrics["train_entry_trades"], 30.0)
         self.assertEqual(report.metrics["validation_entry_trades"], 15.0)
         self.assertEqual(report.metrics["selection_entry_trades"], 45.0)
-        self.assertAlmostEqual(report.metrics["train_trade_activity_shortfall"], 0.0)
-        self.assertAlmostEqual(report.metrics["validation_trade_activity_shortfall"], 0.0)
+        self.assertAlmostEqual(report.metrics["train_activity_multiplier"], 1.0)
+        self.assertAlmostEqual(report.metrics["validation_activity_multiplier"], 1.0)
+        self.assertAlmostEqual(report.metrics["activity_multiplier"], 1.0)
         self.assertAlmostEqual(report.metrics["train_monthly_entries"], 30.0)
         self.assertAlmostEqual(report.metrics["validation_monthly_entries"], 15.0)
+        self.assertNotIn("trade_count_penalty", report.metrics)
+        self.assertNotIn("train_trade_activity_shortfall", report.metrics)
         self.assertNotIn("train_monthly_closed_trades", report.metrics)
 
     def test_period_months_from_timestamps_uses_average_calendar_month(self):
@@ -1770,6 +1760,46 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertIn("return_score", gate_snapshot)
         self.assertIn("period_score", gate_snapshot)
 
+    def test_partial_eval_gate_snapshot_from_results_reuses_eval_windows(self):
+        class Window:
+            group = "eval"
+            label = "train1"
+
+        gate_snapshot = partial_eval_gate_snapshot_from_results(
+            [
+                {
+                    "window": Window(),
+                    "result": {
+                        "daily_return_points": [
+                            {"date": f"2026-01-{day:02d}", "return": -0.01}
+                            for day in range(1, 30)
+                        ],
+                        "trend_capture_points": [
+                            {
+                                "timestamp": 1,
+                                "label": "a",
+                                "market_close": 100.0,
+                                "atr_ratio": 0.01,
+                                "strategy_equity": 100000.0,
+                            },
+                            {
+                                "timestamp": 2,
+                                "label": "b",
+                                "market_close": 110.0,
+                                "atr_ratio": 0.01,
+                                "strategy_equity": 90000.0,
+                            },
+                        ],
+                    },
+                }
+            ],
+            ScoringConfig(),
+        )
+
+        self.assertGreaterEqual(gate_snapshot["robust_block_count"], 1.0)
+        self.assertLess(gate_snapshot["robust_block_score"], 0.0)
+        self.assertIn("return_score", gate_snapshot)
+
 
 class StrategyValidationFixesTest(unittest.TestCase):
     def _minimal_validation_source(self, overrides=None):
@@ -1950,20 +1980,32 @@ class StrategyValidationFixesTest(unittest.TestCase):
             for _ in range(strategy_module.PARAMS["min_history"] + 1)
         ]
 
-        with mock.patch.object(strategy_module, "_build_signal_context", return_value=strategy_context):
-            with mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False):
-                with mock.patch.object(strategy_module, "_volume_climax_exhaustion_sides", return_value=set()):
-                    with mock.patch.object(strategy_module, "long_outer_context_ok", return_value=True):
-                        with mock.patch.object(strategy_module, "long_breakout_ok", return_value=True):
-                            with mock.patch.object(strategy_module, "long_pullback_ok", return_value=False):
-                                with mock.patch.object(strategy_module, "long_trend_reaccel_ok", return_value=False):
-                                    with mock.patch.object(strategy_module, "long_final_veto_clear", return_value=True):
-                                        decision = strategy_module.strategy_decision(
-                                            data,
-                                            strategy_module.PARAMS["min_history"],
-                                            positions,
-                                            {},
-                                        )
+        patches = (
+            mock.patch.object(strategy_module, "_build_signal_context", return_value=strategy_context),
+            mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False),
+            mock.patch.object(strategy_module, "_detect_macd_divergence", return_value=False),
+            mock.patch.object(strategy_module, "_active_short_exit_signal", return_value=False),
+            mock.patch.object(strategy_module, "_short_hourly_bull_exit_active", return_value=False),
+            mock.patch.object(strategy_module, "_slot_long_context", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_breakout", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_pullback", return_value=0.0),
+            mock.patch.object(strategy_module, "_slot_long_reaccel", return_value=0.0),
+            mock.patch.object(strategy_module, "_slot_long_flow", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_veto", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_extra_1", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_extra_2", return_value=1.0),
+            mock.patch.object(strategy_module, "_long_reversal_sniper_ok", return_value=False),
+            mock.patch.object(strategy_module, "long_final_veto_clear", return_value=True),
+        )
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            decision = strategy_module.strategy_decision(
+                data,
+                strategy_module.PARAMS["min_history"],
+                positions,
+                {},
+            )
 
         self.assertEqual(decision["entry_side"], "long")
         self.assertEqual(decision["entry_path_key"], "long_breakout")
@@ -1980,25 +2022,39 @@ class StrategyValidationFixesTest(unittest.TestCase):
             "recent_three_low": 99.0,
             "prior_three_low": 98.0,
         }
-        with mock.patch.object(strategy_module, "_build_signal_context", return_value=strategy_context):
-            with mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False):
-                with mock.patch.object(strategy_module, "long_outer_context_ok", return_value=True):
-                    with mock.patch.object(strategy_module, "long_breakout_ok", return_value=True):
-                        with mock.patch.object(strategy_module, "long_pullback_ok", return_value=False):
-                            with mock.patch.object(strategy_module, "long_trend_reaccel_ok", return_value=False):
-                                with mock.patch.object(strategy_module, "long_signal_path_ok", return_value=True):
-                                    with mock.patch.object(strategy_module, "long_final_veto_clear", return_value=False):
-                                        with mock.patch.object(strategy_module, "short_outer_context_ok", return_value=True):
-                                            with mock.patch.object(strategy_module, "short_breakdown_ok", return_value=True):
-                                                with mock.patch.object(strategy_module, "short_bounce_fail_ok", return_value=False):
-                                                    with mock.patch.object(strategy_module, "short_trend_reaccel_ok", return_value=False):
-                                                        with mock.patch.object(strategy_module, "short_final_veto_clear", return_value=True):
-                                                            signal = strategy_module.strategy(
-                                                                [{}] * (strategy_module.PARAMS["min_history"] + 1),
-                                                                strategy_module.PARAMS["min_history"],
-                                                                [],
-                                                                {},
-                                                            )
+        patches = (
+            mock.patch.object(strategy_module, "_build_signal_context", return_value=strategy_context),
+            mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False),
+            mock.patch.object(strategy_module, "_slot_long_context", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_breakout", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_pullback", return_value=0.0),
+            mock.patch.object(strategy_module, "_slot_long_reaccel", return_value=0.0),
+            mock.patch.object(strategy_module, "_slot_long_flow", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_veto", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_extra_1", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_extra_2", return_value=1.0),
+            mock.patch.object(strategy_module, "_long_reversal_sniper_ok", return_value=False),
+            mock.patch.object(strategy_module, "long_final_veto_clear", return_value=False),
+            mock.patch.object(strategy_module, "_slot_short_context", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_short_breakdown", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_short_bounce_fail", return_value=0.0),
+            mock.patch.object(strategy_module, "_slot_short_reaccel", return_value=0.0),
+            mock.patch.object(strategy_module, "_slot_short_flow", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_short_veto", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_short_extra_1", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_short_extra_2", return_value=1.0),
+            mock.patch.object(strategy_module, "_short_impulse_hourly_rsi_ok", return_value=True),
+            mock.patch.object(strategy_module, "short_final_veto_clear", return_value=True),
+        )
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            signal = strategy_module.strategy(
+                [{}] * (strategy_module.PARAMS["min_history"] + 1),
+                strategy_module.PARAMS["min_history"],
+                [],
+                {},
+            )
 
         funnel = strategy_module.get_funnel_diagnostics()
         self.assertEqual(signal, "short_breakdown")
@@ -2031,20 +2087,29 @@ class StrategyValidationFixesTest(unittest.TestCase):
             "recent_three_low": 99.0,
             "prior_three_low": 98.0,
         }
-        with mock.patch.object(strategy_module, "_build_signal_context", return_value=strategy_context):
-            with mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False):
-                with mock.patch.object(strategy_module, "long_outer_context_ok", return_value=True):
-                    with mock.patch.object(strategy_module, "long_breakout_ok", return_value=True):
-                        with mock.patch.object(strategy_module, "long_pullback_ok", return_value=False):
-                            with mock.patch.object(strategy_module, "long_trend_reaccel_ok", return_value=False):
-                                with mock.patch.object(strategy_module, "_flow_entry_ok", return_value=False):
-                                    with mock.patch.object(strategy_module, "long_final_veto_clear", return_value=True):
-                                        decision = strategy_module.strategy_decision(
-                                            [{}] * (strategy_module.PARAMS["min_history"] + 1),
-                                            strategy_module.PARAMS["min_history"],
-                                            [],
-                                            {},
-                                        )
+        patches = (
+            mock.patch.object(strategy_module, "_build_signal_context", return_value=strategy_context),
+            mock.patch.object(strategy_module, "_is_sideways_regime", return_value=False),
+            mock.patch.object(strategy_module, "_slot_long_context", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_breakout", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_pullback", return_value=0.0),
+            mock.patch.object(strategy_module, "_slot_long_reaccel", return_value=0.0),
+            mock.patch.object(strategy_module, "_slot_long_flow", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_veto", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_extra_1", return_value=1.0),
+            mock.patch.object(strategy_module, "_slot_long_extra_2", return_value=1.0),
+            mock.patch.object(strategy_module, "_long_reversal_sniper_ok", return_value=False),
+            mock.patch.object(strategy_module, "long_final_veto_clear", return_value=True),
+        )
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            decision = strategy_module.strategy_decision(
+                [{}] * (strategy_module.PARAMS["min_history"] + 1),
+                strategy_module.PARAMS["min_history"],
+                [],
+                {},
+            )
 
         self.assertEqual(decision["entry_signal"], "long_pullback")
         self.assertEqual(decision["entry_path_key"], "long_breakout")
@@ -2281,7 +2346,7 @@ def strategy(*args, **kwargs):
 
         validate_strategy_source(source, base_source=base_source)
 
-    def test_validate_strategy_source_rejects_tiny_numeric_param_change(self):
+    def test_validate_strategy_source_allows_tiny_numeric_param_change(self):
         base_source = self._minimal_validation_source()
         source = base_source.replace(
             "PARAMS = {'intraday_adx_min': 10}",
@@ -2289,15 +2354,13 @@ def strategy(*args, **kwargs):
             1,
         )
 
-        with self.assertRaisesRegex(StrategySourceError, "numeric change too small"):
-            validate_strategy_source(source, base_source=base_source)
+        validate_strategy_source(source, base_source=base_source)
 
-    def test_validate_strategy_source_rejects_tiny_numeric_exit_change(self):
+    def test_validate_strategy_source_allows_tiny_numeric_exit_change(self):
         base_source = self._minimal_validation_source()
         source = base_source.replace("'tp1_pnl_pct': 65.7", "'tp1_pnl_pct': 67.0")
 
-        with self.assertRaisesRegex(StrategySourceError, "numeric change too small"):
-            validate_strategy_source(source, base_source=base_source)
+        validate_strategy_source(source, base_source=base_source)
 
     def test_validate_strategy_source_rejects_fixed_exit_param_change(self):
         base_source = self._minimal_validation_source()
@@ -2317,6 +2380,56 @@ def strategy(*args, **kwargs):
         pressure = build_strategy_complexity_pressure(source, base_source=base_source)
 
         self.assertEqual(pressure["growth_level"], "warning_2")
+
+    def test_validate_structural_audit_candidate_complexity_rejects_net_growth(self):
+        base_source = self._minimal_validation_source()
+        source = self._minimal_validation_source(
+            {"_trend_quality_ok": "value = 1\n    if value:\n        return True\n    return False"}
+        )
+
+        with self.assertRaisesRegex(StrategySourceError, "结构自检修复轮禁止净增加复杂度"):
+            research_script._validate_structural_audit_candidate_complexity(base_source, source)
+
+    def test_validate_structural_audit_candidate_complexity_allows_param_only_change(self):
+        base_source = self._minimal_validation_source()
+        source = base_source.replace("'intraday_adx_min': 10", "'intraday_adx_min': 11")
+
+        research_script._validate_structural_audit_candidate_complexity(base_source, source)
+
+    def test_validate_strategy_source_locks_structured_framework_core(self):
+        base_source = (REPO_ROOT / "src/strategy_macd_aggressive.py").read_text()
+        source = base_source.replace(
+            "def _strategy_core(data, idx, positions, market_state, *, as_decision):\n",
+            "def _strategy_core(data, idx, positions, market_state, *, as_decision):\n    framework_probe = 1\n",
+            1,
+        )
+
+        with self.assertRaisesRegex(StrategySourceError, "strategy framework is locked"):
+            validate_strategy_source(source, base_source=base_source)
+
+    def test_validate_strategy_source_allows_fixed_factor_slot_body_change(self):
+        base_source = (REPO_ROOT / "src/strategy_macd_aggressive.py").read_text()
+        source = base_source.replace(
+            "def _slot_long_extra_1(context, market_state, params, side):\n    return 0.0\n",
+            "def _slot_long_extra_1(context, market_state, params, side):\n    return 0.25\n",
+            1,
+        )
+
+        validate_strategy_source(source, base_source=base_source)
+
+    def test_validate_strategy_source_rejects_new_factor_slot_key(self):
+        base_source = (REPO_ROOT / "src/strategy_macd_aggressive.py").read_text()
+        source = base_source.replace(
+            '    "short_extra_2": {"enabled": 0, "weight": 0.20, "threshold": 0.50},\n',
+            (
+                '    "short_extra_2": {"enabled": 0, "weight": 0.20, "threshold": 0.50},\n'
+                '    "new_extra_slot": {"enabled": 0, "weight": 0.20, "threshold": 0.50},\n'
+            ),
+            1,
+        )
+
+        with self.assertRaisesRegex(StrategySourceError, "FACTOR_SLOT_PARAMS keys"):
+            validate_strategy_source(source, base_source=base_source)
 
     def test_build_strategy_complexity_delta_tracks_growth(self):
         base_source = self._minimal_validation_source()
@@ -2616,7 +2729,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("wiki/failure_wiki.md", prompt)
         self.assertIn("先想再写", prompt)
         self.assertIn("不要 hard code", prompt)
-        self.assertIn("整份文件都允许修改", prompt)
+        self.assertIn("固定框架 + 固定因子槽", prompt)
 
     def test_build_strategy_runtime_prompt_mentions_refresh_rule(self):
         prompt = build_strategy_research_prompt(
@@ -2626,18 +2739,19 @@ class JournalPromptFixesTest(unittest.TestCase):
         )
 
         self.assertIn("promotion_score` 严格高于当前 active reference", prompt)
-        self.assertIn("唯一主收益项", prompt)
-        self.assertIn("capture_core<=0.03", prompt)
-        self.assertIn("0.12", prompt)
-        self.assertIn("偏科越大越靠弱项计分", prompt)
+        self.assertIn("v26 活跃度调整时间块主分", prompt)
+        self.assertIn("mean/median/P25", prompt)
+        self.assertIn("buy&hold", prompt)
+        self.assertIn("capture_score` / `capture_core` 只作为趋势诊断", prompt)
+        self.assertIn("Regime scorecard", prompt)
         self.assertIn("Sharpe 只作为人工筛选", prompt)
         self.assertNotIn("activity_adjusted_sharpe_score", prompt)
-        self.assertIn("分段回撤惩罚", prompt)
+        self.assertIn("回撤惩罚", prompt)
         self.assertIn("鲁棒性软惩罚", prompt)
-        self.assertIn("低频、长空窗与趋势机会覆盖不足", prompt)
+        self.assertIn("交易量现在通过主分倍率约束", prompt)
         self.assertIn("train 180-270 / val 120-180", prompt)
         self.assertIn("最长无新开仓", prompt)
-        self.assertIn("负分块最多 3 个", prompt)
+        self.assertIn("只做诊断，不是硬 gate", prompt)
         self.assertIn("默认优先找更稳的泛化形态", prompt)
         self.assertNotIn("promotion_delta >", prompt)
         self.assertIn("当前回合任务", prompt)
@@ -2657,6 +2771,19 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("change_plan", prompt)
         self.assertIn("novelty_proof", prompt)
         self.assertIn("draft", prompt)
+
+    def test_build_strategy_runtime_prompt_marks_structural_audit_round(self):
+        prompt = build_strategy_research_prompt(
+            evaluation_summary="诊断",
+            journal_summary="记忆",
+            previous_best_score=1.23,
+            structural_audit_trigger_text="- 触发原因: 单轮结构复杂度明显增长但没有晋级",
+        )
+
+        self.assertIn("结构自检修复轮", prompt)
+        self.assertIn("跳过 promotion 比较", prompt)
+        self.assertIn("不要为了追分新增复杂分支", prompt)
+        self.assertNotIn("严格高于当前 active reference", prompt)
 
     def test_build_strategy_runtime_prompt_can_include_reviewer_summary_card(self):
         prompt = build_strategy_research_prompt(
@@ -2683,6 +2810,35 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("人工方向卡摘要", prompt)
         self.assertIn("config/research_v2_operator_focus.md", prompt)
         self.assertIn("优先检查多头外层 choke point", prompt)
+
+    def test_build_strategy_runtime_prompt_prioritizes_operator_focus_learning_shape(self):
+        operator_focus = "\n".join(
+            [
+                "# 研究器人工方向卡",
+                "## 优先方向",
+                "- 当前评分口径是 `robust_block_v26_activity_mean`。",
+                "- 当前 active reference 分数以运行器实时注入为准。",
+                "- 当前交易量已经足够，不要把主要预算浪费在刷交易量。",
+                "- 当前核心短板仍是趋势捕获质量。",
+                "- val 后半段弱点里有一个明确可学习形态：`2025-11-10 16:00 -> 2025-11-21 20:00` 是两段连续 bear trend，下一步优先研究连续下跌链路。",
+                "- `capture_core` 只做趋势诊断。",
+                "## 降权方向",
+                "- 降权只在旧路径上做近邻阈值拨动。",
+                "## 默认动作",
+                "- 默认先看真实漏斗。",
+            ]
+        )
+
+        prompt = build_strategy_research_prompt(
+            evaluation_summary="诊断",
+            journal_summary="记忆",
+            previous_best_score=1.23,
+            operator_focus_text=operator_focus,
+            operator_focus_path="config/research_v2_operator_focus.md",
+        )
+
+        self.assertIn("2025-11-10 16:00", prompt)
+        self.assertIn("连续下跌链路", prompt)
 
     def test_build_strategy_runtime_prompt_can_include_champion_review_card(self):
         prompt = build_strategy_research_prompt(
@@ -2776,7 +2932,7 @@ class JournalPromptFixesTest(unittest.TestCase):
     def test_build_strategy_agents_instructions_mentions_ordinary_family_budget(self):
         prompt = build_strategy_agents_instructions()
 
-        self.assertIn("整份文件都允许修改", prompt)
+        self.assertIn("现在是硬锁框架", prompt)
         self.assertIn("真实 diff 自动归类 region / family", prompt)
         self.assertIn("不允许新增 `PARAMS` 键", prompt)
 
@@ -2845,12 +3001,28 @@ class JournalPromptFixesTest(unittest.TestCase):
 
         self.assertIn("round brief", prompt)
         self.assertIn("只修改 `src/strategy_macd_aggressive.py`", prompt)
-        self.assertIn("整份策略文件都允许修改", prompt)
+        self.assertIn("策略主框架已硬锁", prompt)
         self.assertIn("当前紧凑诊断", prompt)
         self.assertIn("最弱维度: val陪跑=0.12", prompt)
         self.assertIn("单轮改动预算只是参考，不是硬 gate", prompt)
         self.assertIn("只回复 `EDIT_DONE`", prompt)
         self.assertNotIn("当前基底复杂度余量", prompt)
+
+    def test_build_strategy_edit_worker_prompt_marks_structural_audit_constraints(self):
+        prompt = build_strategy_edit_worker_prompt(
+            candidate_id="candidate_audit_1",
+            primary_direction="structure | prune slot",
+            hypothesis="删除过窄条件减少局部过拟合。",
+            change_plan="合并重复 gate，不新增 path。",
+            change_tags=("structural_audit",),
+            expected_effects=("减少局部抖动",),
+            novelty_proof="由结构自检触发。",
+            structural_audit_trigger_text="- 触发原因: 连续失败 3 次",
+        )
+
+        self.assertIn("结构自检修复轮硬约束", prompt)
+        self.assertIn("净复杂度不得增加", prompt)
+        self.assertIn("不能新增复杂分支", prompt)
 
     def test_build_strategy_summary_worker_system_prompt_mentions_no_edit_summary_role(self):
         prompt = build_strategy_summary_worker_system_prompt()
@@ -5940,6 +6112,62 @@ class ReferenceStateFixesTest(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertEqual("未超过当前champion晋级分(0.35 <= 0.40)", reason)
 
+    def test_structural_audit_acceptance_skips_promotion_comparison_after_gate_pass(self):
+        baseline_report = EvaluationReport(
+            metrics={"promotion_score": 0.40, "quality_score": 0.33},
+            gate_passed=True,
+            gate_reason="通过",
+            summary_text="",
+            prompt_summary_text="",
+        )
+        candidate_report = EvaluationReport(
+            metrics={"promotion_score": 0.10, "quality_score": 0.20},
+            gate_passed=True,
+            gate_reason="通过",
+            summary_text="",
+            prompt_summary_text="",
+        )
+        original_best_report = research_script.best_report
+        try:
+            research_script.best_report = baseline_report
+            accepted, reason = research_script._promotion_acceptance_decision(
+                candidate_report,
+                structural_audit=True,
+            )
+        finally:
+            research_script.best_report = original_best_report
+
+        self.assertTrue(accepted)
+        self.assertEqual("结构自检修复通过，跳过 promotion 比较", reason)
+
+    def test_structural_audit_acceptance_still_requires_gate_pass(self):
+        baseline_report = EvaluationReport(
+            metrics={"promotion_score": 0.40, "quality_score": 0.33},
+            gate_passed=True,
+            gate_reason="通过",
+            summary_text="",
+            prompt_summary_text="",
+        )
+        candidate_report = EvaluationReport(
+            metrics={"promotion_score": 0.80, "quality_score": 0.70},
+            gate_passed=False,
+            gate_reason="手续费拖累过高",
+            summary_text="",
+            prompt_summary_text="",
+        )
+        original_best_report = research_script.best_report
+        try:
+            research_script.best_report = baseline_report
+            accepted, reason = research_script._promotion_acceptance_decision(
+                candidate_report,
+                structural_audit=True,
+            )
+        finally:
+            research_script.best_report = original_best_report
+
+        self.assertFalse(accepted)
+        self.assertEqual("手续费拖累过高", reason)
+
     def test_promotion_acceptance_rejects_only_when_gate_fails(self):
         baseline_report = EvaluationReport(
             metrics={"promotion_score": 0.40, "quality_score": 0.33},
@@ -5969,6 +6197,51 @@ class ReferenceStateFixesTest(unittest.TestCase):
 
         self.assertFalse(accepted)
         self.assertEqual("val命中率偏低(7%)", reason)
+
+    def test_structural_audit_trigger_detects_large_complexity_growth(self):
+        entry = {
+            "iteration": 5,
+            "candidate_id": "bsc_l6_pullback_ease",
+            "outcome": "rejected",
+            "stop_stage": "full_eval",
+            "reference_code_hash": "ref1",
+            "cluster_key": "pullback",
+            "system_complexity_families": {
+                "factor_slot_logic": {"delta_lines": 34, "delta_bool_ops": 18, "delta_ifs": 0},
+            },
+            "system_complexity_functions": {},
+        }
+
+        trigger = research_script._structural_audit_trigger_from_entry(entry, [])
+
+        self.assertIsNotNone(trigger)
+        self.assertEqual(trigger["kind"], "large_complexity_growth")
+        self.assertIn("factor_slot_logic", trigger["items"][0])
+
+    def test_structural_audit_trigger_detects_consecutive_slot_failures(self):
+        def make_entry(iteration):
+            return {
+                "iteration": iteration,
+                "candidate_id": f"candidate_{iteration}",
+                "outcome": "rejected",
+                "stop_stage": "full_eval",
+                "reference_code_hash": "ref1",
+                "cluster_key": "long_slot_a",
+                "system_ordinary_changed_regions": ["_slot_long_pullback"],
+                "system_ordinary_region_families": ["factor_slot_logic"],
+                "target_family": "long",
+                "system_complexity_families": {},
+                "system_complexity_functions": {},
+            }
+
+        trigger = research_script._structural_audit_trigger_from_entry(
+            make_entry(3),
+            [make_entry(1), make_entry(2)],
+        )
+
+        self.assertIsNotNone(trigger)
+        self.assertEqual(trigger["kind"], "consecutive_structural_failures")
+        self.assertEqual(trigger["failure_count"], 3)
 
     def test_initialize_best_state_falls_back_when_saved_reference_source_is_invalid(self):
         valid_source = (REPO_ROOT / "src/strategy_macd_aggressive.py").read_text()
@@ -6935,7 +7208,7 @@ EXIT_PARAMS = {
         self.assertEqual(spec.param, "trailing_activation_pct")
         self.assertIn(24.0, spec.values)
 
-    def test_infer_exit_range_scan_filters_values_against_base_min_step(self):
+    def test_infer_exit_range_scan_allows_close_values(self):
         from research_v2.exit_range_scan import infer_exit_range_scan_spec
 
         base = """
@@ -6953,7 +7226,7 @@ EXIT_PARAMS = {
         self.assertIsNotNone(spec)
         self.assertEqual(spec.param, "short_breakdown_stop_atr_mult")
         self.assertIn(1.4, spec.values)
-        self.assertNotIn(1.61, spec.values)
+        self.assertIn(1.61, spec.values)
 
 class ResearchRuntimeLeanPipelineTest(unittest.TestCase):
     def test_context_cache_key_ignores_execution_irrelevant_exit_params(self):
@@ -7023,7 +7296,7 @@ class ResearchRuntimeLeanPipelineTest(unittest.TestCase):
         self.assertEqual(second, {"prepared": "ctx_2"})
         self.assertEqual(prepare_mock.call_count, 2)
 
-    def test_early_reject_snapshot_runs_only_on_milestones(self):
+    def test_early_reject_reuses_completed_walk_forward_windows(self):
         class Window:
             def __init__(self, label, start, end):
                 self.label = label
@@ -7042,7 +7315,14 @@ class ResearchRuntimeLeanPipelineTest(unittest.TestCase):
 
         def fake_backtest(**kwargs):
             calls.append((kwargs["start_date"], kwargs["end_date"]))
-            return {"trend_capture_points": [], "return": 0.0, "trades": 0}
+            return {
+                "trend_capture_points": [],
+                "return": 0.0,
+                "trades": 0,
+                "daily_return_points": [
+                    {"date": kwargs["start_date"], "return": 0.0},
+                ],
+            }
 
         with mock.patch.object(research_script, "RUNTIME", temp_runtime), mock.patch.object(
             research_script, "write_heartbeat"
@@ -7055,13 +7335,9 @@ class ResearchRuntimeLeanPipelineTest(unittest.TestCase):
                 prepared_context={"prepared": True},
             )
 
-        self.assertEqual(len(calls), 29)
+        self.assertEqual(len(calls), 26)
         snapshot_calls = [call for call in calls if call[0] == "2024-01-01" and call[1] != "2024-01-01"]
-        self.assertEqual(snapshot_calls, [
-            ("2024-01-01", "2024-01-10"),
-            ("2024-01-01", "2024-01-18"),
-            ("2024-01-01", "2024-01-26"),
-        ])
+        self.assertEqual(snapshot_calls, [])
 
     def test_behavior_profile_changed_accepts_large_funnel_delta(self):
         fingerprint = {"return": 0.0, "score": 0.0, "max_drawdown": 0.0, "trades": 0}

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .strategy_code import extract_exit_params, minimum_numeric_change_delta, normalize_strategy_source
+from .strategy_code import extract_exit_params, normalize_strategy_source
 
 
 ALLOWED_EXIT_RANGE_KEYS: dict[str, tuple[float, float]] = {
@@ -152,53 +152,19 @@ def _dedupe_values(key: str, values: list[float | int], max_values: int) -> tupl
     return tuple(output)
 
 
-def _far_enough_from_reference(
-    key: str,
-    value: float | int,
-    reference_value: float | int,
-    current_value: float | int,
-) -> bool:
-    if value in {reference_value, current_value}:
-        return True
-    minimum_delta = minimum_numeric_change_delta(key, reference_value, value)
-    return abs(float(value) - float(reference_value)) + 1e-12 >= minimum_delta
-
-
-def _filter_scan_values_by_min_step(
-    key: str,
-    values: tuple[float | int, ...],
-    reference_value: float | int,
-    current_value: float | int,
-    max_values: int,
-) -> tuple[float | int, ...]:
-    filtered = [
-        value
-        for value in values
-        if _far_enough_from_reference(key, value, reference_value, current_value)
-    ]
-    if current_value not in filtered:
-        filtered.append(current_value)
-    return _dedupe_values(key, filtered, max_values + 1)
-
-
 def _auto_values(key: str, current_value: float | int, max_values: int) -> tuple[float | int, ...]:
     current = float(current_value)
-    minimum_delta = minimum_numeric_change_delta(key, current_value)
     if key in INTEGER_KEYS:
-        step = max(1, int(round(minimum_delta)))
+        step = max(1, int(round(abs(current) * 0.15)))
         values = [current - step, current, current + step]
     elif "adx" in key:
-        step = max(3.0, minimum_delta)
-        values = [current - step, current, current + step]
+        values = [current - 3.0, current, current + 3.0]
     elif "fraction" in key:
-        step = max(abs(current) * 0.2, minimum_delta)
-        values = [current - step, current, current + step]
+        values = [current * 0.8, current, current * 1.2]
     elif "buffer" in key or "confirm_buffer" in key:
-        step = max(abs(current) * 0.3, minimum_delta)
-        values = [current - step, current, current + step]
+        values = [current * 0.7, current, current * 1.3]
     else:
-        step = max(abs(current) * 0.15, minimum_delta)
-        values = [current - step, current, current + step]
+        values = [current * 0.85, current, current * 1.15]
     return _dedupe_values(key, values, max_values)
 
 
@@ -250,20 +216,13 @@ def infer_exit_range_scan_spec(
     max_values: int,
 ) -> ExitRangeScanSpec | None:
     explicit = parse_exit_range_scan_payload(explicit_payload, max_values=max_values)
+    if explicit is not None:
+        return explicit
     try:
         base_exit = extract_exit_params(normalize_strategy_source(base_source))
         candidate_exit = extract_exit_params(normalize_strategy_source(candidate_source))
     except Exception:
         return None
-    if explicit is not None:
-        reference = _coerce_number(base_exit.get(explicit.param))
-        current = _coerce_number(candidate_exit.get(explicit.param))
-        if reference is None or current is None:
-            return None
-        values = _filter_scan_values_by_min_step(explicit.param, explicit.values, reference, current, max_values)
-        if len(values) < 2:
-            return None
-        return ExitRangeScanSpec(param=explicit.param, values=values, reason=explicit.reason)
     changed = [
         key for key, value in candidate_exit.items()
         if key in ALLOWED_EXIT_RANGE_KEYS
@@ -276,10 +235,9 @@ def infer_exit_range_scan_spec(
     changed.sort(key=lambda key: SCAN_KEY_PRIORITY.index(key) if key in SCAN_KEY_PRIORITY else len(SCAN_KEY_PRIORITY))
     key = changed[0]
     current = _coerce_number(candidate_exit.get(key))
-    reference = _coerce_number(base_exit.get(key))
-    if reference is None or current is None:
+    if current is None:
         return None
-    values = _filter_scan_values_by_min_step(key, _auto_values(key, current, max_values), reference, current, max_values)
+    values = _auto_values(key, current, max_values)
     if len(values) < 2:
         return None
     return ExitRangeScanSpec(param=key, values=values, reason="系统根据本轮改动的退出参数自动生成 3 点轻量扫描")

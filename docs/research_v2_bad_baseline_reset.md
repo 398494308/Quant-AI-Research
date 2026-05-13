@@ -2,113 +2,72 @@
 
 这份文档记录“重新从很差但 gate 通过的基底开始”的默认策略。目的不是选一个好策略，而是避免研究器在高分局部平台上继续做小幅抖动。
 
-## 默认烂基底
+## v26 选基底原则
 
-优先使用历史第 30 轮 `planner_040`。
+v26 的主评分是活跃度调整后的稳健时间块收益，所以烂基底也应按这个口径选择。不要再按旧的 capture 倍率或固定趋势段主分选基底。
+
+优先选择同时满足这些条件的历史候选：
+
+- gate 能通过，没有爆仓和严重费用失真。
+- `main_score`、`robust_time_score`、`train_robust_block_score`、`validation_robust_block_score` 都偏低，给研究器留出明显增长空间。
+- 交易量不要太低：非加仓开仓频率最好接近 `10-15` 笔/月，低频会通过 activity multiplier 折扣正收益。
+- 策略结构不要太复杂，避免新 session 被一大堆旧分支锁住。
+- 不选择靠单一大行情或单边暴利撑起来的候选。
+
+## 历史候选
+
+历史第 30 轮 `planner_040` 的 `bc1b...` source 已在 `2026-05-12 23:22`（Asia/Shanghai）迁移到固定因子槽结构，并被替换为当前 active champion。迁移版保留旧普通回测入口的交易行为口径，同时锁住主框架，让研究器只改参数和固定 slot。
 
 | 项目 | 值 |
 | --- | --- |
 | candidate | `planner_040` |
 | iteration | `30` |
-| code hash | `bc1b2137aba6bb103357ac12394825cc1739b6e4f8c96c2e5831c32192468e6f` |
+| original code hash | `bc1b2137aba6bb103357ac12394825cc1739b6e4f8c96c2e5831c32192468e6f` |
+| structured code hash | `660e09d6e45e3ac676d54fcbd912853705eac2e9b0deffab3fdf63b9b9581409` |
 | source snapshot | `backups/research_v2_round_artifacts/sources/bc/bc1b2137aba6bb103357ac12394825cc1739b6e4f8c96c2e5831c32192468e6f.py` |
-| gate | 通过 |
-| promotion_score | `-0.3267` |
-| capture_core_score | `0.0056` |
-| capture_score | `0.037` |
-| selection return | `54.1%` |
-| validation return | `18.9%` |
-| train / val 非加仓开仓 | `336 / 268` |
+| v26 gate | 通过 |
+| promotion_score | `-0.3568` |
+| main_score / robust_time_score | `-0.0815 / -0.0680` |
+| train/val robust block | `0.0383 / -0.1732` |
+| train/val activity multiplier | `0.9720 / 1.0000` |
+| benchmark_hurdle_score | `0.0136` |
+| drawdown / robustness / idle penalty | `0.1753 / 0.0000 / 0.1000` |
+| capture_score / capture_core_score | `0.0273 / 0.0138` |
+| train / val 非加仓开仓 | `254 / 233` |
 
-选择原因：
+保留它作为候选的原因：
 
-- gate 能通过，说明它不是完全坏掉的策略。
-- 收益和 capture 都很低，研究器有足够增长空间。
-- 交易量足够，不会把研究方向重新拉回“先补交易量”。
-- 它比当前高收益 champion 更适合作为重启基底，因为高收益 champion 容易让研究器在局部高分区域做微调。
+- 已知能跑完整评估并通过基础 gate。
+- gate 通过，且固定框架已锁住，适合作为结构化研究起点。
+- v26 下重算后仍应保留明显增长空间。
+- 交易量明显偏低时，后续研究应优先在固定 slot 内提高有效交易覆盖，而不是新增平行路径刷数量。
 
-重置时的默认动作：
+它不是永久指定基底。如果后续又进入局部平台，可以重新从历史记录里找更差的 gate 通过候选。
+
+## 重置流程
 
 1. 停止研究器。
-2. 将上面的 source snapshot 写入 `src/strategy_macd_aggressive.py`。
-3. 用 `--reset-champion --no-optimize` 重建 active reference。
-4. 重置 stage/session。
-5. 启动研究器。
+2. 选择一个 v26 下低分但 gate 通过的 source snapshot。
+3. 将 source snapshot 写入 `src/strategy_macd_aggressive.py`。
+4. 按当前固定因子槽结构迁移，不改主框架。
+5. 用 `--reset-champion --no-optimize` 重建 active reference。
+6. 重置 stage/session。
+7. 启动研究器。
+8. 更新本文档和 `config/research_v2_operator_focus.md`，写明新基底 hash 和选择理由。
 
-最近一次执行：`2026-05-12 09:43:57`（Asia/Shanghai）已按该流程重建为 active champion，并重置 stage/session。
+## 评分检查
 
-## Capture 分数白话解释
+重置后至少确认这些指标：
 
-`capture_score` 可以理解成：市场给了几段明显趋势，策略在这些趋势里到底有没有跟上。
-
-例子：
-
-- 市场上涨一大段，策略也赚到钱：加分。
-- 市场下跌一大段，策略靠空头赚到钱：加分。
-- 市场有大趋势，但策略没赚到，或者反而亏钱：低分或负分。
-- 只靠震荡里偶然赚钱，不会显著提高 capture。
-
-现在的普通 `capture_score` 是 train 和 val 的平均趋势抓取表现。问题是它可能掩盖偏科：比如多头抓得还行，空头很差，平均后看起来还能接受。
-
-`capture_core` 是更严格的版本：
-
-- 先看 train 和 val 是否都能抓到趋势。
-- 再看 bull 和 bear 是否都能抓到趋势。
-- 如果某一边明显弱，就不能只靠强的一边把总分抬高。
-
-通俗说：
-
-`capture_score` 问的是“整体抓趋势像不像样”。
-`capture_core` 问的是“是不是 train/val、多/空都像样”。
-
-## 当前 capture_core 结构
-
-旧加权平均结构容易稀释弱项。当前已改成乘法结构：
-
-```text
-period_score = balance(train_capture, validation_capture)
-side_score = balance(bull_capture, bear_capture)
-
-side_multiplier =
-  side_score <= 0.02: 0.35
-  0.02 ~ 0.10: smoothstep 平滑到 1.00
-  > 0.10: 1.00
-
-capture_core = period_score * side_multiplier
-```
-
-这样做的含义：
-
-- train/val 都不错，但多空偏科严重，收益项仍会被打折。
-- 多头很强、空头很弱时，不能继续靠多头收益把 promotion 顶上去。
-- 不是额外 soft gate，而是主分计算方式本身更偏向泛化。
-- 该基底在 v24 下 `period_score=0.0116`、`side_score=0.0430`、`side_multiplier=0.4803`，所以 `capture_core=0.0056`，增长空间很大。
-
-## 最小可调单位硬规则
-
-目标是禁止微调，不是强迫每次都做极端大跳。默认使用“中等步长”。
-
-当前规则：
-
-- 普通百分比参数：单次改动至少 `8%` 相对变化，且至少 `2.0` 个绝对点。
-- 大数值百分比参数，例如 `trailing_activation_pct`、`tp1_pnl_pct`：单次改动至少 `8%` 相对变化。
-- 小比例参数，例如 `take_profit=0.04`、费率、buffer：单次改动至少 `10%` 相对变化，且至少 `0.002` 绝对值。
-- bars/lookback/hold 类整数参数：单次改动至少 `15%`，且至少 `4` 根。
-- 0 到 1 之间的阈值，例如 ratio、score、close_pos：单次改动至少 `0.01`，或至少 `8%` 相对变化，取较大者。
-- `exit_range_scan` 产生的候选点也必须满足最小步长；不满足则不扫描。
-
-当前仍配合行为变化检查：
-
-- smoke 后核心行为必须明显变化。
-- 至少满足以下之一：
-  - 非加仓开仓数变化 `>= 8`。
-  - path pass 或 final veto pass 变化 `>= 3%`。
-  - long/short 其中一侧开仓变化 `>= 5%`。
-
-这条规则的目标是拦住“源码有 diff，但交易路径几乎没变”的候选。
+- `score_regime` 必须是 `robust_block_v26_activity_mean`。
+- `promotion_score` 低，且主要增长空间来自 `main_score`。
+- `train_robust_block_score` 和 `validation_robust_block_score` 都不高。
+- `benchmark_hurdle_score` 没有异常放大。
+- `drawdown_penalty_score`、`robustness_penalty_score`、`trade_idle_penalty` 不应单项压过主分太多。
+- `capture_score` 和 `capture_core` 只作为诊断参考，不作为选基底主理由。
 
 ## 注意
 
-- `test` 仍然只做人工只读观察，不进入 planner prompt、评分或晋升。
+- `test` 只做人工只读观察，不进入 planner prompt、评分或晋升。
 - 不要把“test 差”写进方向卡让模型直接优化 test。
-- 如果重新换基底，文档和 `operator_focus` 要同步改成新的 active reference 状态。
+- 重新换基底后，文档和 `operator_focus` 必须同步改成新的 active reference 状态。

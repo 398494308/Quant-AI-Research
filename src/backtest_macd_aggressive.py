@@ -1077,13 +1077,23 @@ def _apply_funding(position, funding_rate, settlement_price, leverage):
     return funding_pnl
 
 
-def _append_daily_equity_point(points, timestamp_ms, equity, market_close):
+def _append_daily_equity_point(points, timestamp_ms, equity, market_close, market_state=None):
     day = _beijing_day_label(timestamp_ms)
+    state = market_state or {}
     payload = {
         "date": day,
         "timestamp": timestamp_ms,
         "equity": round(equity, 8),
         "market_close": round(float(market_close), 8),
+        "adx": float(state.get("adx", 0.0) or 0.0),
+        "chop": float(state.get("chop", 0.0) or 0.0),
+        "atr_ratio": float(state.get("atr_ratio", 0.0) or 0.0),
+        "flow_imbalance": float(state.get("flow_imbalance", 0.0) or 0.0),
+        "trade_count_ratio": float(state.get("trade_count_ratio", 0.0) or 0.0),
+        "taker_buy_ratio": float(state.get("taker_buy_ratio", 0.0) or 0.0),
+        "fear_greed_value": state.get("fear_greed_value"),
+        "fear_greed_ema7": state.get("fear_greed_ema7"),
+        "fear_greed_delta7": state.get("fear_greed_delta7"),
     }
     if points and points[-1]["date"] == day:
         points[-1] = payload
@@ -1426,6 +1436,7 @@ def backtest_macd_aggressive(
     signal_path_closed_pnl = {}
     signal_path_closed_trades = {}
     signal_path_closed_wins = {}
+    last_market_state = None
     max_equity = capital
     max_drawdown = 0.0
     pyramid_add_count = 0
@@ -1508,6 +1519,7 @@ def backtest_macd_aggressive(
             "histogram": intraday_context["histogram"],
             "prev_histogram": intraday_state[idx - 1]["histogram"] if idx > 0 else intraday_context["histogram"],
         }
+        last_market_state = market_state
         market_fill_price = _execution_price(
             bar["timestamp"],
             bar["close"],
@@ -1780,7 +1792,7 @@ def backtest_macd_aggressive(
             + position.get("funding_pnl", 0.0)
             for position in positions
         )
-        _append_daily_equity_point(daily_equity_curve, bar_close_ts, equity, bar["close"])
+        _append_daily_equity_point(daily_equity_curve, bar_close_ts, equity, bar["close"], market_state)
         while (
             include_diagnostics
             and next_four_hour_sample_idx < len(four_hour_window_close_timestamps)
@@ -1815,7 +1827,7 @@ def backtest_macd_aggressive(
         _apply_trade_leg_rollup(position, trade)
         record_trade(_build_closed_trade(position))
 
-    _append_daily_equity_point(daily_equity_curve, end_ts, capital, last_close)
+    _append_daily_equity_point(daily_equity_curve, end_ts, capital, last_close, last_market_state)
     while (
         include_diagnostics
         and next_four_hour_sample_idx < len(four_hour_window_close_timestamps)

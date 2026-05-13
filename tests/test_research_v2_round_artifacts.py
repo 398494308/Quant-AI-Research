@@ -57,7 +57,7 @@ class RoundArtifactsTest(unittest.TestCase):
             context = {
                 "windows": {"validation_start_date": "2025-01-01"},
                 "gates": {"max_fee_drag_pct": 11.5},
-                "scoring": {"promotion_capture_weight": 0.8},
+                "scoring": {"robust_block_window_days": 28},
                 "data_fingerprints": {"intraday": {"path": "a.csv", "exists": True}},
                 "engine_fingerprints": {"evaluation": {"path": "eval.py", "exists": True}},
             }

@@ -50,6 +50,10 @@ class StrategyCandidate:
 
 PARAM_BLOCK_PATTERN = re.compile(r"# PARAMS_START\s*\nPARAMS = (.*?)\n# PARAMS_END", re.DOTALL)
 EXIT_PARAM_BLOCK_PATTERN = re.compile(r"# EXIT_PARAMS_START\s*\nEXIT_PARAMS = (.*?)\n# EXIT_PARAMS_END", re.DOTALL)
+FACTOR_SLOT_PARAM_BLOCK_PATTERN = re.compile(
+    r"# FACTOR_SLOT_PARAMS_START\s*\nFACTOR_SLOT_PARAMS = (.*?)\n# FACTOR_SLOT_PARAMS_END",
+    re.DOTALL,
+)
 DEFAULT_MODE_MAX_NEW_TOP_LEVEL_CONSTANTS = 2
 DEFAULT_MODE_MAX_NEW_TOP_LEVEL_HELPERS = 2
 FIXED_EXIT_PARAM_VALUES: dict[str, object] = {
@@ -117,64 +121,6 @@ PARAM_RELATIONS: tuple[tuple[str, str, str], ...] = (
     ("macd_fast", "<", "macd_slow"),
 )
 
-MIN_CHANGE_INTEGER_KEY_TOKENS = (
-    "bars",
-    "lookback",
-    "period",
-    "ema_",
-    "macd_",
-    "confirm_bars",
-)
-MIN_CHANGE_UNIT_INTERVAL_TOKENS = (
-    "fraction",
-    "ratio",
-    "imbalance",
-    "confirmation",
-    "close_pos",
-    "body_ratio",
-)
-
-
-def _is_numeric_param_value(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _is_integer_step_key(key: str, base_value: float | int, candidate_value: float | int | None = None) -> bool:
-    key_lower = key.lower()
-    if any(token in key_lower for token in MIN_CHANGE_INTEGER_KEY_TOKENS):
-        return True
-    if isinstance(base_value, int) and (candidate_value is None or isinstance(candidate_value, int)):
-        return True
-    return False
-
-
-def _is_unit_interval_key(key: str, base_value: float | int, candidate_value: float | int | None = None) -> bool:
-    key_lower = key.lower()
-    if not any(token in key_lower for token in MIN_CHANGE_UNIT_INTERVAL_TOKENS):
-        return False
-    values = [float(base_value)]
-    if candidate_value is not None:
-        values.append(float(candidate_value))
-    return max(abs(value) for value in values) <= 1.5
-
-
-def minimum_numeric_change_delta(
-    key: str,
-    base_value: float | int,
-    candidate_value: float | int | None = None,
-) -> float:
-    """返回研究器允许的最小数值步幅。"""
-    base_abs = abs(float(base_value))
-    if _is_integer_step_key(key, base_value, candidate_value):
-        return max(4.0, base_abs * 0.15)
-    if _is_unit_interval_key(key, base_value, candidate_value):
-        return max(0.01, base_abs * 0.08)
-    max_abs = max(base_abs, abs(float(candidate_value)) if candidate_value is not None else base_abs)
-    if max_abs <= 2.0:
-        return max(0.002, base_abs * 0.10)
-    return max(2.0, base_abs * 0.08)
-
-
 STRUCTURAL_LITERAL_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,}")
 REQUIRED_FUNCTIONS: tuple[str, ...] = (
     "_sideways_release_flags",
@@ -200,10 +146,52 @@ REQUIRED_TOP_LEVEL_CONSTANTS: tuple[str, ...] = (
     "ENTRY_PATH_TAGS",
 )
 REQUIRED_TOP_LEVEL_CONSTANT_SET = frozenset(REQUIRED_TOP_LEVEL_CONSTANTS)
+FRAMEWORK_TOP_LEVEL_CONSTANTS: tuple[str, ...] = (
+    "STRATEGY_FRAMEWORK_VERSION",
+    "FACTOR_SLOT_NAMES",
+    "FACTOR_SLOT_PARAMS",
+)
+FRAMEWORK_TOP_LEVEL_CONSTANT_SET = frozenset(FRAMEWORK_TOP_LEVEL_CONSTANTS)
+FACTOR_SLOT_NAMES: tuple[str, ...] = (
+    "regime_trend",
+    "regime_sideways",
+    "regime_volatility",
+    "regime_external",
+    "long_context",
+    "long_breakout",
+    "long_pullback",
+    "long_reaccel",
+    "long_flow",
+    "long_veto",
+    "long_extra_1",
+    "long_extra_2",
+    "short_context",
+    "short_breakdown",
+    "short_bounce_fail",
+    "short_reaccel",
+    "short_flow",
+    "short_veto",
+    "short_extra_1",
+    "short_extra_2",
+)
+FACTOR_SLOT_FUNCTIONS: tuple[str, ...] = tuple(f"_slot_{name}" for name in FACTOR_SLOT_NAMES)
+FRAMEWORK_FUNCTIONS: tuple[str, ...] = (
+    "_build_strategy_context",
+    "_classify_strategy_regime",
+    "_evaluate_factor_slots",
+    "_build_position_state",
+    "_build_long_candidate",
+    "_structured_short_path_key",
+    "_build_short_candidate",
+    "_select_entry_candidate",
+    "_format_strategy_output",
+    "_strategy_core",
+)
 COMPLEXITY_MONITORED_FUNCTIONS: tuple[str, ...] = (
     "_is_sideways_regime",
     "_trend_quality_ok",
     "_trend_followthrough_ok",
+    "_strategy_core",
     "strategy",
 )
 COMPLEXITY_MONITORED_FAMILIES: dict[str, tuple[str, ...]] = {
@@ -239,12 +227,21 @@ COMPLEXITY_MONITORED_FAMILIES: dict[str, tuple[str, ...]] = {
         "short_final_veto_clear",
         "_trend_followthrough_short",
     ),
+    "factor_slot_framework": (
+        "_evaluate_factor_slots",
+        "_build_long_candidate",
+        "_build_short_candidate",
+        "_select_entry_candidate",
+        "_strategy_core",
+    ),
+    "factor_slot_logic": FACTOR_SLOT_FUNCTIONS,
 }
 COMPLEXITY_ABSOLUTE_BUDGETS: dict[str, dict[str, int]] = {
     "_is_sideways_regime": {"lines": 90, "bool_ops": 32, "ifs": 14},
     "_trend_quality_ok": {"lines": 90, "bool_ops": 32, "ifs": 14},
     "_trend_followthrough_ok": {"lines": 90, "bool_ops": 36, "ifs": 12},
-    "strategy": {"lines": 360, "bool_ops": 180, "ifs": 12},
+    "_strategy_core": {"lines": 90, "bool_ops": 28, "ifs": 10},
+    "strategy": {"lines": 90, "bool_ops": 28, "ifs": 10},
 }
 COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS: dict[str, dict[str, int]] = {
     "sideways_family": {"lines": 200, "bool_ops": 88, "ifs": 16},
@@ -252,6 +249,8 @@ COMPLEXITY_FAMILY_ABSOLUTE_BUDGETS: dict[str, dict[str, int]] = {
     "trend_quality_family": {"lines": 150, "bool_ops": 50, "ifs": 18},
     "long_path_chain": {"lines": 200, "bool_ops": 88, "ifs": 12},
     "short_path_chain": {"lines": 176, "bool_ops": 80, "ifs": 12},
+    "factor_slot_framework": {"lines": 260, "bool_ops": 64, "ifs": 28},
+    "factor_slot_logic": {"lines": 260, "bool_ops": 80, "ifs": 24},
 }
 COMPLEXITY_DEFAULT_GROWTH_LIMITS: dict[str, int] = {
     "lines": 40,
@@ -345,6 +344,19 @@ def extract_exit_params(source: str) -> dict[str, object]:
         raise StrategySourceError(f"failed to parse EXIT_PARAMS block: {exc}") from exc
     if not isinstance(params, dict):
         raise StrategySourceError("EXIT_PARAMS block is not a dict")
+    return params
+
+
+def extract_factor_slot_params(source: str) -> dict[str, object]:
+    match = FACTOR_SLOT_PARAM_BLOCK_PATTERN.search(source)
+    if match is None:
+        raise StrategySourceError("missing FACTOR_SLOT_PARAMS block markers")
+    try:
+        params = ast.literal_eval(match.group(1))
+    except Exception as exc:
+        raise StrategySourceError(f"failed to parse FACTOR_SLOT_PARAMS block: {exc}") from exc
+    if not isinstance(params, dict):
+        raise StrategySourceError("FACTOR_SLOT_PARAMS block is not a dict")
     return params
 
 
@@ -460,6 +472,9 @@ def _required_top_level_source_map(source: str) -> dict[str, str]:
     exit_match = EXIT_PARAM_BLOCK_PATTERN.search(normalized)
     if exit_match is not None:
         sections["EXIT_PARAMS"] = normalize_strategy_source(exit_match.group(0))
+    factor_slot_match = FACTOR_SLOT_PARAM_BLOCK_PATTERN.search(normalized)
+    if factor_slot_match is not None:
+        sections["FACTOR_SLOT_PARAMS"] = normalize_strategy_source(factor_slot_match.group(0))
 
     for node in tree.body:
         start, end = _node_source_span(normalized, node, line_offsets=line_offsets)
@@ -472,7 +487,7 @@ def _required_top_level_source_map(source: str) -> dict[str, str]:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         for target in targets:
             for name in _iter_target_names(target):
-                if name in REQUIRED_TOP_LEVEL_CONSTANT_SET:
+                if name in REQUIRED_TOP_LEVEL_CONSTANT_SET or name in FRAMEWORK_TOP_LEVEL_CONSTANT_SET:
                     sections[name] = snippet
     return sections
 
@@ -531,7 +546,17 @@ def repair_missing_required_functions(
     missing_constants = tuple(sorted(REQUIRED_TOP_LEVEL_CONSTANT_SET - _top_level_constant_names(candidate_tree)))
     missing_param_block = PARAM_BLOCK_PATTERN.search(normalized_candidate) is None
     missing_exit_param_block = EXIT_PARAM_BLOCK_PATTERN.search(normalized_candidate) is None
-    if not missing and not missing_constants and not missing_param_block and not missing_exit_param_block:
+    missing_factor_slot_block = (
+        FACTOR_SLOT_PARAM_BLOCK_PATTERN.search(normalized_base) is not None
+        and FACTOR_SLOT_PARAM_BLOCK_PATTERN.search(normalized_candidate) is None
+    )
+    if (
+        not missing
+        and not missing_constants
+        and not missing_param_block
+        and not missing_exit_param_block
+        and not missing_factor_slot_block
+    ):
         return normalized_candidate, ()
 
     if not editable_regions:
@@ -550,6 +575,10 @@ def repair_missing_required_functions(
             exit_param_block = base_sections.get("EXIT_PARAMS", "").rstrip()
             if exit_param_block:
                 body = f"{exit_param_block}\n\n{body}" if body else exit_param_block
+        if missing_factor_slot_block:
+            factor_slot_block = base_sections.get("FACTOR_SLOT_PARAMS", "").rstrip()
+            if factor_slot_block:
+                body = f"{factor_slot_block}\n\n{body}" if body else factor_slot_block
         if tail_sections:
             body = f"{body}\n\n" if body else ""
             body += "\n\n".join(tail_sections)
@@ -721,6 +750,9 @@ def _tracked_region_source_map(source: str) -> dict[str, str]:
     exit_match = EXIT_PARAM_BLOCK_PATTERN.search(normalized)
     if exit_match is not None:
         regions["EXIT_PARAMS"] = exit_match.group(0)
+    factor_slot_match = FACTOR_SLOT_PARAM_BLOCK_PATTERN.search(normalized)
+    if factor_slot_match is not None:
+        regions["FACTOR_SLOT_PARAMS"] = factor_slot_match.group(0)
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -735,7 +767,10 @@ def _tracked_region_source_map(source: str) -> dict[str, str]:
                 target_names.extend(_iter_target_names(target))
         else:
             target_names.extend(_iter_target_names(node.target))
-        constant_names = [name for name in target_names if name.isupper() and name not in {"PARAMS", "EXIT_PARAMS"}]
+        constant_names = [
+            name for name in target_names
+            if name.isupper() and name not in {"PARAMS", "EXIT_PARAMS", "FACTOR_SLOT_PARAMS"}
+        ]
         if not constant_names:
             continue
         start, end = _node_source_span(normalized, node, line_offsets=line_offsets)
@@ -1075,6 +1110,16 @@ def _validate_source_shape_policy(
             + ", ".join(new_param_keys[:8])
         )
 
+    if EXIT_PARAM_BLOCK_PATTERN.search(normalize_strategy_source(base_source)) is not None:
+        base_exit_params = extract_exit_params(base_source)
+        candidate_exit_params = extract_exit_params(source)
+        new_exit_param_keys = sorted(set(candidate_exit_params) - set(base_exit_params))
+        if new_exit_param_keys:
+            raise StrategySourceError(
+                "new EXIT_PARAMS keys are not allowed: "
+                + ", ".join(new_exit_param_keys[:8])
+            )
+
     new_constant_names = sorted(_top_level_constant_names(tree) - _top_level_constant_names(base_tree))
     invalid_constant_names = [name for name in new_constant_names if name.upper() != name]
     if invalid_constant_names:
@@ -1170,70 +1215,143 @@ def build_system_edit_signature(
     }
 
 
+def _has_factor_slot_framework(source: str) -> bool:
+    normalized = normalize_strategy_source(source)
+    return FACTOR_SLOT_PARAM_BLOCK_PATTERN.search(normalized) is not None
+
+
+def _top_level_assignment_literal(tree: ast.Module, name: str) -> object:
+    for node in tree.body:
+        targets: list[ast.AST] = []
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        if value is None:
+            continue
+        for target in targets:
+            if name in _iter_target_names(target):
+                try:
+                    return ast.literal_eval(value)
+                except Exception as exc:
+                    raise StrategySourceError(f"failed to parse {name}: {exc}") from exc
+    raise StrategySourceError(f"missing top-level {name} assignment")
+
+
+def _function_signature_map(tree: ast.Module) -> dict[str, str]:
+    return {
+        node.name: ast.dump(node.args, include_attributes=False)
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _validate_factor_slot_params_contract(source: str) -> None:
+    slot_params = extract_factor_slot_params(source)
+    slot_keys = tuple(slot_params)
+    if slot_keys != FACTOR_SLOT_NAMES:
+        raise StrategySourceError(
+            "FACTOR_SLOT_PARAMS keys must match fixed slot order: "
+            + ", ".join(FACTOR_SLOT_NAMES)
+        )
+    for slot_name, config in slot_params.items():
+        if not isinstance(config, dict):
+            raise StrategySourceError(f"FACTOR_SLOT_PARAMS.{slot_name} must be a dict")
+        config_keys = set(config)
+        expected_keys = {"enabled", "weight", "threshold"}
+        if config_keys != expected_keys:
+            raise StrategySourceError(
+                f"FACTOR_SLOT_PARAMS.{slot_name} keys must be enabled, weight, threshold"
+            )
+        for key in expected_keys:
+            value = config.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise StrategySourceError(f"FACTOR_SLOT_PARAMS.{slot_name}.{key} must be numeric")
+
+
+def _validate_factor_slot_framework_source(source: str, tree: ast.Module) -> None:
+    if not _has_factor_slot_framework(source):
+        return
+
+    constant_names = _top_level_constant_names(tree)
+    missing_constants = tuple(sorted(FRAMEWORK_TOP_LEVEL_CONSTANT_SET - constant_names))
+    if missing_constants:
+        raise StrategySourceError(
+            f"missing strategy framework constants: {list(missing_constants)}"
+        )
+
+    function_names = _top_level_function_names(tree)
+    missing_functions = tuple(sorted(set(FRAMEWORK_FUNCTIONS) - function_names))
+    missing_slot_functions = tuple(sorted(set(FACTOR_SLOT_FUNCTIONS) - function_names))
+    if missing_functions:
+        raise StrategySourceError(f"missing strategy framework functions: {list(missing_functions)}")
+    if missing_slot_functions:
+        raise StrategySourceError(f"missing factor slot functions: {list(missing_slot_functions)}")
+
+    slot_names_literal = _top_level_assignment_literal(tree, "FACTOR_SLOT_NAMES")
+    if tuple(slot_names_literal) != FACTOR_SLOT_NAMES:
+        raise StrategySourceError("FACTOR_SLOT_NAMES must remain the fixed framework slot tuple")
+    _validate_factor_slot_params_contract(source)
+
+
 def validate_editable_region_boundaries(
     base_source: str,
     candidate_source: str,
     editable_regions: tuple[str, ...],
 ) -> None:
-    _ = base_source
-    _ = candidate_source
     _ = editable_regions
-    return None
+    normalized_base = normalize_strategy_source(base_source)
+    normalized_candidate = normalize_strategy_source(candidate_source)
+    if not _has_factor_slot_framework(normalized_base):
+        return None
 
+    base_tree = ast.parse(normalized_base)
+    candidate_tree = ast.parse(normalized_candidate)
+    _validate_factor_slot_framework_source(normalized_candidate, candidate_tree)
 
-def _minimum_numeric_change_violations(
-    base_params: dict[str, object],
-    candidate_params: dict[str, object],
-    *,
-    section: str,
-    skip_keys: set[str] | frozenset[str] = frozenset(),
-) -> list[str]:
-    violations: list[str] = []
-    for key in sorted(set(base_params) & set(candidate_params)):
-        if key in skip_keys:
-            continue
-        base_value = base_params[key]
-        candidate_value = candidate_params[key]
-        if not _is_numeric_param_value(base_value) or not _is_numeric_param_value(candidate_value):
-            continue
-        delta = abs(float(candidate_value) - float(base_value))
-        if delta <= 1e-12:
-            continue
-        minimum_delta = minimum_numeric_change_delta(key, base_value, candidate_value)
-        if delta + 1e-12 < minimum_delta:
-            violations.append(
-                f"{section}.{key}: {base_value}->{candidate_value} delta={delta:.6g} min={minimum_delta:.6g}"
-            )
-    return violations
-
-
-def _validate_minimum_numeric_changes(
-    normalized: str,
-    *,
-    base_source: str,
-    params: dict[str, object],
-    source_has_exit_params: bool,
-) -> None:
-    base_normalized = normalize_strategy_source(base_source)
-    base_params = extract_params(base_normalized)
-    violations = _minimum_numeric_change_violations(base_params, params, section="PARAMS")
-    base_has_exit_params = EXIT_PARAM_BLOCK_PATTERN.search(base_normalized) is not None
-    if base_has_exit_params and source_has_exit_params:
-        base_exit_params = extract_exit_params(base_normalized)
-        candidate_exit_params = extract_exit_params(normalized)
-        violations.extend(
-            _minimum_numeric_change_violations(
-                base_exit_params,
-                candidate_exit_params,
-                section="EXIT_PARAMS",
-                skip_keys=frozenset(FIXED_EXIT_PARAM_VALUES),
-            )
-        )
-    if violations:
+    allowed_regions = {
+        "PARAMS",
+        "EXIT_PARAMS",
+        "FACTOR_SLOT_PARAMS",
+        *FACTOR_SLOT_FUNCTIONS,
+    }
+    changed_regions = changed_editable_regions(normalized_base, normalized_candidate, tuple())
+    blocked_regions = tuple(
+        region_name for region_name in changed_regions
+        if region_name not in allowed_regions
+    )
+    if blocked_regions:
         raise StrategySourceError(
-            "numeric change too small; use a larger minimum step: "
-            + "; ".join(violations[:8])
+            "strategy framework is locked; only PARAMS, EXIT_PARAMS, FACTOR_SLOT_PARAMS "
+            "and fixed _slot_* bodies may change. blocked regions: "
+            + ", ".join(blocked_regions[:12])
         )
+
+    base_functions = _top_level_function_names(base_tree)
+    candidate_functions = _top_level_function_names(candidate_tree)
+    if base_functions != candidate_functions:
+        raise StrategySourceError("strategy framework function set is locked")
+
+    base_constants = _top_level_constant_names(base_tree)
+    candidate_constants = _top_level_constant_names(candidate_tree)
+    if base_constants != candidate_constants:
+        raise StrategySourceError("strategy framework top-level constant set is locked")
+
+    base_signatures = _function_signature_map(base_tree)
+    candidate_signatures = _function_signature_map(candidate_tree)
+    locked_signature_names = set(FRAMEWORK_FUNCTIONS) | set(FACTOR_SLOT_FUNCTIONS) | {"strategy", "strategy_decision"}
+    for function_name in sorted(locked_signature_names):
+        if base_signatures.get(function_name) != candidate_signatures.get(function_name):
+            raise StrategySourceError(f"strategy framework signature is locked: {function_name}")
+
+    base_slot_params = extract_factor_slot_params(normalized_base)
+    candidate_slot_params = extract_factor_slot_params(normalized_candidate)
+    if tuple(candidate_slot_params) != tuple(base_slot_params):
+        raise StrategySourceError("FACTOR_SLOT_PARAMS slot order is locked")
+    return None
 
 
 def validate_strategy_source(
@@ -1250,6 +1368,7 @@ def validate_strategy_source(
     missing_constants = tuple(sorted(REQUIRED_TOP_LEVEL_CONSTANT_SET - _top_level_constant_names(tree)))
     if missing_constants:
         raise StrategySourceError(f"missing required top-level constants: {list(missing_constants)}")
+    _validate_factor_slot_framework_source(normalized, tree)
 
     undefined_reference_errors = _undefined_function_reference_errors(normalized, tree)
     if undefined_reference_errors:
@@ -1328,19 +1447,17 @@ def validate_strategy_source(
             if actual_value != expected_value:
                 raise StrategySourceError(f"fixed EXIT_PARAMS key {key} must remain {expected_value}")
 
-    if base_source is not None:
-        _validate_minimum_numeric_changes(
-            normalized,
-            base_source=base_source,
-            params=params,
-            source_has_exit_params=source_has_exit_params,
-        )
-
     _validate_source_shape_policy(
         normalized,
         tree=tree,
         base_source=base_source,
     )
+    if base_source is not None:
+        validate_editable_region_boundaries(
+            normalize_strategy_source(base_source),
+            normalized,
+            tuple(),
+        )
     _validate_complexity_budget(
         normalized,
         tree=tree,

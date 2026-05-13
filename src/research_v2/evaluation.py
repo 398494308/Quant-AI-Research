@@ -116,6 +116,17 @@ class DrawdownRiskSideReport:
     blended_ulcer_pct: float
 
 
+@dataclass(frozen=True)
+class RobustBlockReport:
+    block_scores: tuple[float, ...]
+    mean_score: float
+    median_score: float
+    p25_score: float
+    min_score: float
+    robust_score: float
+    block_count: int
+
+
 HIT_SCORE_THRESHOLD = 0.25
 OVERFIT_WARN_SCORE = 20.0
 OVERFIT_HIGH_SCORE = 40.0
@@ -549,12 +560,6 @@ def _low_activity_signal_payload(
     }
 
 
-def _trade_activity_shortfall(actual: int, preferred_min: int) -> float:
-    floor = max(1, int(preferred_min))
-    trades = max(0, int(actual))
-    return _clamp(max(floor - trades, 0) / floor, 0.0, 1.0)
-
-
 def _period_months_from_timestamps(start_timestamp: int | None, end_timestamp: int | None) -> float:
     if start_timestamp is None or end_timestamp is None or end_timestamp <= start_timestamp:
         return 0.0
@@ -565,6 +570,42 @@ def _monthly_trade_rate(trade_count: int, months: float) -> float:
     if months <= 0.0:
         return 0.0
     return max(0, int(trade_count)) / months
+
+
+def _activity_multiplier_from_monthly_entries(monthly_entries: float, scoring: ScoringConfig) -> float:
+    points = [
+        (0.0, 0.0),
+        (
+            max(0.0, float(scoring.activity_multiplier_floor_monthly_entries)),
+            _clamp(float(scoring.activity_multiplier_floor_value), 0.0, 1.0),
+        ),
+        (
+            max(0.0, float(scoring.activity_multiplier_low_monthly_entries)),
+            _clamp(float(scoring.activity_multiplier_low_value), 0.0, 1.0),
+        ),
+        (
+            max(0.0, float(scoring.activity_multiplier_preferred_monthly_entries)),
+            _clamp(float(scoring.activity_multiplier_preferred_value), 0.0, 1.0),
+        ),
+        (
+            max(0.0, float(scoring.activity_multiplier_full_monthly_entries)),
+            1.0,
+        ),
+    ]
+    ordered_points = sorted(points, key=lambda item: item[0])
+    x = max(0.0, float(monthly_entries))
+    if x <= ordered_points[0][0]:
+        return ordered_points[0][1]
+    previous_x, previous_y = ordered_points[0]
+    for current_x, current_y in ordered_points[1:]:
+        if current_x <= previous_x:
+            previous_x, previous_y = current_x, max(previous_y, current_y)
+            continue
+        if x <= current_x:
+            progress = _smoothstep((x - previous_x) / (current_x - previous_x))
+            return previous_y + (current_y - previous_y) * progress
+        previous_x, previous_y = current_x, current_y
+    return ordered_points[-1][1]
 
 
 def _timestamp_value(value: Any) -> int | None:
@@ -629,21 +670,6 @@ def _trade_idle_shortfall(max_idle_days: float, allowed_idle_days: float) -> flo
     return _clamp(max(float(max_idle_days) - limit, 0.0) / limit, 0.0, 1.0)
 
 
-def _capture_return_multiplier(capture_score: float, scoring: ScoringConfig) -> float:
-    floor = float(scoring.capture_return_discount_floor)
-    neutral = max(floor + 1e-9, float(scoring.capture_return_neutral_score))
-    min_multiplier = _clamp(float(scoring.capture_return_min_multiplier), 0.0, 1.0)
-    capture = float(capture_score)
-    if capture <= floor:
-        return min_multiplier
-    if capture <= neutral:
-        progress = _smoothstep((capture - floor) / (neutral - floor))
-        return min_multiplier + (1.0 - min_multiplier) * progress
-    tail_gain = max(0.0, float(scoring.capture_return_tail_gain))
-    tail_scale = max(1e-9, float(scoring.capture_return_tail_scale))
-    return 1.0 + tail_gain * (1.0 - math.exp(-(capture - neutral) / tail_scale))
-
-
 def _trend_participation_shortfall(hit_rate: float, *, floor: float, target: float) -> float:
     low = min(_clamp(float(floor), 0.0, 1.0), 1.0 - 1e-9)
     high = _clamp(float(target), low + 1e-9, 1.0)
@@ -665,11 +691,7 @@ def _trend_participation_penalty(
         floor=scoring.trade_participation_validation_floor,
         target=scoring.trade_participation_validation_target,
     )
-    penalty = max(0.0, float(scoring.trade_participation_penalty_weight)) * (
-        TRAIN_VAL_SCORE_WEIGHT * train_shortfall
-        + TRAIN_VAL_SCORE_WEIGHT * validation_shortfall
-    )
-    return penalty, train_shortfall, validation_shortfall
+    return 0.0, train_shortfall, validation_shortfall
 
 
 # ==================== 趋势切段评分 ====================
@@ -987,6 +1009,57 @@ def _annualized_return_score(daily_returns: list[float]) -> float:
         growth *= max(1e-9, 1.0 + float(value))
     annualized_growth = max(growth, 1e-9) ** (365.0 / len(daily_returns))
     return _clamp(math.log(max(annualized_growth, 1e-9), 2.0), -2.0, 3.0)
+
+
+def _block_return_score(daily_returns: list[float]) -> float:
+    if not daily_returns:
+        return 0.0
+    growth = 1.0
+    for value in daily_returns:
+        growth *= max(1e-9, 1.0 + float(value))
+    annualized_scale = math.sqrt(365.0 / max(1, len(daily_returns)))
+    return _clamp(math.log(max(growth, 1e-9), 2.0) * annualized_scale, -2.0, 2.0)
+
+
+def _robust_block_report(daily_returns: list[float], scoring: ScoringConfig) -> RobustBlockReport:
+    clean_returns = [float(value) for value in daily_returns]
+    block_ranges = _window_slices(
+        len(clean_returns),
+        max(1, int(scoring.robust_block_window_days)),
+        max(1, int(scoring.robust_block_step_days)),
+    )
+    block_scores = tuple(
+        _block_return_score(clean_returns[start_idx:end_idx])
+        for start_idx, end_idx in block_ranges
+    )
+    if not block_scores:
+        return RobustBlockReport(
+            block_scores=tuple(),
+            mean_score=0.0,
+            median_score=0.0,
+            p25_score=0.0,
+            min_score=0.0,
+            robust_score=0.0,
+            block_count=0,
+        )
+    mean_score = _mean(list(block_scores))
+    median_score = median(block_scores)
+    p25_score = _quantile(list(block_scores), 0.25)
+    min_score = min(block_scores)
+    robust_score = (
+        float(scoring.robust_block_mean_weight) * mean_score
+        + float(scoring.robust_block_median_weight) * median_score
+        + float(scoring.robust_block_p25_weight) * p25_score
+    )
+    return RobustBlockReport(
+        block_scores=block_scores,
+        mean_score=mean_score,
+        median_score=median_score,
+        p25_score=p25_score,
+        min_score=min_score,
+        robust_score=robust_score,
+        block_count=len(block_scores),
+    )
 
 
 def _window_slices(length: int, window_days: int, step_days: int) -> list[tuple[int, int]]:
@@ -1582,14 +1655,40 @@ def _validation_block_report(
 def partial_eval_gate_snapshot(result: dict[str, Any] | None) -> dict[str, float]:
     points = _normalize_trend_points(_result_trend_capture_points(result or {}))
     report = _trend_score_report(points)
+    daily_returns = [float(value) for value in (result or {}).get("daily_returns", [])]
+    block_report = _robust_block_report(daily_returns, ScoringConfig())
     return {
         "segment_count": float(report.segment_count),
         "trend_score": report.trend_score,
         "return_score": report.return_score,
         "period_score": _period_score(report),
+        "robust_block_score": block_report.robust_score,
+        "robust_block_count": float(block_report.block_count),
         "hit_rate": report.hit_rate,
         "path_return_pct": report.path_return_pct,
         "unique_points": float(len(points)),
+    }
+
+
+def partial_eval_gate_snapshot_from_results(
+    results: list[dict[str, Any]],
+    scoring: ScoringConfig | None = None,
+) -> dict[str, float]:
+    scoring = scoring or ScoringConfig()
+    trend_path = _collect_trend_path(results, "eval")
+    trend_report = _trend_score_report(trend_path.points)
+    daily_path = _collect_daily_path(results, "eval")
+    block_report = _robust_block_report(daily_path.returns, scoring)
+    return {
+        "segment_count": float(trend_report.segment_count),
+        "trend_score": trend_report.trend_score,
+        "return_score": _annualized_return_score(daily_path.returns),
+        "period_score": _period_score(trend_report),
+        "robust_block_score": block_report.robust_score,
+        "robust_block_count": float(block_report.block_count),
+        "hit_rate": trend_report.hit_rate,
+        "path_return_pct": trend_report.path_return_pct,
+        "unique_points": float(trend_path.unique_points),
     }
 
 
