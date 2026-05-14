@@ -261,7 +261,7 @@ def build_strategy_agents_instructions() -> str:
 - 用 OKX 数据研究一套 BTC-USDT-SWAP 20x 高弹性趋势捕获策略；允许较大波动，但不能靠日期特判、路径硬编码或伪优化刷分。
 - `15m` 是唯一事实源，`1h + 4h` 只是由 `15m` 聚合的确认层；突破/跌破除了成交量，也要结合方向流量代理。
 - 目标不是做平滑净值，而是更早跟上 BTC 的主要上涨/下跌，并在趋势失效时更快退出或反手。
-- 当前阶段优先研究 `train/val` 稳定性，而不是把某一段 Sharpe 或收益单独做热；默认优先补弱侧、缩小落差。
+- 当前阶段优先研究 `train/val` 稳定性，而不是把某一段 Sharpe 或收益单独做热；默认先看主评分短板、漏斗、有效活跃度和持仓覆盖，再决定改哪条路径。
 
 工作区文件职责：
 - `src/strategy_macd_aggressive.py`：唯一允许修改的策略文件，包含入场参数 `PARAMS` 与退出参数 `EXIT_PARAMS`。
@@ -275,7 +275,7 @@ def build_strategy_agents_instructions() -> str:
 - 先想再写，先看历史再下手。
 - 当前运行环境约 `2 核 8G`；不要假设可以做大网格搜索、超长额外回测或重型试错。
 - 不要 hard code，不要堆屎。
-- 最近结构化失败证据优先级高于 `weak side` 或 champion 缺陷提示；先复盘失败点，再决定是否继续同方向。
+- 最近结构化失败证据、实时评分拆解和真实漏斗优先级最高；不要被静态弱侧、旧 champion 缺陷或上一轮叙事锚定。
 - 每轮只验证一个可证伪假设；改动要能映射到真实交易路径变化，而不是只制造源码 diff。
 - 当前策略已经改成固定框架 + 固定因子槽；主框架不能改，只能在既有参数、开放退出参数、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体里表达假设。
 - 因子槽接近满复杂度时，先删旧、并旧、替换旧；新增或启用因子前，必须说明被替换的是哪条旧条件或为什么不需要增加复杂度。
@@ -375,62 +375,19 @@ def _safe_metric(metrics: dict[str, Any] | None, key: str) -> float:
         return 0.0
 
 
-def _side_bias_guidance(reference_metrics: dict[str, Any] | None) -> str:
+def _side_balance_diagnostic(reference_metrics: dict[str, Any] | None) -> str:
     bull = _safe_metric(reference_metrics, "validation_bull_capture_score")
     bear = _safe_metric(reference_metrics, "validation_bear_capture_score")
     hit_rate = _safe_metric(reference_metrics, "validation_segment_hit_rate")
-    gap = bear - bull
-
-    if bear >= 0.20 and gap >= 0.12:
-        if hit_rate < 0.35:
-            return (
-                "多空强化偏置（软引导，不是硬限制）:\n"
-                f"- 当前主参考 val 多头/空头捕获 = {bull:.2f} / {bear:.2f}，命中率 = {hit_rate:.0%}。\n"
-                "- 多头捕获明显更弱，但整体命中率也偏低；先判断瓶颈是在弱侧捕获、信号质量还是最终路由，不要自动锁定为单纯补 long。\n"
-                "- 若选择 `long` 或 `mixed` 假设，必须说明它预计新增、删除或迁移哪类真实交易，并尽量不破坏已有空头触达路径。"
-            )
-        return (
-            "多空强化偏置（软引导，不是硬限制）:\n"
-            f"- 当前主参考 val 多头/空头捕获 = {bull:.2f} / {bear:.2f}，命中率 = {hit_rate:.0%}。\n"
-            "- 这说明空头捕获相对更强，但多头仍明显偏弱，继续把主要探索预算投入空头，边际收益大概率更低。\n"
-            "- 本轮默认优先考虑 `long` 或 `mixed` 假设：优先修多头，但不要在进入思考前就预设根因一定在 `outer_context`、`final_veto` 或某个固定 helper。\n"
-            "- 这不是禁止修改空头；只有当某个 mixed 假设能在基本不破坏空头的前提下补多头，或空头出现新的硬伤时，才值得继续动 short。\n"
-            "- 若选择 mixed 方案，`expected_effects` 的第一优先级应是改善多头捕获/命中率，第二优先级才是维持空头不明显恶化。\n"
-            "- 默认先做“目标导向”判断：多头问题更像卡在到来、陪跑、过早出清、还是最终路由错配；先定目标，再定具体 choke point。"
-        )
-
-    if bull < 0.05 <= bear:
-        return (
-            "多空强化偏置（软引导，不是硬限制）:\n"
-            f"- 当前主参考 val 多头/空头捕获 = {bull:.2f} / {bear:.2f}。\n"
-            "- 当前更值得优先探索的是多头侧，因为空头至少已经过线，而多头仍接近或低于门槛。\n"
-            "- 默认优先做能补多头捕获的 `long` 或 `mixed` 假设，但不要为了补多头而粗暴破坏空头主框架。\n"
-            "- 先判断多头是卡在 arrival / escort / turn / routing 哪一段，再决定改哪一层规则；不要把“多头弱”直接翻译成“继续 widen outer_context”。"
-        )
-
-    return ""
-
-
-def _champion_focus_hint(reference_metrics: dict[str, Any] | None) -> str:
-    bull = _safe_metric(reference_metrics, "validation_bull_capture_score")
-    bear = _safe_metric(reference_metrics, "validation_bear_capture_score")
-    arrival = _safe_metric(reference_metrics, "validation_arrival_capture_score")
-    escort = _safe_metric(reference_metrics, "validation_escort_capture_score")
-    turn = _safe_metric(reference_metrics, "validation_turn_adaptation_score")
-
-    signals: list[str] = []
-    if bear - bull >= 0.05:
-        signals.append(f"多头捕获弱于空头（val {bull:.2f}/{bear:.2f}）")
-    if escort + 0.08 < arrival and escort + 0.08 < turn:
-        signals.append(f"陪跑能力明显弱于到来/掉头（val {arrival:.2f}/{escort:.2f}/{turn:.2f}）")
-
-    if not signals:
+    gap = abs(bear - bull)
+    if gap < 0.08 and hit_rate >= 0.20:
         return ""
 
     return (
-        "当前 champion 缺陷（软诊断，不是硬限制）: "
-        + "；".join(signals)
-        + "。优先尝试能补多头延续持有、提高到来质量或减少过早出清的假设；若其他方向更能改善 gate，可以跳出这条提示。"
+        "多空结构诊断（事实提示，不是方向指令）:\n"
+        f"- 当前主参考 val 多头/空头捕获 = {bull:.2f} / {bear:.2f}，命中率 = {hit_rate:.0%}。\n"
+        "- 捕获落差只能说明需要检查对应漏斗和收益块，不能直接推出本轮必须改 long、short 或 mixed。\n"
+        "- 先看主评分短板、真实漏斗、交易活跃度和持仓覆盖，再决定本轮最该改哪条交易路径。"
     )
 
 
@@ -480,8 +437,8 @@ def build_strategy_research_prompt(
         current_complexity_headroom_text,
         min_validation_closed_trades,
     )
-    side_bias_guidance = _side_bias_guidance(reference_metrics)
-    side_bias_block = f"\n{side_bias_guidance}\n" if side_bias_guidance else ""
+    side_balance_diagnostic = _side_balance_diagnostic(reference_metrics)
+    side_balance_block = f"\n{side_balance_diagnostic}\n" if side_balance_diagnostic else ""
     structural_audit_block = ""
     if structural_audit_trigger_text.strip():
         structural_audit_block = (
@@ -506,8 +463,6 @@ def build_strategy_research_prompt(
         if structural_audit_block
         else "- 晋升要求是 `gate` 通过，且 `promotion_score` 严格高于当前 active reference；已取消的是额外晋级边际，不是“低分也可替换”"
     )
-    champion_focus_hint = _champion_focus_hint(reference_metrics)
-    champion_focus_block = f"{champion_focus_hint}\n" if champion_focus_hint else ""
     bootstrap_excerpt = _bootstrap_journal_excerpt(journal_summary, max_lines=10, max_chars=900)
     bootstrap_block = ""
     if session_mode == "bootstrap":
@@ -564,8 +519,7 @@ def build_strategy_research_prompt(
 
 当前 active reference 角色：`{current_base_role}`
 当前 {benchmark_label} 参考晋级分：{previous_best_score:.2f}
-{side_bias_block}
-{champion_focus_block}
+{side_balance_block}
 卡片摘要（已展开，不需要再假设自己能读本地文件）：
 {operator_focus_block}{champion_review_block}
 {reviewer_summary_block}
@@ -579,7 +533,7 @@ def build_strategy_research_prompt(
 {evaluation_summary}
 
 本轮执行框架：
-- 先判断上一版为什么失败，再决定继续还是转向；不要只因为弱侧还是 `long` 就留在旧路线。
+- 先判断上一版为什么失败，再决定继续还是转向；不要只因为某个诊断字段仍弱，就留在旧路线。
 - 若 `primary_direction` 已高热，本轮至少要换失败层、关键规则链或真实触达路径，不要只换标签。
 - 新增 path 不等于新增交易；长侧重点看 `long_signal_path_ok -> long_final_veto_clear -> _trend_followthrough_long()`，空侧重点看 `breakdown_ready -> short_final_veto_clear -> _trend_followthrough_short()`。
 - 如果主要改 `_trend_followthrough_ok()`、`_trend_quality_ok()` 或 `_flow_confirmation_ok()`，必须确认现有 slot 和候选路径会触达；否则优先改对应 `_slot_*()` 或参数。
@@ -600,7 +554,7 @@ def build_strategy_research_prompt(
 {build_candidate_response_format_instructions()}
 - 主进程还会把这份 `draft` 交给 `reviewer` 审稿；若 reviewer 打回，本轮必须先吸收反馈再重写。
 - `primary_direction` 只写本轮主动施力方向；`change_plan` 必须具体到规则块、阈值或最终放行链。
-- 默认优先找更稳的泛化形态：先改善 `val` 最差块、`train/val` 分布离群度和交易活跃度，再决定补哪一侧；若一个方案主要让强的一侧更强，却不能改善这些稳定性指标，默认降权。
+- 默认优先找更稳的泛化形态：先改善 `val` 最差块、`train/val` 分布离群度和交易活跃度，再决定改哪条路径；若一个方案主要让强的一侧更强，却不能改善这些稳定性指标，默认降权。
 - 如果本轮主要改 `EXIT_PARAMS` 里的连续数值，可以用 `exit_range_scan` 给一个 3 点小范围；系统只在预筛阶段做这次轻量扫描。
 - `novelty_proof` 不是自我辩护。{_novelty_proof_rule()}
 - 不允许把“未执行代码改动”“blocked”“no_edit”“no_change”这类占位回复当成完成。

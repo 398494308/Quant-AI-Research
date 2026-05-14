@@ -2973,8 +2973,9 @@ class JournalPromptFixesTest(unittest.TestCase):
             },
         )
 
-        self.assertIn("整体命中率也偏低", prompt)
-        self.assertIn("不要自动锁定为单纯补 long", prompt)
+        self.assertIn("多空结构诊断（事实提示，不是方向指令）", prompt)
+        self.assertIn("不能直接推出本轮必须改 long、short 或 mixed", prompt)
+        self.assertIn("先看主评分短板、真实漏斗、交易活跃度和持仓覆盖", prompt)
 
     def test_build_strategy_agents_instructions_mentions_all_required_symbols(self):
         prompt = build_strategy_agents_instructions()

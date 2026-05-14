@@ -16,7 +16,7 @@ v28 的主评分是有效活跃度调整后的稳健时间块收益，并按活�
 
 ## 历史候选
 
-历史第 30 轮 `planner_040` 的 `bc1b...` source 已在 `2026-05-12 23:22`（Asia/Shanghai）迁移到固定因子槽结构，并被替换为当前 active champion。迁移版保留旧普通回测入口的交易行为口径，同时锁住主框架，让研究器只改参数和固定 slot。
+历史第 30 轮 `planner_040` 的 `bc1b...` source 已在 `2026-05-12 23:22`（Asia/Shanghai）迁移到固定因子槽结构。`2026-05-14 14:08`（Asia/Shanghai）已再次换回这版结构化差基底，并重置 stage/session。迁移版保留旧普通回测入口的交易行为口径，同时锁住主框架，让研究器只改参数和固定 slot。
 
 | 项目 | 值 |
 | --- | --- |
@@ -24,23 +24,25 @@ v28 的主评分是有效活跃度调整后的稳健时间块收益，并按活�
 | iteration | `30` |
 | original code hash | `bc1b2137aba6bb103357ac12394825cc1739b6e4f8c96c2e5831c32192468e6f` |
 | structured code hash | `660e09d6e45e3ac676d54fcbd912853705eac2e9b0deffab3fdf63b9b9581409` |
-| source snapshot | `backups/research_v2_round_artifacts/sources/bc/bc1b2137aba6bb103357ac12394825cc1739b6e4f8c96c2e5831c32192468e6f.py` |
+| structured snapshot | `backups/research_macd_aggressive_v2_stage_resets/20260513_092303/strategy_macd_aggressive_v2_candidate.py` |
 | v28 gate | 通过 |
-| promotion_score | `-0.3568` |
-| main_score / robust_time_score | `-0.0815 / -0.0680` |
+| promotion_score | `-0.1417` |
+| main_score / robust_time_score | `-0.0912 / -0.0776` |
 | train/val robust block | `0.0383 / -0.1732` |
-| train/val activity multiplier | `0.9720 / 1.0000` |
+| train/val activity multiplier | `0.4695 / 0.6750` |
 | benchmark_hurdle_score | `0.0136` |
-| drawdown / robustness / idle penalty | `0.1753 / 0.0000 / 0.1000` |
+| drawdown / robustness / allowance | `0.0505 / 0.0000 / 0.3717` |
 | capture_score / capture_core_score | `0.0273 / 0.0138` |
 | train / val 非加仓开仓 | `254 / 233` |
+| train / val 月非加仓开仓 | `14.06 / 19.43` |
+| train / val 持仓覆盖 | `8.82% / 10.69%` |
 
 保留它作为候选的原因：
 
 - 已知能跑完整评估并通过基础 gate。
 - gate 通过，且固定框架已锁住，适合作为结构化研究起点。
 - v28 下重算后仍应保留明显增长空间。
-- 交易量明显偏低时，后续研究应优先在固定 slot 内提高有效交易覆盖，而不是新增平行路径刷数量。
+- 交易频率已经足够，主要短板是多数时间块收益、val 负收益和持仓覆盖不足；后续研究应优先在固定 slot 内改善有效交易覆盖和时间块收益，而不是新增平行路径刷数量。
 
 它不是永久指定基底。如果后续又进入局部平台，可以重新从历史记录里找更差的 gate 通过候选。
 

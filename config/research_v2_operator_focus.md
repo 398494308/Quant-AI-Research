@@ -6,6 +6,7 @@
 
 - 当前评分口径是 `robust_block_v28_activity_drawdown_allowance`。
 - 这张卡是长期方向卡，不绑定 champion hash，不保存静态 champion 分数；当前 active reference、分数、交易量、回撤和短板永远以运行器每轮实时注入的诊断为准。
+- 当前刚换回低分结构化基底并重置 stage/session；不要沿用换基底前的旧 champion 叙事或旧局部路线，先看本轮实时评分拆解、漏斗和交易路径。
 - 当前策略主框架已硬锁。研究器只能改既有 `PARAMS`、开放 `EXIT_PARAMS`、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体；不能新增 helper、slot、参数 key，不能改 `_strategy_core()`、候选选择顺序或入口签名。
 - 当前研究重点从固定单边趋势捕获，改为多数时间块都能稳健赚钱。优先看 `train_robust_block_score`、`validation_robust_block_score`、`main_score` 和 `promotion_score`。
 - `main_score = activity_adjusted_robust_time_score - benchmark_hurdle_score`。train/val 各自 28 天收益块用 mean/median/P25 聚合，min 只做诊断；正收益再按“非加仓开仓月频 × 持仓覆盖率”打倍率。

@@ -2431,9 +2431,9 @@ def _stage_executive_summary_lines(
 
     weak_side = _weak_side_from_reference_metrics(reference_metrics)
     target_text = {
-        "long": "当前弱侧是 long；主目标是补多头，但要持续监控 short 是否被破坏，优先选能补 long 且不明显伤 short 的方案。",
-        "short": "当前弱侧是 short；主目标是补空头，但要持续监控 long 是否被破坏，优先选能补 short 且不明显伤 long 的方案。",
-    }.get(weak_side, "当前多空没有明显弱侧，默认先看最影响 gate 的主短板。")
+        "long": "当前多头捕获相对弱；这只是诊断事实，不是方向指令。先看主评分短板、真实漏斗和有效活跃度，再决定是否改 long、short 或 mixed。",
+        "short": "当前空头捕获相对弱；这只是诊断事实，不是方向指令。先看主评分短板、真实漏斗和有效活跃度，再决定是否改 long、short 或 mixed。",
+    }.get(weak_side, "当前多空没有明显弱侧；默认先看最影响 gate 和 promotion 的主短板。")
 
     accepted_count = sum(1 for entry in entries if str(entry.get("outcome", "")).strip() == "accepted")
     rejected_count = sum(1 for entry in entries if str(entry.get("outcome", "")).strip() == "rejected")
@@ -2469,7 +2469,7 @@ def _stage_executive_summary_lines(
     else:
         lines.append("- 重复失败核: 当前还没有形成 2 轮以上的同核失败。")
     lines.append(
-        "- 当前复盘优先级: 最近结构化失败证据 > `weak side` / champion 缺陷提示；先判断上一条路为什么失败，再决定是否继续同方向。"
+        "- 当前复盘优先级: 最近结构化失败证据、实时评分拆解、真实漏斗 > 静态弱侧或旧叙事；先判断上一条路为什么失败，再决定是否继续同方向。"
     )
     lines.append(
         f"- 当前过热近邻/慎入区: 簇={_top_counter_labels(cluster_counter, 2)}；"
@@ -2478,11 +2478,11 @@ def _stage_executive_summary_lines(
     )
     if weak_side == "long":
         lines.append(
-            "- 当前阅读提醒: `weak side = long` 只说明主目标是补多头，不等于根因一定在 `long_outer_context_ok` / `widen_outer_context`；若同一种补法已反复失败，先复盘失败点，再决定是否继续补 long。"
+            "- 当前阅读提醒: `weak side = long` 只说明多头捕获相对弱，不等于根因一定在 long 侧，也不等于必须继续补 long；若同一种补法已反复失败，先换机制层或路径。"
         )
     elif weak_side == "short":
         lines.append(
-            "- 当前阅读提醒: `weak side = short` 只说明主目标是补空头，不等于根因一定在 `short_outer_context_ok` / `widen_outer_context`；若同一种补法已反复失败，先复盘失败点，再决定是否继续补 short。"
+            "- 当前阅读提醒: `weak side = short` 只说明空头捕获相对弱，不等于根因一定在 short 侧，也不等于必须继续补 short；若同一种补法已反复失败，先换机制层或路径。"
         )
     lines.append("- 阅读建议: 先看这里和失败核聚合，先复盘失败证据，再把下面的风险表、逐轮表格当附录。")
     return lines
