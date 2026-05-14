@@ -130,7 +130,12 @@ def _load_scoring_config(windows: "WindowConfig") -> "ScoringConfig":
         capture_side_multiplier_floor=_env_float("MACD_V2_CAPTURE_SIDE_MULTIPLIER_FLOOR", 0.35),
         capture_side_multiplier_floor_score=_env_float("MACD_V2_CAPTURE_SIDE_MULTIPLIER_FLOOR_SCORE", 0.02),
         capture_side_multiplier_neutral_score=_env_float("MACD_V2_CAPTURE_SIDE_MULTIPLIER_NEUTRAL_SCORE", 0.10),
-        promotion_drawdown_base_weight=_env_float("MACD_V2_PROMOTION_DRAWDOWN_BASE_WEIGHT", 0.20),
+        promotion_drawdown_allowance_base=_env_float("MACD_V2_PROMOTION_DRAWDOWN_ALLOWANCE_BASE", 0.20),
+        promotion_drawdown_allowance_activity_bonus=_env_float(
+            "MACD_V2_PROMOTION_DRAWDOWN_ALLOWANCE_ACTIVITY_BONUS",
+            0.30,
+        ),
+        promotion_drawdown_base_weight=_env_float("MACD_V2_PROMOTION_DRAWDOWN_BASE_WEIGHT", 0.10),
         promotion_drawdown_knee=_env_float("MACD_V2_PROMOTION_DRAWDOWN_KNEE", 1.25),
         promotion_drawdown_excess_weight=_env_float("MACD_V2_PROMOTION_DRAWDOWN_EXCESS_WEIGHT", 1.00),
         robustness_penalty_cap=_env_float("MACD_V2_ROBUSTNESS_PENALTY_CAP", 0.15),
@@ -247,7 +252,9 @@ class ScoringConfig:
     capture_side_multiplier_floor: float = 0.35
     capture_side_multiplier_floor_score: float = 0.02
     capture_side_multiplier_neutral_score: float = 0.10
-    promotion_drawdown_base_weight: float = 0.20
+    promotion_drawdown_allowance_base: float = 0.20
+    promotion_drawdown_allowance_activity_bonus: float = 0.30
+    promotion_drawdown_base_weight: float = 0.10
     promotion_drawdown_knee: float = 1.25
     promotion_drawdown_excess_weight: float = 1.00
     robustness_penalty_cap: float = 0.15

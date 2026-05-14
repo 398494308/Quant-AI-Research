@@ -442,7 +442,7 @@ def build_strategy_research_prompt(
     reference_metrics: dict[str, Any] | None = None,
     benchmark_label: str = "champion",
     current_base_role: str = "champion",
-    score_regime: str = "robust_block_v27_exposure_activity",
+    score_regime: str = "robust_block_v28_activity_drawdown_allowance",
     current_complexity_headroom_text: str = "",
     structural_audit_trigger_text: str = "",
     session_mode: str = "resume",
@@ -552,7 +552,7 @@ def build_strategy_research_prompt(
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
 - 高优先级软约束：默认避免只做近邻阈值微调；如果确实需要小步长参数修正，必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。参数小改不会被技术拒收，但没有行为变化仍会被 `behavioral_noop` 拒收。
 {promotion_rule_line}
-- `promotion_score` 现在以 v27 有效活跃度调整时间块主分为核心：train/val 各自用 28 天收益块的 mean/median/P25 聚合，min 只做诊断；正收益会按有效活跃度打倍率，负收益不打折。正向 buy&hold 稳健分会按 0.25 形成轻量基准扣分。最终再减去回撤惩罚和轻量鲁棒性软惩罚。
+- `promotion_score` 现在以 v28 有效活跃度调整时间块主分为核心：train/val 各自用 28 天收益块的 mean/median/P25 聚合，min 只做诊断；正收益会按有效活跃度打倍率，负收益不打折。正向 buy&hold 稳健分会按 0.25 形成轻量基准扣分。回撤惩罚只扣超过有效活跃度容忍线的部分，严重回撤仍重罚；最终再减去轻量鲁棒性软惩罚。
 - `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率。不要再为固定 clean 单边段过拟合；优先让多数时间块稳定，同时用 regime scorecard 判断动量在哪些环境该开、该缩、该停。
 - Regime scorecard 只用已有数据：ADX/CHOP/ATR、flow_imbalance、Fear & Greed 和价格自身波动。它是解释工具，不是硬 gate；不能使用 holdout 或部署判断信息。
 - Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。活跃度倍率同时看月非加仓开仓数和持仓覆盖率；单纯刷开仓数但大部分时间空仓，会显著折扣正收益。月频 `{activity_multiplier_floor_monthly_entries:.1f}`/`{activity_multiplier_low_monthly_entries:.1f}`/`{activity_multiplier_preferred_monthly_entries:.1f}`/`{activity_multiplier_full_monthly_entries:.1f}` 对应开仓倍率约 `{activity_multiplier_floor_value:.2f}`/`{activity_multiplier_low_value:.2f}`/`{activity_multiplier_preferred_value:.2f}`/`1.00`；持仓覆盖率约 `{exposure_multiplier_full_pct:.1f}%` 起给满覆盖倍率。

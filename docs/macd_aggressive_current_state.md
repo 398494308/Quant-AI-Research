@@ -4,7 +4,7 @@
 
 ## 当前快照
 
-截至 `2026-05-13`（Asia/Shanghai），策略已完成结构化重构：迁移后保留原策略行为口径，同时新增固定因子槽和硬框架校验。研究器现在额外带一个周期性结构自检修复轮，用于定期整理明显局部过拟合或结构膨胀。
+截至 `2026-05-14`（Asia/Shanghai），策略已完成结构化重构：迁移后保留原策略行为口径，同时新增固定因子槽和硬框架校验。研究器现在额外带一个周期性结构自检修复轮，用于定期整理明显局部过拟合或结构膨胀。
 
 当前策略源码位置：
 
@@ -15,25 +15,25 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 研究器 | 已启动 |
-| score regime | `robust_block_v27_exposure_activity` |
+| 研究器 | 已重启 |
+| score regime | `robust_block_v28_activity_drawdown_allowance` |
 | active reference | champion |
-| reference hash | `e4f3d0352b5f753c0bdd18f56dd1e69a94db6c7c66426935fd6045bee3ae9d3a` |
-| 来源 | `sc_b6_long_reaccel_arrival` |
+| reference hash | `8f80a09f92aee36531f9ab74b12b0afefb8a7c4531729b1c3bef3575d9808e60` |
+| 来源 | `sc_b94_relax_long_followthrough` |
 | gate | 通过 |
-| quality_score | `0.0409` |
-| promotion_score | `-0.1661` |
-| main_score / robust_time_score | `-0.0030 / 0.0106` |
-| raw robust_time_score | `0.0295` |
-| train/val robust block | `0.0789 / -0.0198` |
-| train/val activity multiplier | `0.5193 / 1.0000` |
+| quality_score | `0.0097` |
+| promotion_score | `0.0133` |
+| main_score / robust_time_score | `0.0133 / 0.0269` |
+| raw robust_time_score | `0.0862` |
+| train/val robust block | `0.0423 / 0.1300` |
+| train/val activity multiplier | `0.2302 / 0.3389` |
 | benchmark_hurdle_score | `0.0136` |
-| drawdown / robustness / idle penalty | `0.0631 / 0.0000 / 0.1000` |
-| capture_score / capture_core_score | `0.0776 / 0.0690` |
-| train/val 非加仓开仓 | `153 / 188` |
-| train/val 月非加仓开仓 | `8.47 / 15.68` |
-| val path return | `8.45%` |
-| worst drawdown / fee drag | `21.03% / 2.31%` |
+| drawdown / robustness / allowance / activity | `0.0000 / 0.0000 / 0.2854 / 0.2846` |
+| capture_score / capture_core_score | `0.0405 / 0.0152` |
+| train/val 非加仓开仓 | `186 / 190` |
+| train/val 月非加仓开仓 | `10.29 / 15.84` |
+| val path return | `50.53%` |
+| worst drawdown / fee drag | `18.77% / 2.48%` |
 | test / demo | 只做人工只读观察，不进入 prompt、评分或晋升 |
 | Sharpe | 只做人工筛选和通知展示，不进入主评分 |
 | capture | 只做趋势诊断，不进入主评分，不再给收益做倍率 |
@@ -50,7 +50,7 @@
 - `val`：`2025-01-01` 到 `2025-12-31`
 - `test`：`2026-01-01` 到 `2026-04-30`
 - `train` 滚动窗口：`28` 天，步长 `21` 天
-- v27 稳健主分时间块：`28` 天窗口，`14` 天步长
+- v28 稳健主分时间块：`28` 天窗口，`14` 天步长
 - walk-forward 诊断使用每个 train 窗口的 robust block 分；提前淘汰复用已完成窗口结果，不再额外重跑累计 train 区间。
 
 ## 策略结构
@@ -70,9 +70,9 @@ build_context -> classify_regime -> evaluate_factor_slots
 - 新因子必须放进现有 slot；不能新增 top-level helper、常量或新的 `PARAMS` / `EXIT_PARAMS` key。
 - 普通回测入口 `strategy()` 保留旧行为口径：长侧优先，长侧没有才看空侧；`strategy_decision()` 用结构化候选强度比较。
 
-## v27 主评分
+## v28 主评分
 
-v27 不再把固定单边趋势段 capture 当成主目标。主目标是：多数时间块平均表现要好，同时有效活跃度不能低到只靠少数交易撑起收益。
+v28 不再把固定单边趋势段 capture 当成主目标。主目标是：多数时间块平均表现要好，同时有效活跃度不能低到只靠少数交易撑起收益。
 
 主分：
 
@@ -111,15 +111,25 @@ promotion_score = main_score
                 - robustness_penalty_score
 ```
 
+回撤惩罚：
+
+```text
+drawdown_risk_allowance = 0.20 + 0.30 * activity_multiplier
+
+drawdown_penalty_score =
+    0.10 * max(drawdown_risk_score - drawdown_risk_allowance, 0)
+  + 1.00 * max(drawdown_risk_score - 1.25, 0)
+```
+
 含义：
 
-- `mean` 代表整体时间块平均收益，是 v27 主方向。
+- `mean` 代表整体时间块平均收益，是 v28 主方向。
 - `median` 代表大多数时间块表现。
 - `p25` 代表偏差但常见的弱块表现。
 - `min` 只做诊断，不进入主分，避免单个坏块把研究器引向“少交易少亏”的局部解。
 - 有效活跃度倍率只折扣正收益，负收益不打折；这样低频或大部分时间空仓的策略不能靠少数盈利交易抬高主分。
 - buy&hold 只在自身稳健分为正时形成轻量扣分，避免研究器只学到“顺市场裸多”。
-- 回撤和鲁棒性惩罚是风险约束，不是主目标。
+- 回撤惩罚只扣超过有效活跃度容忍线的部分；严重回撤仍重罚。鲁棒性惩罚是轻量软约束。
 
 ## Gate
 

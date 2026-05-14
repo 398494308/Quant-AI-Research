@@ -55,18 +55,18 @@ flowchart TB
 - 标的：`BTC-USDT-SWAP`，策略按 `20x` 合约研究。
 - 事实层：`15m`；`1h / 4h` 由 `15m` 聚合，只做确认层。
 - 执行层：优先使用 `1m` 回测成交。
-- 评分口径：`robust_block_v27_exposure_activity`。
+- 评分口径：`robust_block_v28_activity_drawdown_allowance`。
 - `train`：`2023-07-01` 到 `2024-12-31`。
 - `val`：`2025-01-01` 到 `2025-12-31`。
 - `test`：`2026-01-01` 到 `2026-04-30`。
 - 晋升条件：候选先过 `gate`；已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference。当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则。
 - 唯一例外是系统排队的“结构自检修复轮”：它不是普通追分轮，只在通过现有基础安全门后跳过 `promotion_score` 比较，用来替换掉明显局部过拟合或结构膨胀的 active reference。
-- v27 主分是有效活跃度调整后的稳健时间块收益：train/val 各自用 `28` 天收益块的 `mean/median/P25` 聚合，`min` 只做诊断；低月频或低持仓覆盖只折扣正收益。
+- v28 主分是有效活跃度调整后的稳健时间块收益：train/val 各自用 `28` 天收益块的 `mean/median/P25` 聚合，`min` 只做诊断；低月频或低持仓覆盖只折扣正收益。
 - `benchmark_hurdle_score = max(0, buy_hold_robust_score) * 0.25`，只在 buy&hold 自身稳健分为正时形成轻量基准扣分。
 - `main_score = robust_time_score - benchmark_hurdle_score`。
 - `promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score`。
 - 主评分使用连续 `train / val` 数据源；`train` 从已有 `train+val` 连续回测按 `val` 起点切出，walk-forward 继续用于诊断和早停。
-- walk-forward 诊断按 v27 robust block 分；提前淘汰直接复用已完成的 walk-forward 窗口结果，不再额外重跑累计 train 区间。
+- walk-forward 诊断按 v28 robust block 分；提前淘汰直接复用已完成的 walk-forward 窗口结果，不再额外重跑累计 train 区间。
 - `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率。capture 仍使用固定 clean trend segments，并保留“段等权均分 50% + 原权重均分 50%”的混合口径。
 - 参数步长现在是高优先级软约束，不是技术 gate：默认避免只做近邻阈值微调；如果需要小步长修正，planner 必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。真正的硬拦截是 smoke 行为不变、源码安全校验、gate 和 promotion。
 - 当前策略源码已做等价压缩；复杂度默认只做诊断，不拦普通候选。结构自检修复不再按复杂度阈值或连续失败即时触发，而是按周期整理。

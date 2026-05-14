@@ -2,9 +2,9 @@
 
 这份文档记录“重新从很差但 gate 通过的基底开始”的默认策略。目的不是选一个好策略，而是避免研究器在高分局部平台上继续做小幅抖动。
 
-## v27 选基底原则
+## v28 选基底原则
 
-v27 的主评分是有效活跃度调整后的稳健时间块收益，所以烂基底也应按这个口径选择。不要再按旧的 capture 倍率或固定趋势段主分选基底。
+v28 的主评分是有效活跃度调整后的稳健时间块收益，并按活跃度给回撤风险设置容忍线，所以烂基底也应按这个口径选择。不要再按旧的 capture 倍率或固定趋势段主分选基底。
 
 优先选择同时满足这些条件的历史候选：
 
@@ -25,7 +25,7 @@ v27 的主评分是有效活跃度调整后的稳健时间块收益，所以烂�
 | original code hash | `bc1b2137aba6bb103357ac12394825cc1739b6e4f8c96c2e5831c32192468e6f` |
 | structured code hash | `660e09d6e45e3ac676d54fcbd912853705eac2e9b0deffab3fdf63b9b9581409` |
 | source snapshot | `backups/research_v2_round_artifacts/sources/bc/bc1b2137aba6bb103357ac12394825cc1739b6e4f8c96c2e5831c32192468e6f.py` |
-| v27 gate | 通过 |
+| v28 gate | 通过 |
 | promotion_score | `-0.3568` |
 | main_score / robust_time_score | `-0.0815 / -0.0680` |
 | train/val robust block | `0.0383 / -0.1732` |
@@ -39,7 +39,7 @@ v27 的主评分是有效活跃度调整后的稳健时间块收益，所以烂�
 
 - 已知能跑完整评估并通过基础 gate。
 - gate 通过，且固定框架已锁住，适合作为结构化研究起点。
-- v27 下重算后仍应保留明显增长空间。
+- v28 下重算后仍应保留明显增长空间。
 - 交易量明显偏低时，后续研究应优先在固定 slot 内提高有效交易覆盖，而不是新增平行路径刷数量。
 
 它不是永久指定基底。如果后续又进入局部平台，可以重新从历史记录里找更差的 gate 通过候选。
@@ -47,7 +47,7 @@ v27 的主评分是有效活跃度调整后的稳健时间块收益，所以烂�
 ## 重置流程
 
 1. 停止研究器。
-2. 选择一个 v27 下低分但 gate 通过的 source snapshot。
+2. 选择一个 v28 下低分但 gate 通过的 source snapshot。
 3. 将 source snapshot 写入 `src/strategy_macd_aggressive.py`。
 4. 按当前固定因子槽结构迁移，不改主框架。
 5. 用 `--reset-champion --no-optimize` 重建 active reference。
@@ -59,7 +59,7 @@ v27 的主评分是有效活跃度调整后的稳健时间块收益，所以烂�
 
 重置后至少确认这些指标：
 
-- `score_regime` 必须是 `robust_block_v27_exposure_activity`。
+- `score_regime` 必须是 `robust_block_v28_activity_drawdown_allowance`。
 - `promotion_score` 低，且主要增长空间来自 `main_score`。
 - `train_robust_block_score` 和 `validation_robust_block_score` 都不高。
 - `benchmark_hurdle_score` 没有异常放大。

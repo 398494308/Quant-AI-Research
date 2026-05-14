@@ -47,6 +47,8 @@ from research_v2.evaluation import (
     _normalize_trend_points,
     _period_months_from_timestamps,
     _position_exposure_pct_from_trades,
+    _promotion_drawdown_allowance,
+    _promotion_drawdown_penalty,
     _robust_block_report,
     _trend_clean_quality,
     _robustness_penalty_payload,
@@ -923,9 +925,14 @@ class EvaluationFixesTest(unittest.TestCase):
             report.metrics["promotion_gap"],
             report.metrics["train_robust_block_score"] - report.metrics["validation_robust_block_score"],
         )
-        expected_drawdown_penalty = (
-            0.20 * report.metrics["drawdown_risk_score"]
-            + 1.00 * max(report.metrics["drawdown_risk_score"] - 1.25, 0.0)
+        expected_drawdown_allowance = _promotion_drawdown_allowance(
+            report.metrics["activity_multiplier"],
+            ScoringConfig(),
+        )
+        expected_drawdown_penalty = _promotion_drawdown_penalty(
+            report.metrics["drawdown_risk_score"],
+            ScoringConfig(),
+            activity_multiplier=report.metrics["activity_multiplier"],
         )
         expected_promotion_score = (
             report.metrics["main_score"]
@@ -941,6 +948,15 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertIn("validation_robust_block_mean_score", report.metrics)
         self.assertIn("train_activity_multiplier", report.metrics)
         self.assertIn("validation_activity_multiplier", report.metrics)
+        self.assertAlmostEqual(report.metrics["drawdown_risk_allowance_score"], expected_drawdown_allowance)
+        self.assertAlmostEqual(
+            report.metrics["drawdown_risk_excess_score"],
+            max(report.metrics["drawdown_risk_score"] - expected_drawdown_allowance, 0.0),
+        )
+        self.assertAlmostEqual(
+            report.metrics["drawdown_risk_severe_excess_score"],
+            max(report.metrics["drawdown_risk_score"] - 1.25, 0.0),
+        )
         self.assertAlmostEqual(report.metrics["drawdown_penalty_score"], expected_drawdown_penalty)
         self.assertAlmostEqual(report.metrics["promotion_score"], expected_promotion_score)
         self.assertNotIn("trade_activity_penalty", report.metrics)
@@ -1234,9 +1250,10 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertGreater(report.metrics["overfit_risk_score"], 0.0)
         self.assertGreater(report.metrics["overfit_top1_positive_share"], 0.60)
         self.assertEqual(report.metrics["overfit_hard_fail"], 1.0)
-        expected_drawdown_penalty = (
-            0.20 * report.metrics["drawdown_risk_score"]
-            + 1.00 * max(report.metrics["drawdown_risk_score"] - 1.25, 0.0)
+        expected_drawdown_penalty = _promotion_drawdown_penalty(
+            report.metrics["drawdown_risk_score"],
+            ScoringConfig(),
+            activity_multiplier=report.metrics["activity_multiplier"],
         )
         self.assertAlmostEqual(report.metrics["drawdown_penalty_score"], expected_drawdown_penalty)
         self.assertAlmostEqual(
@@ -1446,6 +1463,24 @@ class EvaluationFixesTest(unittest.TestCase):
         current_champion_like = _exposure_multiplier_from_position_exposure_pct(6.4, scoring)
         self.assertGreater(current_champion_like, 0.33)
         self.assertLess(current_champion_like, 0.35)
+
+    def test_drawdown_penalty_only_applies_after_activity_allowance(self):
+        scoring = ScoringConfig()
+
+        allowance = _promotion_drawdown_allowance(0.50, scoring)
+        self.assertAlmostEqual(allowance, 0.35)
+        self.assertAlmostEqual(
+            _promotion_drawdown_penalty(0.34, scoring, activity_multiplier=0.50),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            _promotion_drawdown_penalty(0.45, scoring, activity_multiplier=0.50),
+            0.10 * (0.45 - allowance),
+        )
+        self.assertAlmostEqual(
+            _promotion_drawdown_penalty(1.50, scoring, activity_multiplier=1.0),
+            0.10 * (1.50 - 0.50) + 1.00 * (1.50 - 1.25),
+        )
 
     def test_summarize_evaluation_drawdown_risk_penalizes_persistent_underwater_path(self):
         scoring = ScoringConfig(
@@ -2756,7 +2791,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         )
 
         self.assertIn("promotion_score` 严格高于当前 active reference", prompt)
-        self.assertIn("v27 有效活跃度调整时间块主分", prompt)
+        self.assertIn("v28 有效活跃度调整时间块主分", prompt)
         self.assertIn("mean/median/P25", prompt)
         self.assertIn("buy&hold", prompt)
         self.assertIn("capture_score` / `capture_core` 只作为趋势诊断", prompt)
@@ -2764,6 +2799,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("Sharpe 只作为人工筛选", prompt)
         self.assertNotIn("activity_adjusted_sharpe_score", prompt)
         self.assertIn("回撤惩罚", prompt)
+        self.assertIn("超过有效活跃度容忍线", prompt)
         self.assertIn("鲁棒性软惩罚", prompt)
         self.assertIn("活跃度倍率同时看月非加仓开仓数和持仓覆盖率", prompt)
         self.assertIn("train 180-270 / val 120-180", prompt)
@@ -2833,7 +2869,7 @@ class JournalPromptFixesTest(unittest.TestCase):
             [
                 "# 研究器人工方向卡",
                 "## 优先方向",
-                "- 当前评分口径是 `robust_block_v27_exposure_activity`。",
+                "- 当前评分口径是 `robust_block_v28_activity_drawdown_allowance`。",
                 "- 当前 active reference 分数以运行器实时注入为准。",
                 "- 当前交易量已经足够，不要把主要预算浪费在刷交易量。",
                 "- 当前核心短板仍是趋势捕获质量。",

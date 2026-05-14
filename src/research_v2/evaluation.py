@@ -572,6 +572,25 @@ def _monthly_trade_rate(trade_count: int, months: float) -> float:
     return max(0, int(trade_count)) / months
 
 
+def _smooth_piecewise_multiplier(x: float, points: list[tuple[float, float]]) -> float:
+    ordered_points = sorted(points, key=lambda item: item[0])
+    if not ordered_points:
+        return 0.0
+    x = max(0.0, float(x))
+    if x <= ordered_points[0][0]:
+        return ordered_points[0][1]
+    previous_x, previous_y = ordered_points[0]
+    for current_x, current_y in ordered_points[1:]:
+        if current_x <= previous_x:
+            previous_x, previous_y = current_x, max(previous_y, current_y)
+            continue
+        if x <= current_x:
+            progress = _smoothstep((x - previous_x) / (current_x - previous_x))
+            return previous_y + (current_y - previous_y) * progress
+        previous_x, previous_y = current_x, current_y
+    return ordered_points[-1][1]
+
+
 def _activity_multiplier_from_monthly_entries(monthly_entries: float, scoring: ScoringConfig) -> float:
     points = [
         (0.0, 0.0),
@@ -592,20 +611,7 @@ def _activity_multiplier_from_monthly_entries(monthly_entries: float, scoring: S
             1.0,
         ),
     ]
-    ordered_points = sorted(points, key=lambda item: item[0])
-    x = max(0.0, float(monthly_entries))
-    if x <= ordered_points[0][0]:
-        return ordered_points[0][1]
-    previous_x, previous_y = ordered_points[0]
-    for current_x, current_y in ordered_points[1:]:
-        if current_x <= previous_x:
-            previous_x, previous_y = current_x, max(previous_y, current_y)
-            continue
-        if x <= current_x:
-            progress = _smoothstep((x - previous_x) / (current_x - previous_x))
-            return previous_y + (current_y - previous_y) * progress
-        previous_x, previous_y = current_x, current_y
-    return ordered_points[-1][1]
+    return _smooth_piecewise_multiplier(monthly_entries, points)
 
 
 def _exposure_multiplier_from_position_exposure_pct(exposure_pct: float, scoring: ScoringConfig) -> float:
@@ -628,20 +634,7 @@ def _exposure_multiplier_from_position_exposure_pct(exposure_pct: float, scoring
             1.0,
         ),
     ]
-    ordered_points = sorted(points, key=lambda item: item[0])
-    x = max(0.0, float(exposure_pct))
-    if x <= ordered_points[0][0]:
-        return ordered_points[0][1]
-    previous_x, previous_y = ordered_points[0]
-    for current_x, current_y in ordered_points[1:]:
-        if current_x <= previous_x:
-            previous_x, previous_y = current_x, max(previous_y, current_y)
-            continue
-        if x <= current_x:
-            progress = _smoothstep((x - previous_x) / (current_x - previous_x))
-            return previous_y + (current_y - previous_y) * progress
-        previous_x, previous_y = current_x, current_y
-    return ordered_points[-1][1]
+    return _smooth_piecewise_multiplier(exposure_pct, points)
 
 
 def _timestamp_value(value: Any) -> int | None:
@@ -1163,10 +1156,23 @@ def _drawdown_risk_side_report(
     )
 
 
-def _promotion_drawdown_penalty(drawdown_risk_score: float, scoring: ScoringConfig) -> float:
+def _promotion_drawdown_allowance(activity_multiplier: float, scoring: ScoringConfig) -> float:
+    activity = _clamp(float(activity_multiplier), 0.0, 1.0)
+    base = max(0.0, float(scoring.promotion_drawdown_allowance_base))
+    bonus = max(0.0, float(scoring.promotion_drawdown_allowance_activity_bonus))
+    return base + bonus * activity
+
+
+def _promotion_drawdown_penalty(
+    drawdown_risk_score: float,
+    scoring: ScoringConfig,
+    *,
+    activity_multiplier: float = 0.0,
+) -> float:
     risk_score = max(0.0, float(drawdown_risk_score))
+    allowance = _promotion_drawdown_allowance(activity_multiplier, scoring)
     knee = max(0.0, float(scoring.promotion_drawdown_knee))
-    base_penalty = max(0.0, float(scoring.promotion_drawdown_base_weight)) * risk_score
+    base_penalty = max(0.0, float(scoring.promotion_drawdown_base_weight)) * max(risk_score - allowance, 0.0)
     excess_penalty = max(0.0, float(scoring.promotion_drawdown_excess_weight)) * max(risk_score - knee, 0.0)
     return base_penalty + excess_penalty
 

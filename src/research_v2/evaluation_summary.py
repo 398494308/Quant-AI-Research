@@ -445,7 +445,17 @@ def summarize_evaluation_impl(
         mod.TRAIN_VAL_SCORE_WEIGHT * train_drawdown_risk_score
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_drawdown_risk_score
     )
-    drawdown_penalty_score = mod._promotion_drawdown_penalty(drawdown_risk_score, scoring)
+    drawdown_risk_allowance_score = mod._promotion_drawdown_allowance(activity_multiplier, scoring)
+    drawdown_risk_excess_score = max(drawdown_risk_score - drawdown_risk_allowance_score, 0.0)
+    drawdown_risk_severe_excess_score = max(
+        drawdown_risk_score - max(0.0, float(scoring.promotion_drawdown_knee)),
+        0.0,
+    )
+    drawdown_penalty_score = mod._promotion_drawdown_penalty(
+        drawdown_risk_score,
+        scoring,
+        activity_multiplier=activity_multiplier,
+    )
     train_turn_protection_score = train_continuous_trend_report.turn_protection_score
     validation_turn_protection_score = validation_trend_report.turn_protection_score
     turn_protection_score = (
@@ -533,7 +543,7 @@ def summarize_evaluation_impl(
             f"{development_score_std:.2f} / {profitable_window_ratio:.0%}"
         ),
         (
-            "v27稳健时间块分(train/val原始 -> 有效活跃度调整 / 合成) / buy&hold稳健分 / 基准扣分 / 主分: "
+            "v28稳健时间块分(train/val原始 -> 有效活跃度调整 / 合成) / buy&hold稳健分 / 基准扣分 / 主分: "
             f"{train_robust_block_report.robust_score:.2f} / "
             f"{validation_robust_block_report.robust_score:.2f} / "
             f"{train_activity_adjusted_robust_block_score:.2f} / "
@@ -542,7 +552,7 @@ def summarize_evaluation_impl(
             f"{benchmark_hurdle:.2f} / {main_score:.2f}"
         ),
         (
-            "v27时间块明细(train均值/中位/P25/最差/n | val均值/中位/P25/最差/n): "
+            "v28时间块明细(train均值/中位/P25/最差/n | val均值/中位/P25/最差/n): "
             f"{train_robust_block_report.mean_score:.2f}/"
             f"{train_robust_block_report.median_score:.2f}/"
             f"{train_robust_block_report.p25_score:.2f}/"
@@ -587,9 +597,9 @@ def summarize_evaluation_impl(
             f"{validation_trend_report.bear_segment_count}/"
             f"{_hit_segment_count(validation_trend_report)}"
         ),
-        f"主评分数据源: v27时间块={train_daily_return_source}；capture仅诊断={train_capture_source}",
+        f"主评分数据源: v28时间块={train_daily_return_source}；capture仅诊断={train_capture_source}",
         (
-            "train/val按日收益年化分 / v27主分 / 固定窗口回撤风险分 / 回撤罚分 / 晋级分: "
+            "train/val按日收益年化分 / v28主分 / 固定窗口回撤风险分 / 回撤罚分 / 晋级分: "
             f"{train_timed_return_score:.2f} / {validation_timed_return_score:.2f} / "
             f"{main_score:.2f} / "
             f"{drawdown_risk_score:.2f} / {drawdown_penalty_score:.2f} / {promotion_score:.2f}"
@@ -613,10 +623,18 @@ def summarize_evaluation_impl(
             f"{validation_drawdown_risk_score:.2f}({validation_drawdown_risk_report.window_count})"
         ),
         (
-            "回撤罚分公式(base / knee / excess): "
+            "回撤罚分公式(allow_base / allow_activity_bonus / base_weight / knee / severe_weight): "
+            f"{scoring.promotion_drawdown_allowance_base:.2f} / "
+            f"{scoring.promotion_drawdown_allowance_activity_bonus:.2f} / "
             f"{scoring.promotion_drawdown_base_weight:.2f} / "
             f"{scoring.promotion_drawdown_knee:.2f} / "
             f"{scoring.promotion_drawdown_excess_weight:.2f}"
+        ),
+        (
+            "回撤容忍/轻度超额/严重超额: "
+            f"{drawdown_risk_allowance_score:.2f} / "
+            f"{drawdown_risk_excess_score:.2f} / "
+            f"{drawdown_risk_severe_excess_score:.2f}"
         ),
         (
             "train/val窗口 Ulcer 中位 / P75: "
@@ -715,7 +733,7 @@ def summarize_evaluation_impl(
         "当前诊断（必须先读）:",
         (
             f"- 当前基底: 质量分(train活跃度调整时间块分)={quality_score:.2f}，晋级分={promotion_score:.2f}，"
-            f"v27主分={main_score:.2f}，时间块稳健分原始(train/val)="
+            f"v28主分={main_score:.2f}，时间块稳健分原始(train/val)="
             f"{train_robust_block_report.robust_score:.2f}/{validation_robust_block_report.robust_score:.2f}，"
             f"活跃度调整后={train_activity_adjusted_robust_block_score:.2f}/"
             f"{validation_activity_adjusted_robust_block_score:.2f}，"
@@ -746,7 +764,7 @@ def summarize_evaluation_impl(
         ),
         "- regime scorecard（诊断，不进主评分）: " + " | ".join(regime_scorecard_lines),
         (
-            f"- promotion breakdown: v27主分={main_score:.2f} "
+            f"- promotion breakdown: v28主分={main_score:.2f} "
             f"(原始稳健时间块={raw_robust_time_score:.2f}, 活跃度调整后={robust_time_score:.2f}, "
             f"buy&hold稳健={buy_hold_robust_score:.2f}, "
             f"基准扣分={benchmark_hurdle:.2f})，"
@@ -884,6 +902,9 @@ def summarize_evaluation_impl(
         "train_drawdown_risk_score": train_drawdown_risk_score,
         "validation_drawdown_risk_score": validation_drawdown_risk_score,
         "drawdown_risk_score": drawdown_risk_score,
+        "drawdown_risk_allowance_score": drawdown_risk_allowance_score,
+        "drawdown_risk_excess_score": drawdown_risk_excess_score,
+        "drawdown_risk_severe_excess_score": drawdown_risk_severe_excess_score,
         "drawdown_penalty_score": drawdown_penalty_score,
         "train_window_ulcer_median_pct": train_drawdown_risk_report.median_ulcer_pct,
         "train_window_ulcer_p75_pct": train_drawdown_risk_report.tail_ulcer_pct,

@@ -142,7 +142,7 @@ DISCORD_CONFIG = load_discord_config()
 EVAL_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "eval")
 VALIDATION_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "validation")
 TEST_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "test")
-SCORE_REGIME = "robust_block_v27_exposure_activity"
+SCORE_REGIME = "robust_block_v28_activity_drawdown_allowance"
 MODEL_WORKSPACE_STRATEGY_PATH = Path("src/strategy_macd_aggressive.py")
 PRIMARY_DIRECTION_DOMAINS = frozenset({"long", "short", "mixed", "structure"})
 PLANNER_BRIEF_REQUIRED_FIELDS = ("primary_direction", "hypothesis", "change_plan", "novelty_proof", "change_tags")
