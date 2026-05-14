@@ -252,6 +252,12 @@ def persist_round_artifact(
             "selection_entry_trades",
             "train_monthly_entries",
             "validation_monthly_entries",
+            "train_entry_activity_multiplier",
+            "validation_entry_activity_multiplier",
+            "train_position_exposure_pct",
+            "validation_position_exposure_pct",
+            "train_exposure_multiplier",
+            "validation_exposure_multiplier",
             "train_activity_multiplier",
             "validation_activity_multiplier",
             "activity_multiplier",
@@ -259,9 +265,6 @@ def persist_round_artifact(
             "validation_activity_adjusted_robust_block_score",
             "raw_robust_time_score",
             "total_trades",
-            "train_max_trade_idle_days",
-            "validation_max_trade_idle_days",
-            "trade_idle_penalty",
             "segment_hit_rate",
         )
         if key in metrics_payload

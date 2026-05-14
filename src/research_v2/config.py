@@ -106,8 +106,6 @@ def _load_scoring_config(windows: "WindowConfig") -> "ScoringConfig":
         robust_block_median_weight=_env_float("MACD_V2_ROBUST_BLOCK_MEDIAN_WEIGHT", 0.25),
         robust_block_p25_weight=_env_float("MACD_V2_ROBUST_BLOCK_P25_WEIGHT", 0.15),
         benchmark_hurdle_weight=_env_float("MACD_V2_BENCHMARK_HURDLE_WEIGHT", 0.25),
-        trade_idle_penalty_weight=_env_float("MACD_V2_TRADE_IDLE_PENALTY_WEIGHT", 0.10),
-        max_trade_idle_days=_env_float("MACD_V2_MAX_TRADE_IDLE_DAYS", 7.0),
         trade_participation_train_floor=_env_float("MACD_V2_TRADE_PARTICIPATION_TRAIN_FLOOR", 0.12),
         trade_participation_train_target=_env_float("MACD_V2_TRADE_PARTICIPATION_TRAIN_TARGET", 0.22),
         trade_participation_validation_floor=_env_float("MACD_V2_TRADE_PARTICIPATION_VALIDATION_FLOOR", 0.15),
@@ -119,6 +117,13 @@ def _load_scoring_config(windows: "WindowConfig") -> "ScoringConfig":
         activity_multiplier_floor_value=_env_float("MACD_V2_ACTIVITY_MULTIPLIER_FLOOR_VALUE", 0.10),
         activity_multiplier_low_value=_env_float("MACD_V2_ACTIVITY_MULTIPLIER_LOW_VALUE", 0.35),
         activity_multiplier_preferred_value=_env_float("MACD_V2_ACTIVITY_MULTIPLIER_PREFERRED_VALUE", 0.70),
+        exposure_multiplier_floor_pct=_env_float("MACD_V2_EXPOSURE_MULTIPLIER_FLOOR_PCT", 5.0),
+        exposure_multiplier_low_pct=_env_float("MACD_V2_EXPOSURE_MULTIPLIER_LOW_PCT", 8.0),
+        exposure_multiplier_preferred_pct=_env_float("MACD_V2_EXPOSURE_MULTIPLIER_PREFERRED_PCT", 12.0),
+        exposure_multiplier_full_pct=_env_float("MACD_V2_EXPOSURE_MULTIPLIER_FULL_PCT", 16.0),
+        exposure_multiplier_floor_value=_env_float("MACD_V2_EXPOSURE_MULTIPLIER_FLOOR_VALUE", 0.25),
+        exposure_multiplier_low_value=_env_float("MACD_V2_EXPOSURE_MULTIPLIER_LOW_VALUE", 0.45),
+        exposure_multiplier_preferred_value=_env_float("MACD_V2_EXPOSURE_MULTIPLIER_PREFERRED_VALUE", 0.75),
         capture_balance_gap_tolerance=_env_float("MACD_V2_CAPTURE_BALANCE_GAP_TOLERANCE", 0.08),
         capture_balance_gap_full=_env_float("MACD_V2_CAPTURE_BALANCE_GAP_FULL", 0.24),
         capture_balance_max_weak_weight=_env_float("MACD_V2_CAPTURE_BALANCE_MAX_WEAK_WEIGHT", 0.65),
@@ -218,8 +223,6 @@ class ScoringConfig:
     robust_block_median_weight: float = 0.25
     robust_block_p25_weight: float = 0.15
     benchmark_hurdle_weight: float = 0.25
-    trade_idle_penalty_weight: float = 0.10
-    max_trade_idle_days: float = 7.0
     trade_participation_train_floor: float = 0.12
     trade_participation_train_target: float = 0.22
     trade_participation_validation_floor: float = 0.15
@@ -231,6 +234,13 @@ class ScoringConfig:
     activity_multiplier_floor_value: float = 0.10
     activity_multiplier_low_value: float = 0.35
     activity_multiplier_preferred_value: float = 0.70
+    exposure_multiplier_floor_pct: float = 5.0
+    exposure_multiplier_low_pct: float = 8.0
+    exposure_multiplier_preferred_pct: float = 12.0
+    exposure_multiplier_full_pct: float = 16.0
+    exposure_multiplier_floor_value: float = 0.25
+    exposure_multiplier_low_value: float = 0.45
+    exposure_multiplier_preferred_value: float = 0.75
     capture_balance_gap_tolerance: float = 0.08
     capture_balance_gap_full: float = 0.24
     capture_balance_max_weak_weight: float = 0.65

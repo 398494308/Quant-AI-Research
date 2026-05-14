@@ -442,7 +442,7 @@ def build_strategy_research_prompt(
     reference_metrics: dict[str, Any] | None = None,
     benchmark_label: str = "champion",
     current_base_role: str = "champion",
-    score_regime: str = "robust_block_v26_activity_mean",
+    score_regime: str = "robust_block_v27_exposure_activity",
     current_complexity_headroom_text: str = "",
     structural_audit_trigger_text: str = "",
     session_mode: str = "resume",
@@ -467,8 +467,6 @@ def build_strategy_research_prompt(
     trade_activity_train_range_high: int = 270,
     trade_activity_validation_range_low: int = 120,
     trade_activity_validation_range_high: int = 180,
-    trade_idle_penalty_weight: float = 0.10,
-    max_trade_idle_days: float = 7.0,
     activity_multiplier_floor_monthly_entries: float = 5.0,
     activity_multiplier_low_monthly_entries: float = 7.0,
     activity_multiplier_preferred_monthly_entries: float = 10.0,
@@ -476,6 +474,7 @@ def build_strategy_research_prompt(
     activity_multiplier_floor_value: float = 0.10,
     activity_multiplier_low_value: float = 0.35,
     activity_multiplier_preferred_value: float = 0.70,
+    exposure_multiplier_full_pct: float = 16.0,
 ) -> str:
     _ = (
         current_complexity_headroom_text,
@@ -553,10 +552,10 @@ def build_strategy_research_prompt(
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
 - 高优先级软约束：默认避免只做近邻阈值微调；如果确实需要小步长参数修正，必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。参数小改不会被技术拒收，但没有行为变化仍会被 `behavioral_noop` 拒收。
 {promotion_rule_line}
-- `promotion_score` 现在以 v26 活跃度调整时间块主分为核心：train/val 各自用 28 天收益块的 mean/median/P25 聚合，min 只做诊断；正收益会按月非加仓开仓频率打倍率，负收益不打折。正向 buy&hold 稳健分会按 0.25 形成轻量基准扣分。最终再减去回撤惩罚、轻量鲁棒性软惩罚和空窗惩罚。
+- `promotion_score` 现在以 v27 有效活跃度调整时间块主分为核心：train/val 各自用 28 天收益块的 mean/median/P25 聚合，min 只做诊断；正收益会按有效活跃度打倍率，负收益不打折。正向 buy&hold 稳健分会按 0.25 形成轻量基准扣分。最终再减去回撤惩罚和轻量鲁棒性软惩罚。
 - `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率。不要再为固定 clean 单边段过拟合；优先让多数时间块稳定，同时用 regime scorecard 判断动量在哪些环境该开、该缩、该停。
 - Regime scorecard 只用已有数据：ADX/CHOP/ATR、flow_imbalance、Fear & Greed 和价格自身波动。它是解释工具，不是硬 gate；不能使用 holdout 或部署判断信息。
-- Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。月非加仓开仓频率低于 `{activity_multiplier_full_monthly_entries:.1f}` 会降低正收益计分：`{activity_multiplier_floor_monthly_entries:.1f}`/月约 `{activity_multiplier_floor_value:.2f}` 倍，`{activity_multiplier_low_monthly_entries:.1f}`/月约 `{activity_multiplier_low_value:.2f}` 倍，`{activity_multiplier_preferred_monthly_entries:.1f}`/月约 `{activity_multiplier_preferred_value:.2f}` 倍，`{activity_multiplier_full_monthly_entries:.1f}`/月及以上为 1.00 倍。最长无新开仓上限约 `{max_trade_idle_days:.1f}` 天，空窗惩罚权重约 `{trade_idle_penalty_weight:.2f}`。
+- Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。活跃度倍率同时看月非加仓开仓数和持仓覆盖率；单纯刷开仓数但大部分时间空仓，会显著折扣正收益。月频 `{activity_multiplier_floor_monthly_entries:.1f}`/`{activity_multiplier_low_monthly_entries:.1f}`/`{activity_multiplier_preferred_monthly_entries:.1f}`/`{activity_multiplier_full_monthly_entries:.1f}` 对应开仓倍率约 `{activity_multiplier_floor_value:.2f}`/`{activity_multiplier_low_value:.2f}`/`{activity_multiplier_preferred_value:.2f}`/`1.00`；持仓覆盖率约 `{exposure_multiplier_full_pct:.1f}%` 起给满覆盖倍率。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓不占这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - `capture_score` 只使用 clean trend segments：先用中度放开的趋势段候选，再过滤掉趋势效率或方向一致性不足的震荡段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
 - Fear & Greed 情绪数据已作为可选 `market_state` 输入暴露给策略，可读取 `sentiment`、`fear_greed_value`、`fear_greed_ema7`、`fear_greed_delta1/3/7`；它不进入评分或 gate，不是必须使用的信号。
@@ -589,7 +588,7 @@ def build_strategy_research_prompt(
 - 读不到 `{direction_board_path}`、`{duplicate_watchlist_path}`、`{failure_wiki_path}` 或 `{history_package_path}` 不是合法 no-edit 理由；当前源码仍是硬事实源。
 
 当前口径的 gate / 评分提醒：
-- 交易量现在通过主分倍率约束，不再用交易数短缺重复扣分；目标仍约 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`，也就是约 10-15 笔/月。趋势机会覆盖短缺只做诊断，不要为了刷交易数制造无收益短交易。
+- 有效活跃度现在通过主分倍率约束，不再用交易数短缺重复扣分；目标仍约 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`，也就是约 10-15 笔/月，同时要有足够持仓覆盖。趋势机会覆盖短缺只做诊断，不要为了刷交易数制造无收益短交易。
 - capture、val趋势命中率、多空捕获、val趋势分块只做诊断，不是硬 gate
 {promotion_reminder_line}
 - 手续费拖累 <= 11.5%

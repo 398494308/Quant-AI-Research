@@ -16,7 +16,7 @@
 | 项目 | 状态 |
 | --- | --- |
 | 研究器 | 已启动 |
-| score regime | `robust_block_v26_activity_mean` |
+| score regime | `robust_block_v27_exposure_activity` |
 | active reference | champion |
 | reference hash | `e4f3d0352b5f753c0bdd18f56dd1e69a94db6c7c66426935fd6045bee3ae9d3a` |
 | 来源 | `sc_b6_long_reaccel_arrival` |
@@ -50,7 +50,7 @@
 - `val`：`2025-01-01` 到 `2025-12-31`
 - `test`：`2026-01-01` 到 `2026-04-30`
 - `train` 滚动窗口：`28` 天，步长 `21` 天
-- v26 稳健主分时间块：`28` 天窗口，`14` 天步长
+- v27 稳健主分时间块：`28` 天窗口，`14` 天步长
 - walk-forward 诊断使用每个 train 窗口的 robust block 分；提前淘汰复用已完成窗口结果，不再额外重跑累计 train 区间。
 
 ## 策略结构
@@ -70,9 +70,9 @@ build_context -> classify_regime -> evaluate_factor_slots
 - 新因子必须放进现有 slot；不能新增 top-level helper、常量或新的 `PARAMS` / `EXIT_PARAMS` key。
 - 普通回测入口 `strategy()` 保留旧行为口径：长侧优先，长侧没有才看空侧；`strategy_decision()` 用结构化候选强度比较。
 
-## v26 主评分
+## v27 主评分
 
-v26 不再把固定单边趋势段 capture 当成主目标。主目标是：多数时间块平均表现要好，同时交易量不能低到只靠少数交易撑起收益。
+v27 不再把固定单边趋势段 capture 当成主目标。主目标是：多数时间块平均表现要好，同时有效活跃度不能低到只靠少数交易撑起收益。
 
 主分：
 
@@ -83,8 +83,14 @@ train_robust_block_score = 0.60 * mean(block_returns)
 
 validation_robust_block_score 同上
 
+train_activity_multiplier = train_entry_activity_multiplier
+                          * train_exposure_multiplier
+
 train_adjusted = min(train_robust_block_score, 0)
                + max(train_robust_block_score, 0) * train_activity_multiplier
+
+validation_activity_multiplier = validation_entry_activity_multiplier
+                               * validation_exposure_multiplier
 
 validation_adjusted = min(validation_robust_block_score, 0)
                     + max(validation_robust_block_score, 0) * validation_activity_multiplier
@@ -103,18 +109,17 @@ main_score = robust_time_score - benchmark_hurdle_score
 promotion_score = main_score
                 - drawdown_penalty_score
                 - robustness_penalty_score
-                - trade_idle_penalty
 ```
 
 含义：
 
-- `mean` 代表整体时间块平均收益，是 v26 主方向。
+- `mean` 代表整体时间块平均收益，是 v27 主方向。
 - `median` 代表大多数时间块表现。
 - `p25` 代表偏差但常见的弱块表现。
 - `min` 只做诊断，不进入主分，避免单个坏块把研究器引向“少交易少亏”的局部解。
-- 交易量倍率只折扣正收益，负收益不打折；这样低频策略不能靠少数盈利交易抬高主分。
+- 有效活跃度倍率只折扣正收益，负收益不打折；这样低频或大部分时间空仓的策略不能靠少数盈利交易抬高主分。
 - buy&hold 只在自身稳健分为正时形成轻量扣分，避免研究器只学到“顺市场裸多”。
-- 回撤、鲁棒性和空窗惩罚是风险约束，不是主目标。
+- 回撤和鲁棒性惩罚是风险约束，不是主目标。
 
 ## Gate
 
@@ -160,19 +165,28 @@ promotion_score = main_score
 - `8-9` 笔/月偏少。
 - `7` 笔/月以下开始明显负面。
 - `5` 笔/月以下不可接受。
-- 最长无新开仓约束：`7` 天。
 
-交易量不足不再重复扣分，而是通过 `activity_multiplier` 折扣正收益：
+交易量不足和持仓覆盖不足不再重复扣分，而是通过 `activity_multiplier` 折扣正收益：
 
 ```text
+entry_activity_multiplier:
 0/月  -> 0.00
 5/月  -> 0.10
 7/月  -> 0.35
 10/月 -> 0.70
 15/月及以上 -> 1.00
+
+exposure_multiplier:
+0%  -> 0.00
+5%  -> 0.25
+8%  -> 0.45
+12% -> 0.75
+16%及以上 -> 1.00
+
+activity_multiplier = entry_activity_multiplier * exposure_multiplier
 ```
 
-最长无新开仓仍通过 `trade_idle_penalty` 轻扣。目的不是刷交易数，而是避免“很少交易但偶然命中几笔”的过拟合策略。
+持仓覆盖率按“至少有一个仓位存在的时间 / 区间总时间”计算；多仓重叠只算一次，不会因为并行仓位重复加总。目的不是刷交易数，而是避免“开仓数够但大部分时间空仓”的局部解。
 
 ## Regime Scorecard
 

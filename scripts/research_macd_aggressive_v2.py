@@ -142,7 +142,7 @@ DISCORD_CONFIG = load_discord_config()
 EVAL_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "eval")
 VALIDATION_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "validation")
 TEST_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "test")
-SCORE_REGIME = "robust_block_v26_activity_mean"
+SCORE_REGIME = "robust_block_v27_exposure_activity"
 MODEL_WORKSPACE_STRATEGY_PATH = Path("src/strategy_macd_aggressive.py")
 PRIMARY_DIRECTION_DOMAINS = frozenset({"long", "short", "mixed", "structure"})
 PLANNER_BRIEF_REQUIRED_FIELDS = ("primary_direction", "hypothesis", "change_plan", "novelty_proof", "change_tags")
@@ -3351,8 +3351,6 @@ def _build_model_round_brief(
         trade_activity_train_range_high=RUNTIME.scoring.trade_activity_train_range_high,
         trade_activity_validation_range_low=RUNTIME.scoring.trade_activity_validation_range_low,
         trade_activity_validation_range_high=RUNTIME.scoring.trade_activity_validation_range_high,
-        trade_idle_penalty_weight=RUNTIME.scoring.trade_idle_penalty_weight,
-        max_trade_idle_days=RUNTIME.scoring.max_trade_idle_days,
         activity_multiplier_floor_monthly_entries=RUNTIME.scoring.activity_multiplier_floor_monthly_entries,
         activity_multiplier_low_monthly_entries=RUNTIME.scoring.activity_multiplier_low_monthly_entries,
         activity_multiplier_preferred_monthly_entries=RUNTIME.scoring.activity_multiplier_preferred_monthly_entries,
@@ -3360,6 +3358,7 @@ def _build_model_round_brief(
         activity_multiplier_floor_value=RUNTIME.scoring.activity_multiplier_floor_value,
         activity_multiplier_low_value=RUNTIME.scoring.activity_multiplier_low_value,
         activity_multiplier_preferred_value=RUNTIME.scoring.activity_multiplier_preferred_value,
+        exposure_multiplier_full_pct=RUNTIME.scoring.exposure_multiplier_full_pct,
     )
     round_brief = _request_validated_round_brief(
         base_source=base_source,

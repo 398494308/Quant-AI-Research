@@ -31,7 +31,7 @@
 - 事实层：`15m`
 - `1h / 4h` 由 `15m` 聚合得到，只做趋势和环境确认
 - 回测执行价优先使用 `1m`
-- 当前评分口径：`robust_block_v26_activity_mean`
+- 当前评分口径：`robust_block_v27_exposure_activity`
 
 时间窗口：
 
@@ -43,13 +43,13 @@
 
 - 候选必须先过 `gate`
 - 已有 champion 时，候选还必须 `promotion_score` 严格高于当前 active reference 才能刷新；当前取消的是额外晋级边际，不是“过 gate 就替换”
-- v26 主分使用活跃度调整后的稳健时间块收益：train/val 各自用 `28` 天收益块的 `mean/median/P25` 聚合，`min` 只做诊断；低交易月频只折扣正收益，负收益不打折
+- v27 主分使用有效活跃度调整后的稳健时间块收益：train/val 各自用 `28` 天收益块的 `mean/median/P25` 聚合，`min` 只做诊断；低月频或低持仓覆盖只折扣正收益，负收益不打折
 - `main_score = robust_time_score - benchmark_hurdle_score`，其中正向 buy&hold 稳健分按 `0.25` 形成轻量基准扣分
-- `promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score - trade_idle_penalty`
+- `promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score`
 - `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率；capture 仍使用固定 clean trend segments，并保留“段等权均分 50% + 原权重均分 50%”的混合口径
 - Fear & Greed 情绪数据现在只作为可选 `market_state` 信息源暴露给策略，字段包括 `sentiment`、`fear_greed_value`、`fear_greed_ema7`、`fear_greed_delta1/3/7`；它不进入评分、gate 或 planner 强制目标
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标
-- 交易频率按非加仓开仓数计算，加仓不计入；目标约 `10-15` 笔/月，低于目标会通过 activity multiplier 折扣正收益，最长无新开仓超过约 `7` 天才产生空窗扣分；交易数短缺不再重复扣分
+- 有效活跃度按“非加仓开仓月频 × 持仓覆盖率”计算：开仓目标约 `10-15` 笔/月，持仓覆盖率约 `16%` 起给满覆盖倍率；单纯刷开仓数但大部分时间空仓会显著折扣正收益
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position
 - Regime scorecard 只做解释工具，不进入评分或 gate；它复用已有 ADX/CHOP/ATR、flow、成交量代理、Fear & Greed 和价格自身波动，帮助判断什么时候适合动量、什么时候应该缩手
 - 鲁棒性软惩罚不额外回测；它复用已有 train/val 稳健收益块和 `train/val` Ulcer，检查两侧分布是否严重不一致
@@ -131,7 +131,7 @@ flowchart TB
 - `GPT` 更适合固定框架、规则严密、执行链稳定的角色，例如 `reviewer / edit_worker / repair_worker / summary_worker`
 - `DeepSeek` 在发散找方向、提出新假设、快速换研究层级这类 `planner` 任务里，当前表现更好
 
-这个结论只针对当前仓库、当前评分口径 `robust_block_v26_activity_mean` 和当前这组实验流程成立，不把它外推成所有任务的一般结论。
+这个结论只针对当前仓库、当前评分口径 `robust_block_v27_exposure_activity` 和当前这组实验流程成立，不把它外推成所有任务的一般结论。
 
 ### 为什么保留混合架构
 

@@ -608,6 +608,42 @@ def _activity_multiplier_from_monthly_entries(monthly_entries: float, scoring: S
     return ordered_points[-1][1]
 
 
+def _exposure_multiplier_from_position_exposure_pct(exposure_pct: float, scoring: ScoringConfig) -> float:
+    points = [
+        (0.0, 0.0),
+        (
+            max(0.0, float(scoring.exposure_multiplier_floor_pct)),
+            _clamp(float(scoring.exposure_multiplier_floor_value), 0.0, 1.0),
+        ),
+        (
+            max(0.0, float(scoring.exposure_multiplier_low_pct)),
+            _clamp(float(scoring.exposure_multiplier_low_value), 0.0, 1.0),
+        ),
+        (
+            max(0.0, float(scoring.exposure_multiplier_preferred_pct)),
+            _clamp(float(scoring.exposure_multiplier_preferred_value), 0.0, 1.0),
+        ),
+        (
+            max(0.0, float(scoring.exposure_multiplier_full_pct)),
+            1.0,
+        ),
+    ]
+    ordered_points = sorted(points, key=lambda item: item[0])
+    x = max(0.0, float(exposure_pct))
+    if x <= ordered_points[0][0]:
+        return ordered_points[0][1]
+    previous_x, previous_y = ordered_points[0]
+    for current_x, current_y in ordered_points[1:]:
+        if current_x <= previous_x:
+            previous_x, previous_y = current_x, max(previous_y, current_y)
+            continue
+        if x <= current_x:
+            progress = _smoothstep((x - previous_x) / (current_x - previous_x))
+            return previous_y + (current_y - previous_y) * progress
+        previous_x, previous_y = current_x, current_y
+    return ordered_points[-1][1]
+
+
 def _timestamp_value(value: Any) -> int | None:
     if value in (None, ""):
         return None
@@ -625,49 +661,37 @@ def _result_period_timestamps(result: dict[str, Any] | None) -> tuple[int | None
     )
 
 
-def _trade_entry_timestamps(result: dict[str, Any] | None) -> list[int]:
-    timestamps: list[int] = []
-    for trade in (result or {}).get("trades_detail", []):
-        timestamp = _timestamp_value(trade.get("entry_timestamp"))
-        if timestamp is not None:
-            timestamps.append(timestamp)
-    return sorted(timestamps)
-
-
-def _max_trade_idle_days_from_timestamps(
-    entry_timestamps: list[int],
+def _position_exposure_pct_from_trades(
+    trades: list[dict[str, Any]] | tuple[dict[str, Any], ...],
     *,
     start_timestamp: int | None,
     end_timestamp: int | None,
 ) -> float:
     if start_timestamp is None or end_timestamp is None or end_timestamp <= start_timestamp:
         return 0.0
-    ordered_entries = sorted(
-        timestamp
-        for timestamp in entry_timestamps
-        if start_timestamp <= timestamp < end_timestamp
-    )
-    previous_timestamp = start_timestamp
-    max_gap_ms = 0
-    for timestamp in ordered_entries:
-        max_gap_ms = max(max_gap_ms, timestamp - previous_timestamp)
-        previous_timestamp = timestamp
-    max_gap_ms = max(max_gap_ms, end_timestamp - previous_timestamp)
-    return max_gap_ms / DAY_MS
-
-
-def _max_trade_idle_days(result: dict[str, Any] | None) -> float:
-    start_timestamp, end_timestamp = _result_period_timestamps(result)
-    return _max_trade_idle_days_from_timestamps(
-        _trade_entry_timestamps(result),
-        start_timestamp=start_timestamp,
-        end_timestamp=end_timestamp,
-    )
-
-
-def _trade_idle_shortfall(max_idle_days: float, allowed_idle_days: float) -> float:
-    limit = max(0.1, float(allowed_idle_days))
-    return _clamp(max(float(max_idle_days) - limit, 0.0) / limit, 0.0, 1.0)
+    intervals: list[tuple[int, int]] = []
+    for trade in trades:
+        entry_timestamp = _timestamp_value(trade.get("entry_timestamp"))
+        exit_timestamp = _timestamp_value(trade.get("exit_timestamp"))
+        if entry_timestamp is None or exit_timestamp is None:
+            continue
+        start = max(start_timestamp, entry_timestamp)
+        end = min(end_timestamp, exit_timestamp)
+        if end > start:
+            intervals.append((start, end))
+    if not intervals:
+        return 0.0
+    ordered_intervals = sorted(intervals, key=lambda item: item[0])
+    current_start, current_end = ordered_intervals[0]
+    covered_ms = 0
+    for start, end in ordered_intervals[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+            continue
+        covered_ms += current_end - current_start
+        current_start, current_end = start, end
+    covered_ms += current_end - current_start
+    return _clamp(covered_ms / (end_timestamp - start_timestamp) * 100.0, 0.0, 100.0)
 
 
 def _trend_participation_shortfall(hit_rate: float, *, floor: float, target: float) -> float:

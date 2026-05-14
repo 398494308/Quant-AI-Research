@@ -4,15 +4,15 @@
 
 ## 优先方向
 
-- 当前评分口径是 `robust_block_v26_activity_mean`。
+- 当前评分口径是 `robust_block_v27_exposure_activity`。
 - 这张卡是长期方向卡，不绑定 champion hash，不保存静态 champion 分数；当前 active reference、分数、交易量、回撤和短板永远以运行器每轮实时注入的诊断为准。
 - 当前策略主框架已硬锁。研究器只能改既有 `PARAMS`、开放 `EXIT_PARAMS`、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体；不能新增 helper、slot、参数 key，不能改 `_strategy_core()`、候选选择顺序或入口签名。
 - 当前研究重点从固定单边趋势捕获，改为多数时间块都能稳健赚钱。优先看 `train_robust_block_score`、`validation_robust_block_score`、`main_score` 和 `promotion_score`。
-- `main_score = activity_adjusted_robust_time_score - benchmark_hurdle_score`。train/val 各自 28 天收益块用 mean/median/P25 聚合，min 只做诊断；正收益再按月非加仓开仓频率打倍率。
-- `promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score - trade_idle_penalty`。交易数短缺不再重复扣分，趋势机会覆盖短缺只做诊断。
+- `main_score = activity_adjusted_robust_time_score - benchmark_hurdle_score`。train/val 各自 28 天收益块用 mean/median/P25 聚合，min 只做诊断；正收益再按“非加仓开仓月频 × 持仓覆盖率”打倍率。
+- `promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score`。有效活跃度只通过主分倍率体现，趋势机会覆盖短缺只做诊断。
 - `capture_score` / `capture_core` 只做趋势诊断，不进入主评分，也不再给收益做倍率。不要围绕固定 clean trend segments 过拟合。
-- 交易量目标已经明确：按非加仓开仓数计，目标大约是 `10-15` 笔/月，`7` 笔/月以下偏负面，`5` 笔/月以下不可接受。不要为了刷数量制造无收益短交易。
-- 是否需要继续补交易量，只看本轮实时注入的 train/val 月频和 activity multiplier；不要根据本卡推断当前交易量状态。
+- 有效活跃度目标已经明确：按非加仓开仓数计，目标大约是 `10-15` 笔/月；持仓覆盖率约 `16%` 起给满覆盖倍率。不要为了刷数量制造无收益短交易，也不要让大部分时间空仓。
+- 是否需要继续补活跃度，只看本轮实时注入的 train/val 月频、持仓覆盖率和 activity multiplier；不要根据本卡推断当前交易量状态。
 - Regime scorecard 只作为解释工具，帮助判断“什么环境适合动量、什么环境应该缩手”。可优先观察 ADX/CHOP/ATR、flow imbalance、成交量代理、Fear & Greed 与价格自身波动。
 - Fear & Greed 情绪可作为策略输入，但只应作为环境过滤或确认信号；不要为了情绪字段本身堆规则。
 - 数值参数步长是高优先级软约束，不是技术 gate：默认避免近邻阈值微调；如果需要小步长参数修正，必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。参数小改不会被技术拒收，但 smoke 行为不变仍会被拒收。

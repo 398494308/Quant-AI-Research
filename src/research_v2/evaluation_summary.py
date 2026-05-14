@@ -379,8 +379,38 @@ def summarize_evaluation_impl(
     validation_months = mod._period_months_from_timestamps(validation_start_ts, validation_end_ts)
     train_monthly_entries = mod._monthly_trade_rate(train_entry_trades, train_months)
     validation_monthly_entries = mod._monthly_trade_rate(validation_entry_trades, validation_months)
-    train_activity_multiplier = mod._activity_multiplier_from_monthly_entries(train_monthly_entries, scoring)
-    validation_activity_multiplier = mod._activity_multiplier_from_monthly_entries(validation_monthly_entries, scoring)
+    train_entry_activity_multiplier = mod._activity_multiplier_from_monthly_entries(train_monthly_entries, scoring)
+    validation_entry_activity_multiplier = mod._activity_multiplier_from_monthly_entries(validation_monthly_entries, scoring)
+    train_position_exposure_pct = (
+        mod._position_exposure_pct_from_trades(
+            list(selection_source.get("trades_detail") or []),
+            start_timestamp=selection_start_ts,
+            end_timestamp=validation_start_ts,
+        )
+        if "trades_detail" in selection_source
+        else 0.0
+    )
+    validation_position_exposure_pct = (
+        mod._position_exposure_pct_from_trades(
+            list(validation_source.get("trades_detail") or []),
+            start_timestamp=validation_start_ts,
+            end_timestamp=validation_end_ts,
+        )
+        if "trades_detail" in validation_source
+        else 0.0
+    )
+    train_exposure_multiplier = (
+        mod._exposure_multiplier_from_position_exposure_pct(train_position_exposure_pct, scoring)
+        if "trades_detail" in selection_source
+        else 1.0
+    )
+    validation_exposure_multiplier = (
+        mod._exposure_multiplier_from_position_exposure_pct(validation_position_exposure_pct, scoring)
+        if "trades_detail" in validation_source
+        else 1.0
+    )
+    train_activity_multiplier = train_entry_activity_multiplier * train_exposure_multiplier
+    validation_activity_multiplier = validation_entry_activity_multiplier * validation_exposure_multiplier
     activity_multiplier = (
         mod.TRAIN_VAL_SCORE_WEIGHT * train_activity_multiplier
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_activity_multiplier
@@ -440,38 +470,6 @@ def summarize_evaluation_impl(
         scoring=scoring,
     )
     robustness_penalty_score = robustness_penalty_payload["robustness_penalty_score"]
-    selection_entry_timestamps = mod._trade_entry_timestamps(selection_source)
-    validation_entry_timestamps = mod._trade_entry_timestamps(validation_source)
-    train_max_trade_idle_days = (
-        mod._max_trade_idle_days_from_timestamps(
-            selection_entry_timestamps,
-            start_timestamp=selection_start_ts,
-            end_timestamp=validation_start_ts,
-        )
-        if "trades_detail" in selection_source
-        else 0.0
-    )
-    validation_max_trade_idle_days = (
-        mod._max_trade_idle_days_from_timestamps(
-            validation_entry_timestamps,
-            start_timestamp=validation_start_ts,
-            end_timestamp=validation_end_ts,
-        )
-        if "trades_detail" in validation_source
-        else 0.0
-    )
-    train_trade_idle_shortfall = mod._trade_idle_shortfall(
-        train_max_trade_idle_days,
-        scoring.max_trade_idle_days,
-    )
-    validation_trade_idle_shortfall = mod._trade_idle_shortfall(
-        validation_max_trade_idle_days,
-        scoring.max_trade_idle_days,
-    )
-    trade_idle_shortfall = (
-        mod.TRAIN_VAL_SCORE_WEIGHT * train_trade_idle_shortfall
-        + mod.TRAIN_VAL_SCORE_WEIGHT * validation_trade_idle_shortfall
-    )
     _trend_participation_penalty, train_trend_participation_shortfall, validation_trend_participation_shortfall = (
         mod._trend_participation_penalty(
             train_continuous_trend_report.hit_rate,
@@ -479,11 +477,10 @@ def summarize_evaluation_impl(
             scoring,
         )
     )
-    trade_idle_penalty = scoring.trade_idle_penalty_weight * trade_idle_shortfall
     trend_participation_penalty = 0.0
-    promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score - trade_idle_penalty
+    promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score
     promotion_main_contribution = main_score
-    promotion_penalty_total = drawdown_penalty_score + robustness_penalty_score + trade_idle_penalty
+    promotion_penalty_total = drawdown_penalty_score + robustness_penalty_score
     eval_funnel_counts = mod._aggregate_funnel_counts(results, "eval")
     validation_funnel_counts = mod._result_funnel_counts(validation_source)
     selection_funnel_counts = mod._result_funnel_counts(selection_source)
@@ -536,7 +533,7 @@ def summarize_evaluation_impl(
             f"{development_score_std:.2f} / {profitable_window_ratio:.0%}"
         ),
         (
-            "v26稳健时间块分(train/val原始 -> 活跃度调整 / 合成) / buy&hold稳健分 / 基准扣分 / 主分: "
+            "v27稳健时间块分(train/val原始 -> 有效活跃度调整 / 合成) / buy&hold稳健分 / 基准扣分 / 主分: "
             f"{train_robust_block_report.robust_score:.2f} / "
             f"{validation_robust_block_report.robust_score:.2f} / "
             f"{train_activity_adjusted_robust_block_score:.2f} / "
@@ -545,7 +542,7 @@ def summarize_evaluation_impl(
             f"{benchmark_hurdle:.2f} / {main_score:.2f}"
         ),
         (
-            "v26时间块明细(train均值/中位/P25/最差/n | val均值/中位/P25/最差/n): "
+            "v27时间块明细(train均值/中位/P25/最差/n | val均值/中位/P25/最差/n): "
             f"{train_robust_block_report.mean_score:.2f}/"
             f"{train_robust_block_report.median_score:.2f}/"
             f"{train_robust_block_report.p25_score:.2f}/"
@@ -590,30 +587,24 @@ def summarize_evaluation_impl(
             f"{validation_trend_report.bear_segment_count}/"
             f"{_hit_segment_count(validation_trend_report)}"
         ),
-        f"主评分数据源: v26时间块={train_daily_return_source}；capture仅诊断={train_capture_source}",
+        f"主评分数据源: v27时间块={train_daily_return_source}；capture仅诊断={train_capture_source}",
         (
-            "train/val按日收益年化分 / v26主分 / 固定窗口回撤风险分 / 回撤罚分 / 晋级分: "
+            "train/val按日收益年化分 / v27主分 / 固定窗口回撤风险分 / 回撤罚分 / 晋级分: "
             f"{train_timed_return_score:.2f} / {validation_timed_return_score:.2f} / "
             f"{main_score:.2f} / "
             f"{drawdown_risk_score:.2f} / {drawdown_penalty_score:.2f} / {promotion_score:.2f}"
         ),
         (
-            "交易量倍率(月频train/val -> 倍率train/val/合成): "
+            "有效活跃度(月频train/val, 持仓覆盖train/val -> 开仓倍率 / 覆盖倍率 / 综合倍率): "
             f"{train_monthly_entries:.2f} / {validation_monthly_entries:.2f} -> "
-            f"{train_activity_multiplier:.2f} / {validation_activity_multiplier:.2f} / "
-            f"{activity_multiplier:.2f}"
+            f"{train_position_exposure_pct:.1f}% / {validation_position_exposure_pct:.1f}% -> "
+            f"{train_entry_activity_multiplier:.2f}/{validation_entry_activity_multiplier:.2f} / "
+            f"{train_exposure_multiplier:.2f}/{validation_exposure_multiplier:.2f} / "
+            f"{train_activity_multiplier:.2f}/{validation_activity_multiplier:.2f}/{activity_multiplier:.2f}"
         ),
         (
-            "最长无新开仓天数(train/val/上限) / 空窗短缺率 / 空窗惩罚: "
-            f"{train_max_trade_idle_days:.1f} / {validation_max_trade_idle_days:.1f} / "
-            f"{scoring.max_trade_idle_days:.1f} | "
-            f"{train_trade_idle_shortfall:.2f} / {validation_trade_idle_shortfall:.2f} / "
-            f"{trade_idle_penalty:.2f}"
-        ),
-        (
-            "趋势机会覆盖短缺率(train/val，诊断不扣分) / 空窗惩罚: "
-            f"{train_trend_participation_shortfall:.2f} / {validation_trend_participation_shortfall:.2f} / "
-            f"{trade_idle_penalty:.2f}"
+            "趋势机会覆盖短缺率(train/val，诊断不扣分): "
+            f"{train_trend_participation_shortfall:.2f} / {validation_trend_participation_shortfall:.2f}"
         ),
         f"train/val月非加仓开仓频率: {train_monthly_entries:.2f} / {validation_monthly_entries:.2f}",
         (
@@ -724,7 +715,7 @@ def summarize_evaluation_impl(
         "当前诊断（必须先读）:",
         (
             f"- 当前基底: 质量分(train活跃度调整时间块分)={quality_score:.2f}，晋级分={promotion_score:.2f}，"
-            f"v26主分={main_score:.2f}，时间块稳健分原始(train/val)="
+            f"v27主分={main_score:.2f}，时间块稳健分原始(train/val)="
             f"{train_robust_block_report.robust_score:.2f}/{validation_robust_block_report.robust_score:.2f}，"
             f"活跃度调整后={train_activity_adjusted_robust_block_score:.2f}/"
             f"{validation_activity_adjusted_robust_block_score:.2f}，"
@@ -755,18 +746,20 @@ def summarize_evaluation_impl(
         ),
         "- regime scorecard（诊断，不进主评分）: " + " | ".join(regime_scorecard_lines),
         (
-            f"- promotion breakdown: v26主分={main_score:.2f} "
+            f"- promotion breakdown: v27主分={main_score:.2f} "
             f"(原始稳健时间块={raw_robust_time_score:.2f}, 活跃度调整后={robust_time_score:.2f}, "
             f"buy&hold稳健={buy_hold_robust_score:.2f}, "
             f"基准扣分={benchmark_hurdle:.2f})，"
             f"回撤扣分={drawdown_penalty_score:.2f}，鲁棒性扣分={robustness_penalty_score:.2f}，"
-            f"空窗扣分={trade_idle_penalty:.2f}，最终promotion={promotion_score:.2f}"
+            f"最终promotion={promotion_score:.2f}"
         ),
         (
             f"- activity diagnostic: train/val非加仓开仓={train_entry_trades}/{validation_entry_trades}，"
             f"月频={train_monthly_entries:.2f}/{validation_monthly_entries:.2f}，"
-            f"倍率={train_activity_multiplier:.2f}/{validation_activity_multiplier:.2f}，"
-            f"最长无新开仓={train_max_trade_idle_days:.1f}/{validation_max_trade_idle_days:.1f}天，"
+            f"开仓倍率={train_entry_activity_multiplier:.2f}/{validation_entry_activity_multiplier:.2f}，"
+            f"持仓覆盖={train_position_exposure_pct:.1f}%/{validation_position_exposure_pct:.1f}% "
+            f"(覆盖倍率={train_exposure_multiplier:.2f}/{validation_exposure_multiplier:.2f})，"
+            f"综合倍率={train_activity_multiplier:.2f}/{validation_activity_multiplier:.2f}，"
             f"趋势机会覆盖短缺={train_trend_participation_shortfall:.2f}/"
             f"{validation_trend_participation_shortfall:.2f}"
         ),
@@ -795,10 +788,11 @@ def summarize_evaluation_impl(
             f"train/val 按日收益年化分={train_timed_return_score:.2f}/{validation_timed_return_score:.2f}，"
             f"train/val 非加仓开仓={train_entry_trades}/{validation_entry_trades}，"
             f"月频={train_monthly_entries:.2f}/{validation_monthly_entries:.2f}，"
-            f"交易量倍率={train_activity_multiplier:.2f}/{validation_activity_multiplier:.2f}，"
-            f"最长无新开仓={train_max_trade_idle_days:.1f}/{validation_max_trade_idle_days:.1f}天，"
+            f"开仓倍率={train_entry_activity_multiplier:.2f}/{validation_entry_activity_multiplier:.2f}，"
+            f"持仓覆盖={train_position_exposure_pct:.1f}%/{validation_position_exposure_pct:.1f}%，"
+            f"覆盖倍率={train_exposure_multiplier:.2f}/{validation_exposure_multiplier:.2f}，"
+            f"综合活跃度倍率={train_activity_multiplier:.2f}/{validation_activity_multiplier:.2f}，"
             f"趋势机会覆盖短缺={train_trend_participation_shortfall:.2f}/{validation_trend_participation_shortfall:.2f}，"
-            f"空窗惩罚={trade_idle_penalty:.2f}，"
             f"train/val 固定窗口回撤风险分={train_drawdown_risk_score:.2f}/{validation_drawdown_risk_score:.2f}，"
             f"回撤罚分={drawdown_penalty_score:.2f}，鲁棒性软惩罚={robustness_penalty_score:.2f}"
         ),
@@ -961,15 +955,15 @@ def summarize_evaluation_impl(
         "train_entry_trades": float(train_entry_trades),
         "validation_entry_trades": float(validation_entry_trades),
         "selection_entry_trades": float(selection_entry_trades),
+        "train_entry_activity_multiplier": train_entry_activity_multiplier,
+        "validation_entry_activity_multiplier": validation_entry_activity_multiplier,
+        "train_position_exposure_pct": train_position_exposure_pct,
+        "validation_position_exposure_pct": validation_position_exposure_pct,
+        "train_exposure_multiplier": train_exposure_multiplier,
+        "validation_exposure_multiplier": validation_exposure_multiplier,
         "train_activity_multiplier": train_activity_multiplier,
         "validation_activity_multiplier": validation_activity_multiplier,
         "activity_multiplier": activity_multiplier,
-        "train_max_trade_idle_days": train_max_trade_idle_days,
-        "validation_max_trade_idle_days": validation_max_trade_idle_days,
-        "train_trade_idle_shortfall": train_trade_idle_shortfall,
-        "validation_trade_idle_shortfall": validation_trade_idle_shortfall,
-        "trade_idle_shortfall": trade_idle_shortfall,
-        "trade_idle_penalty": trade_idle_penalty,
         "train_trend_participation_shortfall": train_trend_participation_shortfall,
         "validation_trend_participation_shortfall": validation_trend_participation_shortfall,
         "trend_participation_penalty": trend_participation_penalty,

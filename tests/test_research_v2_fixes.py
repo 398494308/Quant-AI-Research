@@ -44,13 +44,13 @@ from research_v2.evaluation import (
     _capture_ratio,
     _detect_major_trend_segments,
     _entry_side_counts,
-    _max_trade_idle_days_from_timestamps,
     _normalize_trend_points,
     _period_months_from_timestamps,
+    _position_exposure_pct_from_trades,
     _robust_block_report,
     _trend_clean_quality,
     _robustness_penalty_payload,
-    _trade_idle_shortfall,
+    _exposure_multiplier_from_position_exposure_pct,
     _trend_participation_penalty,
     _trend_participation_shortfall,
     _trend_score_report,
@@ -931,7 +931,6 @@ class EvaluationFixesTest(unittest.TestCase):
             report.metrics["main_score"]
             - expected_drawdown_penalty
             - report.metrics["robustness_penalty_score"]
-            - report.metrics["trade_idle_penalty"]
         )
         self.assertIn("train_robust_block_score", report.metrics)
         self.assertIn("validation_robust_block_score", report.metrics)
@@ -1246,7 +1245,6 @@ class EvaluationFixesTest(unittest.TestCase):
                 report.metrics["main_score"]
                 - expected_drawdown_penalty
                 - report.metrics["robustness_penalty_score"]
-                - report.metrics["trade_idle_penalty"]
             ),
         )
 
@@ -1414,21 +1412,40 @@ class EvaluationFixesTest(unittest.TestCase):
             30 / 30.4375,
         )
 
-    def test_trade_idle_shortfall_penalizes_long_no_entry_gap(self):
+    def test_position_exposure_pct_uses_clipped_union_intervals(self):
         day_ms = 24 * 60 * 60 * 1000
         start_ts = 0
-        end_ts = 20 * day_ms
-        entry_timestamps = [2 * day_ms, 5 * day_ms, 14 * day_ms]
+        end_ts = day_ms
+        trades = [
+            {"entry_timestamp": -2 * day_ms, "exit_timestamp": 6 * 60 * 60 * 1000},
+            {"entry_timestamp": 4 * 60 * 60 * 1000, "exit_timestamp": 10 * 60 * 60 * 1000},
+            {"entry_timestamp": 20 * 60 * 60 * 1000, "exit_timestamp": 2 * day_ms},
+        ]
 
-        max_idle_days = _max_trade_idle_days_from_timestamps(
-            entry_timestamps,
+        exposure_pct = _position_exposure_pct_from_trades(
+            trades,
             start_timestamp=start_ts,
             end_timestamp=end_ts,
         )
 
-        self.assertAlmostEqual(max_idle_days, 9.0)
-        self.assertAlmostEqual(_trade_idle_shortfall(max_idle_days, 7.0), 2.0 / 7.0)
-        self.assertAlmostEqual(_trade_idle_shortfall(7.0, 7.0), 0.0)
+        self.assertAlmostEqual(exposure_pct, 14 / 24 * 100.0)
+        self.assertAlmostEqual(
+            _position_exposure_pct_from_trades([], start_timestamp=start_ts, end_timestamp=end_ts),
+            0.0,
+        )
+
+    def test_exposure_multiplier_smoothly_limits_low_position_exposure(self):
+        scoring = ScoringConfig()
+
+        self.assertAlmostEqual(_exposure_multiplier_from_position_exposure_pct(0.0, scoring), 0.0)
+        self.assertAlmostEqual(_exposure_multiplier_from_position_exposure_pct(5.0, scoring), 0.25)
+        self.assertAlmostEqual(_exposure_multiplier_from_position_exposure_pct(8.0, scoring), 0.45)
+        self.assertAlmostEqual(_exposure_multiplier_from_position_exposure_pct(12.0, scoring), 0.75)
+        self.assertAlmostEqual(_exposure_multiplier_from_position_exposure_pct(16.0, scoring), 1.0)
+        self.assertAlmostEqual(_exposure_multiplier_from_position_exposure_pct(30.0, scoring), 1.0)
+        current_champion_like = _exposure_multiplier_from_position_exposure_pct(6.4, scoring)
+        self.assertGreater(current_champion_like, 0.33)
+        self.assertLess(current_champion_like, 0.35)
 
     def test_summarize_evaluation_drawdown_risk_penalizes_persistent_underwater_path(self):
         scoring = ScoringConfig(
@@ -2739,7 +2756,7 @@ class JournalPromptFixesTest(unittest.TestCase):
         )
 
         self.assertIn("promotion_score` 严格高于当前 active reference", prompt)
-        self.assertIn("v26 活跃度调整时间块主分", prompt)
+        self.assertIn("v27 有效活跃度调整时间块主分", prompt)
         self.assertIn("mean/median/P25", prompt)
         self.assertIn("buy&hold", prompt)
         self.assertIn("capture_score` / `capture_core` 只作为趋势诊断", prompt)
@@ -2748,9 +2765,9 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertNotIn("activity_adjusted_sharpe_score", prompt)
         self.assertIn("回撤惩罚", prompt)
         self.assertIn("鲁棒性软惩罚", prompt)
-        self.assertIn("交易量现在通过主分倍率约束", prompt)
+        self.assertIn("活跃度倍率同时看月非加仓开仓数和持仓覆盖率", prompt)
         self.assertIn("train 180-270 / val 120-180", prompt)
-        self.assertIn("最长无新开仓", prompt)
+        self.assertIn("持仓覆盖率约", prompt)
         self.assertIn("只做诊断，不是硬 gate", prompt)
         self.assertIn("默认优先找更稳的泛化形态", prompt)
         self.assertNotIn("promotion_delta >", prompt)
@@ -2816,7 +2833,7 @@ class JournalPromptFixesTest(unittest.TestCase):
             [
                 "# 研究器人工方向卡",
                 "## 优先方向",
-                "- 当前评分口径是 `robust_block_v26_activity_mean`。",
+                "- 当前评分口径是 `robust_block_v27_exposure_activity`。",
                 "- 当前 active reference 分数以运行器实时注入为准。",
                 "- 当前交易量已经足够，不要把主要预算浪费在刷交易量。",
                 "- 当前核心短板仍是趋势捕获质量。",

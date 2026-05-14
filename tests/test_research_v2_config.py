@@ -28,8 +28,6 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
                         "MACD_V2_ROBUST_BLOCK_MEDIAN_WEIGHT=0.25",
                         "MACD_V2_ROBUST_BLOCK_P25_WEIGHT=0.15",
                         "MACD_V2_BENCHMARK_HURDLE_WEIGHT=0.25",
-                        "MACD_V2_TRADE_IDLE_PENALTY_WEIGHT=0.10",
-                        "MACD_V2_MAX_TRADE_IDLE_DAYS=7.0",
                         "MACD_V2_TRADE_PARTICIPATION_TRAIN_FLOOR=0.12",
                         "MACD_V2_TRADE_PARTICIPATION_TRAIN_TARGET=0.22",
                         "MACD_V2_TRADE_PARTICIPATION_VALIDATION_FLOOR=0.15",
@@ -41,6 +39,13 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
                         "MACD_V2_ACTIVITY_MULTIPLIER_FLOOR_VALUE=0.10",
                         "MACD_V2_ACTIVITY_MULTIPLIER_LOW_VALUE=0.35",
                         "MACD_V2_ACTIVITY_MULTIPLIER_PREFERRED_VALUE=0.70",
+                        "MACD_V2_EXPOSURE_MULTIPLIER_FLOOR_PCT=5.0",
+                        "MACD_V2_EXPOSURE_MULTIPLIER_LOW_PCT=8.0",
+                        "MACD_V2_EXPOSURE_MULTIPLIER_PREFERRED_PCT=12.0",
+                        "MACD_V2_EXPOSURE_MULTIPLIER_FULL_PCT=16.0",
+                        "MACD_V2_EXPOSURE_MULTIPLIER_FLOOR_VALUE=0.25",
+                        "MACD_V2_EXPOSURE_MULTIPLIER_LOW_VALUE=0.45",
+                        "MACD_V2_EXPOSURE_MULTIPLIER_PREFERRED_VALUE=0.75",
                         "MACD_V2_CAPTURE_BALANCE_GAP_TOLERANCE=0.08",
                         "MACD_V2_CAPTURE_BALANCE_GAP_FULL=0.24",
                         "MACD_V2_CAPTURE_BALANCE_MAX_WEAK_WEIGHT=0.65",
@@ -89,8 +94,6 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
             self.assertAlmostEqual(runtime.scoring.robust_block_median_weight, 0.25)
             self.assertAlmostEqual(runtime.scoring.robust_block_p25_weight, 0.15)
             self.assertAlmostEqual(runtime.scoring.benchmark_hurdle_weight, 0.25)
-            self.assertAlmostEqual(runtime.scoring.trade_idle_penalty_weight, 0.10)
-            self.assertAlmostEqual(runtime.scoring.max_trade_idle_days, 7.0)
             self.assertAlmostEqual(runtime.scoring.trade_participation_train_floor, 0.12)
             self.assertAlmostEqual(runtime.scoring.trade_participation_train_target, 0.22)
             self.assertAlmostEqual(runtime.scoring.trade_participation_validation_floor, 0.15)
@@ -102,6 +105,13 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
             self.assertAlmostEqual(runtime.scoring.activity_multiplier_floor_value, 0.10)
             self.assertAlmostEqual(runtime.scoring.activity_multiplier_low_value, 0.35)
             self.assertAlmostEqual(runtime.scoring.activity_multiplier_preferred_value, 0.70)
+            self.assertAlmostEqual(runtime.scoring.exposure_multiplier_floor_pct, 5.0)
+            self.assertAlmostEqual(runtime.scoring.exposure_multiplier_low_pct, 8.0)
+            self.assertAlmostEqual(runtime.scoring.exposure_multiplier_preferred_pct, 12.0)
+            self.assertAlmostEqual(runtime.scoring.exposure_multiplier_full_pct, 16.0)
+            self.assertAlmostEqual(runtime.scoring.exposure_multiplier_floor_value, 0.25)
+            self.assertAlmostEqual(runtime.scoring.exposure_multiplier_low_value, 0.45)
+            self.assertAlmostEqual(runtime.scoring.exposure_multiplier_preferred_value, 0.75)
             self.assertAlmostEqual(runtime.scoring.capture_balance_gap_tolerance, 0.08)
             self.assertAlmostEqual(runtime.scoring.capture_balance_gap_full, 0.24)
             self.assertAlmostEqual(runtime.scoring.capture_balance_max_weak_weight, 0.65)
