@@ -512,6 +512,34 @@ def summarize_evaluation_impl(
         gate_reasons.append(f"出现爆仓({liquidations})")
     if avg_fee_drag > gates.max_fee_drag_pct:
         gate_reasons.append(f"手续费拖累过高({avg_fee_drag:.2f}%)")
+    min_train_monthly_entries = max(0.0, float(gates.min_train_monthly_entries))
+    min_validation_monthly_entries = max(0.0, float(gates.min_validation_monthly_entries))
+    min_train_position_exposure_pct = max(0.0, float(gates.min_train_position_exposure_pct))
+    min_validation_position_exposure_pct = max(0.0, float(gates.min_validation_position_exposure_pct))
+    if min_train_monthly_entries > 0.0 and train_monthly_entries < min_train_monthly_entries:
+        gate_reasons.append(
+            f"train月开仓频率过低({train_monthly_entries:.2f} < {min_train_monthly_entries:.2f})"
+        )
+    if (
+        min_validation_monthly_entries > 0.0
+        and validation_monthly_entries < min_validation_monthly_entries
+    ):
+        gate_reasons.append(
+            "val月开仓频率过低"
+            f"({validation_monthly_entries:.2f} < {min_validation_monthly_entries:.2f})"
+        )
+    if min_train_position_exposure_pct > 0.0 and train_position_exposure_pct < min_train_position_exposure_pct:
+        gate_reasons.append(
+            f"train持仓覆盖过低({train_position_exposure_pct:.2f}% < {min_train_position_exposure_pct:.2f}%)"
+        )
+    if (
+        min_validation_position_exposure_pct > 0.0
+        and validation_position_exposure_pct < min_validation_position_exposure_pct
+    ):
+        gate_reasons.append(
+            "val持仓覆盖过低"
+            f"({validation_position_exposure_pct:.2f}% < {min_validation_position_exposure_pct:.2f}%)"
+        )
     if overfit_report.hard_fail:
         gate_reasons.append(
             "train+val过拟合集中度严重"

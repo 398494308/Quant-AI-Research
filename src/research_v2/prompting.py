@@ -419,6 +419,10 @@ def build_strategy_research_prompt(
     min_validation_block_floor: float = -0.10,
     max_validation_block_failures: int = 3,
     min_validation_closed_trades: int = 0,
+    min_train_monthly_entries: float = 5.0,
+    min_validation_monthly_entries: float = 5.0,
+    min_train_position_exposure_pct: float = 5.0,
+    min_validation_position_exposure_pct: float = 5.0,
     max_dev_validation_gap: float = 0.30,
     trade_activity_train_range_low: int = 180,
     trade_activity_train_range_high: int = 270,
@@ -510,7 +514,7 @@ def build_strategy_research_prompt(
 - `promotion_score` 现在以 v28 有效活跃度调整时间块主分为核心：train/val 各自用 28 天收益块的 mean/median/P25 聚合，min 只做诊断；正收益会按有效活跃度打倍率，负收益不打折。正向 buy&hold 稳健分会按 0.25 形成轻量基准扣分。回撤惩罚只扣超过有效活跃度容忍线的部分，严重回撤仍重罚；最终再减去轻量鲁棒性软惩罚。
 - `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率。不要再为固定 clean 单边段过拟合；优先让多数时间块稳定，同时用 regime scorecard 判断动量在哪些环境该开、该缩、该停。
 - Regime scorecard 只用已有数据：ADX/CHOP/ATR、flow_imbalance、Fear & Greed 和价格自身波动。它是解释工具，不是硬 gate；不能使用 holdout 或部署判断信息。
-- Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。活跃度倍率同时看月非加仓开仓数和持仓覆盖率；单纯刷开仓数但大部分时间空仓，会显著折扣正收益。月频 `{activity_multiplier_floor_monthly_entries:.1f}`/`{activity_multiplier_low_monthly_entries:.1f}`/`{activity_multiplier_preferred_monthly_entries:.1f}`/`{activity_multiplier_full_monthly_entries:.1f}` 对应开仓倍率约 `{activity_multiplier_floor_value:.2f}`/`{activity_multiplier_low_value:.2f}`/`{activity_multiplier_preferred_value:.2f}`/`1.00`；持仓覆盖率约 `{exposure_multiplier_full_pct:.1f}%` 起给满覆盖倍率。
+- Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。低活跃度是硬 gate：train/val 月非加仓开仓都必须 >= `{min_train_monthly_entries:.1f}`/`{min_validation_monthly_entries:.1f}`，持仓覆盖都必须 >= `{min_train_position_exposure_pct:.1f}%`/`{min_validation_position_exposure_pct:.1f}%`。过 gate 后，正收益还会继续按月频和持仓覆盖打倍率；单纯刷开仓数但大部分时间空仓仍会显著折扣正收益。月频 `{activity_multiplier_floor_monthly_entries:.1f}`/`{activity_multiplier_low_monthly_entries:.1f}`/`{activity_multiplier_preferred_monthly_entries:.1f}`/`{activity_multiplier_full_monthly_entries:.1f}` 对应开仓倍率约 `{activity_multiplier_floor_value:.2f}`/`{activity_multiplier_low_value:.2f}`/`{activity_multiplier_preferred_value:.2f}`/`1.00`；持仓覆盖率约 `{exposure_multiplier_full_pct:.1f}%` 起给满覆盖倍率。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓不占这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - `capture_score` 只使用 clean trend segments：先用中度放开的趋势段候选，再过滤掉趋势效率或方向一致性不足的震荡段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
 - Fear & Greed 情绪数据已作为可选 `market_state` 输入暴露给策略，可读取 `sentiment`、`fear_greed_value`、`fear_greed_ema7`、`fear_greed_delta1/3/7`；它不进入评分或 gate，不是必须使用的信号。
@@ -542,7 +546,7 @@ def build_strategy_research_prompt(
 - 读不到 `{direction_board_path}`、`{duplicate_watchlist_path}`、`{failure_wiki_path}` 或 `{history_package_path}` 不是合法 no-edit 理由；当前源码仍是硬事实源。
 
 当前口径的 gate / 评分提醒：
-- 有效活跃度现在通过主分倍率约束，不再用交易数短缺重复扣分；目标仍约 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`，也就是约 10-15 笔/月，同时要有足够持仓覆盖。趋势机会覆盖短缺只做诊断，不要为了刷交易数制造无收益短交易。
+- 有效活跃度先过硬 gate：train/val 月非加仓开仓都必须 >= `{min_train_monthly_entries:.1f}`/`{min_validation_monthly_entries:.1f}`，持仓覆盖都必须 >= `{min_train_position_exposure_pct:.1f}%`/`{min_validation_position_exposure_pct:.1f}%`；目标仍约 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`，也就是约 10-15 笔/月，同时要有足够持仓覆盖。趋势机会覆盖短缺只做诊断，不要为了刷交易数制造无收益短交易。
 - capture、val趋势命中率、多空捕获、val趋势分块只做诊断，不是硬 gate
 {promotion_reminder_line}
 - 手续费拖累 <= 11.5%

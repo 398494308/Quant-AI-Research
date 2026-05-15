@@ -215,6 +215,10 @@ class GateConfig:
     min_validation_bear_capture: float
     max_fee_drag_pct: float
     min_validation_closed_trades: int = 0
+    min_train_monthly_entries: float = 5.0
+    min_validation_monthly_entries: float = 5.0
+    min_train_position_exposure_pct: float = 5.0
+    min_validation_position_exposure_pct: float = 5.0
     validation_block_count: int = 4
     min_validation_block_floor: float = -0.10
     max_validation_block_failures: int = 3
@@ -361,6 +365,10 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         min_validation_bear_capture=_env_float("MACD_V2_MIN_VALIDATION_BEAR_CAPTURE", 0.00),
         max_fee_drag_pct=_env_float("MACD_V2_MAX_FEE_DRAG_PCT", 11.5),
         min_validation_closed_trades=_env_int("MACD_V2_MIN_VALIDATION_CLOSED_TRADES", 0),
+        min_train_monthly_entries=_env_float("MACD_V2_MIN_TRAIN_MONTHLY_ENTRIES", 5.0),
+        min_validation_monthly_entries=_env_float("MACD_V2_MIN_VALIDATION_MONTHLY_ENTRIES", 5.0),
+        min_train_position_exposure_pct=_env_float("MACD_V2_MIN_TRAIN_POSITION_EXPOSURE_PCT", 5.0),
+        min_validation_position_exposure_pct=_env_float("MACD_V2_MIN_VALIDATION_POSITION_EXPOSURE_PCT", 5.0),
         validation_block_count=_env_int("MACD_V2_VALIDATION_BLOCK_COUNT", 4),
         min_validation_block_floor=_env_float("MACD_V2_MIN_VALIDATION_BLOCK_FLOOR", -0.10),
         max_validation_block_failures=_env_int("MACD_V2_MAX_VALIDATION_BLOCK_FAILURES", 3),

@@ -61,7 +61,7 @@ flowchart TB
 - `test`：`2026-01-01` 到 `2026-04-30`。
 - 晋升条件：候选先过 `gate`；已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference。当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则。
 - 唯一例外是系统排队的“结构自检修复轮”：它不是普通追分轮，只在通过现有基础安全门后跳过 `promotion_score` 比较，用来替换掉明显局部过拟合或结构膨胀的 active reference。
-- v28 主分是有效活跃度调整后的稳健时间块收益：train/val 各自用 `28` 天收益块的 `mean/median/P25` 聚合，`min` 只做诊断；低月频或低持仓覆盖只折扣正收益。
+- v28 主分是有效活跃度调整后的稳健时间块收益：train/val 各自用 `28` 天收益块的 `mean/median/P25` 聚合，`min` 只做诊断；低月频或低持仓覆盖先触发硬 gate，过 gate 后正收益仍按活跃度打倍率。
 - `benchmark_hurdle_score = max(0, buy_hold_robust_score) * 0.25`，只在 buy&hold 自身稳健分为正时形成轻量基准扣分。
 - `main_score = robust_time_score - benchmark_hurdle_score`。
 - `promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score`。
@@ -72,7 +72,7 @@ flowchart TB
 - 当前策略源码已做等价压缩；复杂度默认只做诊断，不拦普通候选。结构自检修复不再按复杂度阈值或连续失败即时触发，而是按周期整理。
 - Fear & Greed 情绪数据只作为策略可选输入暴露在 `market_state`，不进入评分、gate 或强制优化目标。
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标。
-- 有效活跃度按“非加仓开仓月频 × 持仓覆盖率”计算；开仓目标约 `train 180-270 / val 120-180`，也就是 `10-15` 笔/月。持仓覆盖率约 `16%` 起给满覆盖倍率；趋势机会覆盖只做诊断。
+- 有效活跃度按“非加仓开仓月频 × 持仓覆盖率”计算；train/val 必须分别达到至少 `5` 笔/月和 `5%` 持仓覆盖，否则 gate 失败。开仓目标约 `train 180-270 / val 120-180`，也就是 `10-15` 笔/月。持仓覆盖率约 `16%` 起给满覆盖倍率；趋势机会覆盖只做诊断。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
 - 交易数、`filled_entries` 和漏斗通过量只保留观察价值，不再作为下一轮方向的默认软触发。
 - Regime scorecard 只做解释工具，不进入评分或 gate；它复用已有 ADX/CHOP/ATR、flow、成交量代理、Fear & Greed 和价格自身波动，帮助判断什么时候适合动量、什么时候应该缩手。

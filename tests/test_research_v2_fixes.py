@@ -130,6 +130,10 @@ def make_gate_config(**overrides):
         "min_validation_bear_capture": -10.0,
         "max_fee_drag_pct": 100.0,
         "min_validation_closed_trades": 0,
+        "min_train_monthly_entries": 0.0,
+        "min_validation_monthly_entries": 0.0,
+        "min_train_position_exposure_pct": 0.0,
+        "min_validation_position_exposure_pct": 0.0,
         "validation_block_count": 3,
         "min_validation_block_floor": -100.0,
         "max_validation_block_failures": 100,
@@ -1422,6 +1426,137 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertNotIn("trade_count_penalty", report.metrics)
         self.assertNotIn("train_trade_activity_shortfall", report.metrics)
         self.assertNotIn("train_monthly_closed_trades", report.metrics)
+
+    def _activity_gate_report(
+        self,
+        *,
+        train_entries: int = 6,
+        validation_entries: int = 6,
+        train_exposure_pct: float = 6.0,
+        validation_exposure_pct: float = 6.0,
+    ):
+        month_ms = int(30.4375 * 24 * 60 * 60 * 1000)
+        validation_start = month_ms
+        period_end = 2 * month_ms
+        eval_window = type(
+            "Window",
+            (),
+            {"group": "eval", "label": "train1", "start_date": "1970-01-01", "end_date": "1970-01-31"},
+        )()
+        validation_window = type(
+            "Window",
+            (),
+            {"group": "validation", "label": "val1", "start_date": "1970-02-01", "end_date": "1970-02-28"},
+        )()
+        train_trade = {
+            "entry_timestamp": 0,
+            "exit_timestamp": int(month_ms * train_exposure_pct / 100.0),
+            "entry_signal": "long_gate_probe",
+        }
+        validation_trade = {
+            "entry_timestamp": validation_start,
+            "exit_timestamp": validation_start + int(month_ms * validation_exposure_pct / 100.0),
+            "entry_signal": "short_gate_probe",
+        }
+        eval_points = self._trend_points_from_closes([100, 102, 104])
+        validation_points = [
+            {**point, "timestamp": validation_start + int(point["timestamp"])}
+            for point in self._trend_points_from_closes([104, 103, 105])
+        ]
+        results = [
+            {
+                "window": eval_window,
+                "result": {
+                    "return": 1.0,
+                    "max_drawdown": 1.0,
+                    "trades": train_entries,
+                    "fee_drag_pct": 0.1,
+                    "liquidations": 0,
+                    "daily_returns": [0.01, 0.0],
+                    "trend_capture_points": eval_points,
+                    "filled_side_entries": {"long": train_entries, "short": 0},
+                },
+            },
+            {
+                "window": validation_window,
+                "result": {
+                    "return": 1.0,
+                    "max_drawdown": 1.0,
+                    "trades": validation_entries,
+                    "fee_drag_pct": 0.1,
+                    "liquidations": 0,
+                    "daily_returns": [0.01, 0.0],
+                    "trend_capture_points": validation_points,
+                    "filled_side_entries": {"long": 0, "short": validation_entries},
+                },
+            },
+        ]
+        validation_continuous_result = {
+            "return": 1.0,
+            "max_drawdown": 1.0,
+            "trades": validation_entries,
+            "fee_drag_pct": 0.1,
+            "liquidations": 0,
+            "daily_returns": [0.01, 0.0],
+            "trend_capture_points": validation_points,
+            "filled_side_entries": {"long": 0, "short": validation_entries},
+            "trades_detail": [validation_trade],
+            "period_start_timestamp": validation_start,
+            "period_end_timestamp": period_end,
+        }
+        full_period_result = {
+            "return": 2.0,
+            "max_drawdown": 1.0,
+            "trades": train_entries + validation_entries,
+            "fee_drag_pct": 0.2,
+            "liquidations": 0,
+            "daily_returns": [0.01, 0.0, 0.01, 0.0],
+            "trend_capture_points": eval_points + validation_points,
+            "filled_side_entries": {"long": train_entries, "short": validation_entries},
+            "trades_detail": [train_trade, validation_trade],
+            "period_start_timestamp": 0,
+            "period_end_timestamp": period_end,
+        }
+        return summarize_evaluation(
+            results,
+            make_gate_config(
+                min_train_monthly_entries=5.0,
+                min_validation_monthly_entries=5.0,
+                min_train_position_exposure_pct=5.0,
+                min_validation_position_exposure_pct=5.0,
+            ),
+            validation_continuous_result=validation_continuous_result,
+            full_period_result=full_period_result,
+        )
+
+    def test_activity_gate_rejects_low_monthly_entries_by_period(self):
+        train_low = self._activity_gate_report(train_entries=4, validation_entries=6)
+        validation_low = self._activity_gate_report(train_entries=6, validation_entries=4)
+
+        self.assertFalse(train_low.gate_passed)
+        self.assertIn("train月开仓频率过低", train_low.gate_reason)
+        self.assertFalse(validation_low.gate_passed)
+        self.assertIn("val月开仓频率过低", validation_low.gate_reason)
+
+    def test_activity_gate_rejects_low_position_exposure_by_period(self):
+        train_low = self._activity_gate_report(train_exposure_pct=4.0, validation_exposure_pct=6.0)
+        validation_low = self._activity_gate_report(train_exposure_pct=6.0, validation_exposure_pct=4.0)
+
+        self.assertFalse(train_low.gate_passed)
+        self.assertIn("train持仓覆盖过低", train_low.gate_reason)
+        self.assertFalse(validation_low.gate_passed)
+        self.assertIn("val持仓覆盖过低", validation_low.gate_reason)
+
+    def test_activity_gate_allows_minimum_monthly_entries_and_exposure(self):
+        report = self._activity_gate_report(
+            train_entries=5,
+            validation_entries=5,
+            train_exposure_pct=5.0,
+            validation_exposure_pct=5.0,
+        )
+
+        self.assertTrue(report.gate_passed)
+        self.assertEqual(report.gate_reason, "通过")
 
     def test_period_months_from_timestamps_uses_average_calendar_month(self):
         self.assertAlmostEqual(
@@ -2801,7 +2936,8 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("回撤惩罚", prompt)
         self.assertIn("超过有效活跃度容忍线", prompt)
         self.assertIn("鲁棒性软惩罚", prompt)
-        self.assertIn("活跃度倍率同时看月非加仓开仓数和持仓覆盖率", prompt)
+        self.assertIn("低活跃度是硬 gate", prompt)
+        self.assertIn("过 gate 后，正收益还会继续按月频和持仓覆盖打倍率", prompt)
         self.assertIn("train 180-270 / val 120-180", prompt)
         self.assertIn("持仓覆盖率约", prompt)
         self.assertIn("只做诊断，不是硬 gate", prompt)
