@@ -240,6 +240,14 @@ capture 仍保留，因为它能解释策略是否真正抓到了明显趋势，
 
 如果 capture 很低但稳健时间块表现好，候选仍可晋升；如果 capture 很高但多数时间块表现差，主分不会被 capture 拉起来。
 
+## 多空画像
+
+当前研究画像默认允许 `long / flat`。`short` 不是必须对称参与的主引擎，只作为高置信辅助。
+
+- short 占比和多空 capture 只做诊断，不进入评分或 gate。
+- 如果 short 不能改善整体 train/val 稳健收益、回撤或 val 弱块，planner 可以主动收窄 short。
+- reviewer 会打回只因为 bear capture 弱就机械扩大 short、放宽 short context 或延长 short exit 的方案。
+
 ## 人工边界
 
 - 不把 test 或 demo 判断写入 planner prompt。

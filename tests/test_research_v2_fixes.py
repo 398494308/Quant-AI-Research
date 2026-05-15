@@ -2930,6 +2930,9 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("mean/median/P25", prompt)
         self.assertIn("buy&hold", prompt)
         self.assertIn("capture_score` / `capture_core` 只作为趋势诊断", prompt)
+        self.assertIn("默认可以是 `long / flat`", prompt)
+        self.assertIn("short 占比、多空 capture 只做诊断，不进入评分", prompt)
+        self.assertIn("允许主动收窄 short", prompt)
         self.assertIn("Regime scorecard", prompt)
         self.assertIn("Sharpe 只作为人工筛选", prompt)
         self.assertNotIn("activity_adjusted_sharpe_score", prompt)
@@ -2942,6 +2945,8 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("持仓覆盖率约", prompt)
         self.assertIn("只做诊断，不是硬 gate", prompt)
         self.assertIn("默认优先找更稳的泛化形态", prompt)
+        self.assertIn("不要因为 bear capture 弱就机械增加空头", prompt)
+        self.assertNotIn("ineffective_short_penalty", prompt)
         self.assertNotIn("promotion_delta >", prompt)
         self.assertIn("当前回合任务", prompt)
         self.assertIn("卡片摘要（已展开，不需要再假设自己能读本地文件）", prompt)
@@ -3276,6 +3281,8 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("failure_wiki.md", prompt)
         self.assertIn("不能替 planner 发明新方向", prompt)
         self.assertIn("预计新增、删除或迁移哪类真实交易", prompt)
+        self.assertIn("放宽 `short_context`", prompt)
+        self.assertIn("没有说明它如何改善整体 train/val 稳健收益", prompt)
 
     def test_build_strategy_round_brief_repair_prompt_mentions_required_fields(self):
         prompt = build_strategy_round_brief_repair_prompt(

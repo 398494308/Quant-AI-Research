@@ -68,6 +68,7 @@ flowchart TB
 - 主评分使用连续 `train / val` 数据源；`train` 从已有 `train+val` 连续回测按 `val` 起点切出，walk-forward 继续用于诊断和早停。
 - walk-forward 诊断按 v28 robust block 分；提前淘汰直接复用已完成的 walk-forward 窗口结果，不再额外重跑累计 train 区间。
 - `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率。capture 仍使用固定 clean trend segments，并保留“段等权均分 50% + 原权重均分 50%”的混合口径。
+- 默认研究画像是 `long / flat`；`short` 只作为高置信辅助。short 占比和多空 capture 只做诊断，不进入评分或 gate；若 short 不能改善整体 train/val 稳健收益、回撤或 val 弱块，planner 可以主动收窄 short。
 - 参数步长现在是高优先级软约束，不是技术 gate：默认避免只做近邻阈值微调；如果需要小步长修正，planner 必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。真正的硬拦截是 smoke 行为不变、源码安全校验、gate 和 promotion。
 - 当前策略源码已做等价压缩；复杂度默认只做诊断，不拦普通候选。结构自检修复不再按复杂度阈值或连续失败即时触发，而是按周期整理。
 - Fear & Greed 情绪数据只作为策略可选输入暴露在 `market_state`，不进入评分、gate 或强制优化目标。
@@ -130,6 +131,7 @@ flowchart TB
 - 每轮 fresh session。
 - 只审 planner 的 draft 是否值得落码。
 - 重点检查是否旧失败近邻、是否只换标签、是否说明真实交易路径变化。
+- 若 draft 主要是扩大 short，但不能说明如何改善整体 train/val 稳健收益、回撤或 val 弱块，默认打回。
 - 不写代码，不替 planner 提新方案。
 
 ### edit_worker

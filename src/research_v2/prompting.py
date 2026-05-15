@@ -513,6 +513,7 @@ def build_strategy_research_prompt(
 {promotion_rule_line}
 - `promotion_score` 现在以 v28 有效活跃度调整时间块主分为核心：train/val 各自用 28 天收益块的 mean/median/P25 聚合，min 只做诊断；正收益会按有效活跃度打倍率，负收益不打折。正向 buy&hold 稳健分会按 0.25 形成轻量基准扣分。回撤惩罚只扣超过有效活跃度容忍线的部分，严重回撤仍重罚；最终再减去轻量鲁棒性软惩罚。
 - `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率。不要再为固定 clean 单边段过拟合；优先让多数时间块稳定，同时用 regime scorecard 判断动量在哪些环境该开、该缩、该停。
+- 策略画像提醒：默认可以是 `long / flat`；`short` 不是必须对称参与的主引擎，只应作为高置信辅助。short 占比、多空 capture 只做诊断，不进入评分；若 short 无法证明能改善 train/val 稳健收益、回撤或 val 弱块，允许主动收窄 short，甚至阶段性接近 long-only。
 - Regime scorecard 只用已有数据：ADX/CHOP/ATR、flow_imbalance、Fear & Greed 和价格自身波动。它是解释工具，不是硬 gate；不能使用 holdout 或部署判断信息。
 - Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。低活跃度是硬 gate：train/val 月非加仓开仓都必须 >= `{min_train_monthly_entries:.1f}`/`{min_validation_monthly_entries:.1f}`，持仓覆盖都必须 >= `{min_train_position_exposure_pct:.1f}%`/`{min_validation_position_exposure_pct:.1f}%`。过 gate 后，正收益还会继续按月频和持仓覆盖打倍率；单纯刷开仓数但大部分时间空仓仍会显著折扣正收益。月频 `{activity_multiplier_floor_monthly_entries:.1f}`/`{activity_multiplier_low_monthly_entries:.1f}`/`{activity_multiplier_preferred_monthly_entries:.1f}`/`{activity_multiplier_full_monthly_entries:.1f}` 对应开仓倍率约 `{activity_multiplier_floor_value:.2f}`/`{activity_multiplier_low_value:.2f}`/`{activity_multiplier_preferred_value:.2f}`/`1.00`；持仓覆盖率约 `{exposure_multiplier_full_pct:.1f}%` 起给满覆盖倍率。
 - 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓不占这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
@@ -540,6 +541,7 @@ def build_strategy_research_prompt(
 - 先判断上一版为什么失败，再决定继续还是转向；不要只因为某个诊断字段仍弱，就留在旧路线。
 - 若 `primary_direction` 已高热，本轮至少要换失败层、关键规则链或真实触达路径，不要只换标签。
 - 新增 path 不等于新增交易；长侧重点看 `long_signal_path_ok -> long_final_veto_clear -> _trend_followthrough_long()`，空侧重点看 `breakdown_ready -> short_final_veto_clear -> _trend_followthrough_short()`。
+- 如果本轮选择扩大 short 或让 short 更频繁，必须说明它如何改善整体 train/val 稳健收益、回撤或 val 弱块；不要因为 bear capture 弱就机械增加空头。
 - 如果主要改 `_trend_followthrough_ok()`、`_trend_quality_ok()` 或 `_flow_confirmation_ok()`，必须确认现有 slot 和候选路径会触达；否则优先改对应 `_slot_*()` 或参数。
 - 若最近连续 `behavioral_noop` 或结果盆地重复，默认必须放大步长：优先换方向簇、换 choke point 或换最终放行链。
 - 若漏斗显示一侧长期 0 交易、outer_context 几乎全死，或 path 能过但 final_veto 基本全死，可以考虑结构性删减轮。
@@ -618,10 +620,11 @@ def build_strategy_reviewer_prompt(
 1. 先判断它的 `primary_direction` 是否命中当前方向账本里的高热方向。
 2. 如果没有命中高热方向，默认允许首次或低热尝试进入落码，不要因为“解释不够漂亮”就打回。
 3. `PASS` 前确认 draft 已说明它预计新增、删除或迁移哪类真实交易；若没有交易路径变化说明，应判 `REVISE`。
-4. 如果命中高热方向，重点检查它是否明确换了失败层、关键规则链或真实触达路径。
-5. 如果它仍只是换措辞、换标签或局部阈值，没有明确换层，应判 `REVISE`。
-6. `REVISE` 时不要替 planner 写新方案；只指出它必须换哪一层。
-7. 若证据不足，优先回看摘要来源；不要因为 draft 自己写了 `novelty_proof` 就直接放行。
+4. 如果 draft 主要是放宽 `short_context`、增加 short 入口、延长 short exit 或扩大 trailing，但没有说明它如何改善整体 train/val 稳健收益、回撤或 val 弱块，只是因为 bear capture 弱就加空头，应判 `REVISE`。
+5. 如果命中高热方向，重点检查它是否明确换了失败层、关键规则链或真实触达路径。
+6. 如果它仍只是换措辞、换标签或局部阈值，没有明确换层，应判 `REVISE`。
+7. `REVISE` 时不要替 planner 写新方案；只指出它必须换哪一层。
+8. 若证据不足，优先回看摘要来源；不要因为 draft 自己写了 `novelty_proof` 就直接放行。
 
 输出要求：
 {build_reviewer_response_format_instructions()}

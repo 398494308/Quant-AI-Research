@@ -47,6 +47,7 @@
 - `main_score = robust_time_score - benchmark_hurdle_score`，其中正向 buy&hold 稳健分按 `0.25` 形成轻量基准扣分
 - `promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score`
 - `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率；capture 仍使用固定 clean trend segments，并保留“段等权均分 50% + 原权重均分 50%”的混合口径
+- 默认研究画像是 `long / flat`；`short` 只作为高置信辅助。short 占比和多空 capture 只做诊断，不进入评分或 gate，研究器可以主动收窄无效 short。
 - Fear & Greed 情绪数据现在只作为可选 `market_state` 信息源暴露给策略，字段包括 `sentiment`、`fear_greed_value`、`fear_greed_ema7`、`fear_greed_delta1/3/7`；它不进入评分、gate 或 planner 强制目标
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标
 - 有效活跃度按“非加仓开仓月频 × 持仓覆盖率”计算：train/val 必须分别达到至少 `5` 笔/月和 `5%` 持仓覆盖，否则 gate 失败；目标约 `10-15` 笔/月，持仓覆盖率约 `16%` 起给满覆盖倍率；单纯刷开仓数但大部分时间空仓会显著折扣正收益
