@@ -22,10 +22,11 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
                 "\n".join(
                     [
                         "MACD_V2_MIN_VALIDATION_CLOSED_TRADES=0",
-                        "MACD_V2_MIN_TRAIN_MONTHLY_ENTRIES=5.0",
-                        "MACD_V2_MIN_VALIDATION_MONTHLY_ENTRIES=5.0",
+                        "MACD_V2_MIN_TRAIN_MONTHLY_ENTRIES=0.0",
+                        "MACD_V2_MIN_VALIDATION_MONTHLY_ENTRIES=0.0",
                         "MACD_V2_MIN_TRAIN_POSITION_EXPOSURE_PCT=5.0",
                         "MACD_V2_MIN_VALIDATION_POSITION_EXPOSURE_PCT=5.0",
+                        "MACD_V2_ENFORCE_LONG_ONLY_GATE=1",
                         "MACD_V2_ROBUST_BLOCK_WINDOW_DAYS=28",
                         "MACD_V2_ROBUST_BLOCK_STEP_DAYS=14",
                         "MACD_V2_ROBUST_BLOCK_MEAN_WEIGHT=0.60",
@@ -92,10 +93,11 @@ class ResearchRuntimeConfigTest(unittest.TestCase):
             self.assertEqual(runtime.gates.validation_block_count, 4)
             self.assertAlmostEqual(runtime.gates.min_validation_block_floor, -0.10)
             self.assertEqual(runtime.gates.max_validation_block_failures, 3)
-            self.assertAlmostEqual(runtime.gates.min_train_monthly_entries, 5.0)
-            self.assertAlmostEqual(runtime.gates.min_validation_monthly_entries, 5.0)
+            self.assertAlmostEqual(runtime.gates.min_train_monthly_entries, 0.0)
+            self.assertAlmostEqual(runtime.gates.min_validation_monthly_entries, 0.0)
             self.assertAlmostEqual(runtime.gates.min_train_position_exposure_pct, 5.0)
             self.assertAlmostEqual(runtime.gates.min_validation_position_exposure_pct, 5.0)
+            self.assertTrue(runtime.gates.enforce_long_only_gate)
             self.assertEqual(runtime.scoring.robust_block_window_days, 28)
             self.assertEqual(runtime.scoring.robust_block_step_days, 14)
             self.assertAlmostEqual(runtime.scoring.robust_block_mean_weight, 0.60)

@@ -51,7 +51,6 @@ def analyze_window(start_date, end_date, label):
 
     exit_p = dict(getattr(strat, "EXIT_PARAMS", bt.EXIT_PARAMS))
     leverage = float(exit_p["leverage"])
-    position_fraction = float(exit_p["position_fraction"])
     intraday_interval_ms = bt._infer_interval_ms(intraday_all, 15)
     hourly_interval_ms = bt._infer_interval_ms(hourly_all, 60)
 
@@ -165,13 +164,10 @@ def _run_trade_trace(
     from bisect import bisect_right
 
     leverage = float(exit_p["leverage"])
-    position_fraction = float(exit_p["position_fraction"])
     position_size_min = float(exit_p["position_size_min"])
-    position_size_max = float(exit_p["position_size_max"])
     max_concurrent_positions = int(exit_p["max_concurrent_positions"])
     slippage_pct = float(exit_p.get("slippage_pct", 0.0003))
     delay_minutes = int(exit_p.get("entry_delay_minutes", 1))
-    taker_fee_rate = float(exit_p["okx_taker_fee_rate"]) if int(exit_p.get("trading_fee_enabled", 1)) > 0 else 0.0
 
     capital = 100000.0
     positions = []
@@ -308,9 +304,12 @@ def _run_trade_trace(
             # Pyramid
             if bt._should_pyramid(pos, market_state, close_pnl_pct, exit_p, allow_pyramid=risk_profile["allow_pyramid"]):
                 pyramid_fill = bt._fill_with_slippage(market_fill_price, side, True, slippage_pct)
-                max_affordable = capital / (1.0 + leverage * taker_fee_rate)
-                add_size = min(max_affordable, pos["size"] * float(exit_p.get("pyramid_size_ratio", 0.5)), position_size_max)
-                if add_size >= position_size_min:
+                equity_for_add = bt._portfolio_equity(capital, positions, bar["close"], leverage)
+                add_size = min(
+                    bt._max_affordable_margin(capital, leverage, exit_p),
+                    bt._target_pyramid_add_margin(pos, equity_for_add, exit_p),
+                )
+                if add_size > 1e-9 and add_size >= position_size_min:
                     add_fee = bt._trading_fee_amount(add_size * leverage, exit_p)
                     total_size = pos["size"] + add_size
                     pos["entry_price"] = (pos["entry_price"] * pos["size"] + pyramid_fill * add_size) / total_size
@@ -319,10 +318,10 @@ def _run_trade_trace(
                     pos["entry_fee_paid"] = pos.get("entry_fee_paid", 0.0) + add_fee
                     capital -= add_size + add_fee
 
-            # TP1
-            tp1_pnl_pct = float(bt._exit_value(exit_p, pos, "tp1_pnl_pct"))
+            # TP1 is normally disabled in the current research profile.
             tp1_close_fraction = float(bt._exit_value(exit_p, pos, "tp1_close_fraction"))
-            if (not pos["tp1_done"]) and best_pnl_pct >= tp1_pnl_pct:
+            tp1_pnl_pct = float(bt._exit_value(exit_p, pos, "tp1_pnl_pct"))
+            if tp1_close_fraction > 0.0 and (not pos["tp1_done"]) and best_pnl_pct >= tp1_pnl_pct:
                 tp1_trigger = bt._tp_trigger_price(pos["entry_price"], tp1_pnl_pct, leverage, side)
                 tp1_fill = bt._fill_with_slippage(tp1_trigger, side, False, slippage_pct)
                 close_size = pos["size"] * tp1_close_fraction
@@ -423,13 +422,16 @@ def _run_trade_trace(
                       f"{pnl_pct_net:>+7.1f}% | {pnl_amount:>+7.0f}$ | {pos['hold_bars']:>4}根 | {'反向信号':<8} | {pos.get('pyramids_done',0):>2}")
             positions = []
 
-        target_size = capital * position_fraction * risk_profile["position_fraction_scale"]
-        max_affordable = capital / (1.0 + leverage * taker_fee_rate) if taker_fee_rate > 0 else capital
-        target_size = min(position_size_max, target_size, max_affordable)
+        equity_for_entry = bt._portfolio_equity(capital, positions, bar["close"], leverage)
+        target_size = min(
+            bt._target_initial_margin(equity_for_entry, exit_p),
+            bt._max_affordable_margin(capital, leverage, exit_p),
+        )
         if (
             signal
             and len(positions) < risk_profile["max_concurrent_positions"]
             and capital >= position_size_min
+            and target_size > 1e-9
             and target_size >= position_size_min
             and market_state["atr"] > 0
             and (not positions or bt._signal_side(signal) == bt._position_side(positions[0]))

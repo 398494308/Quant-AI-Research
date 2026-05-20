@@ -11,6 +11,9 @@ from research_v2.strategy_code import (
     FRAMEWORK_TOP_LEVEL_CONSTANTS,
     REQUIRED_FUNCTIONS,
     REQUIRED_TOP_LEVEL_CONSTANTS,
+    build_locked_region_edit_guidance,
+    build_strategy_edit_boundary_card,
+    locked_regions_mentioned_in_text,
 )
 
 # 兼容旧调用：新框架由 strategy_code 按固定 slot 和参数块做硬校验。
@@ -119,7 +122,19 @@ def _markdown_section_bullets(text: str) -> dict[str, list[str]]:
 def _compact_operator_focus_text(text: str) -> str:
     sections = _markdown_section_bullets(text)
     priority_lines = sections.get("优先方向", [])
-    important_terms = ("2025-11", "连续下跌", "连续 bear", "核心短板")
+    important_terms = (
+        "long-only",
+        "long / flat",
+        "short",
+        "震荡",
+        "上涨",
+        "高置信",
+        "主线",
+        "2025-11",
+        "连续下跌",
+        "连续 bear",
+        "核心短板",
+    )
     lines: list[str] = []
     for line in priority_lines:
         if any(term in line for term in important_terms) and line not in lines:
@@ -145,7 +160,7 @@ def _compact_champion_review_text(text: str) -> str:
         if "champion_code_hash" not in line.lower()
     ]
     lines = _model_visible_lines(lines)
-    return _limit_compact_lines(lines, max_lines=3, max_chars=320)
+    return _limit_compact_lines(lines, max_lines=5, max_chars=700)
 
 
 def _field_mapping(text: str) -> dict[str, str]:
@@ -251,6 +266,42 @@ def _novelty_proof_rule() -> str:
     return "先写上一版被什么证据否掉，再写本轮为什么继续或转向，最后写这次换了哪一层真实触达路径或关键规则链。"
 
 
+def _locked_region_translation_block(
+    *,
+    compact: bool = False,
+    region_text: str = "",
+) -> str:
+    if region_text.strip():
+        regions = locked_regions_mentioned_in_text(region_text)
+        if not regions:
+            return ""
+    else:
+        regions = (
+            "_trend_quality_long",
+            "_trend_followthrough_long",
+            "_flow_entry_ok",
+            "_build_signal_context",
+            "_strategy_core",
+        ) if compact else None
+    guidance = build_locked_region_edit_guidance(regions)
+    return (
+        "锁区想法翻译规则：\n"
+        "- 如果 hypothesis / change_plan 点名锁区 helper，必须同时写出至少一个对应的可改落点；不要把锁区 helper 当成直接行动目标。\n"
+        "- 典型写法是“目标在 `_trend_quality_long()`，落码改 `_slot_long_context()` / `FACTOR_SLOT_PARAMS`”，不能只写“修改 `_trend_quality_long()`”。\n"
+        f"{guidance}"
+    )
+
+
+def _boundary_card_block(*, region_text: str = "") -> str:
+    if region_text.strip():
+        regions = locked_regions_mentioned_in_text(region_text)
+        if not regions:
+            return ""
+    else:
+        regions = None
+    return build_strategy_edit_boundary_card(regions)
+
+
 # ==================== Prompt 组装 ====================
 
 
@@ -260,8 +311,12 @@ def build_strategy_agents_instructions() -> str:
 项目目标：
 - 用 OKX 数据研究一套 BTC-USDT-SWAP 20x 高弹性趋势捕获策略；允许较大波动，但不能靠日期特判、路径硬编码或伪优化刷分。
 - `15m` 是唯一事实源，`1h + 4h` 只是由 `15m` 聚合的确认层；突破/跌破除了成交量，也要结合方向流量代理。
-- 目标不是做平滑净值，而是更早跟上 BTC 的主要上涨/下跌，并在趋势失效时更快退出或反手。
-- 当前阶段优先研究 `train/val` 稳定性，而不是把某一段 Sharpe 或收益单独做热；默认先看主评分短板、漏斗、有效活跃度和持仓覆盖，再决定改哪条路径。
+- 当前阶段目标不是做平滑净值，而是更早跟上 BTC 的主要上涨；下跌阶段优先空仓、降风险或安全退出。
+- 当前阶段优先研究 `train/val` 稳定性，而不是把某一段 Sharpe 或收益单独做热；默认先看主评分短板、漏斗、持仓覆盖和惩罚项，再决定改哪条路径。
+- 当前策略画像是阶段性 `long-only / flat`：优先研究震荡或低趋势环境里能抓住向上释放、回调再上行的 long 路径；short 入口权限暂时关闭。
+- 当前 long-only 由运行器 gate 执行；val 与 train+val 的 short 非加仓开仓数都必须为 0。只要出现 short 新开仓，候选不能晋级，不要把它当软建议。
+- 保留 short 退出和风控代码只是为了处理历史或异常持仓安全，不代表可以新增、放宽或恢复 short 入场。
+- 仓位规则是固定执行层，不是研究自由度：BTC 20 倍保证金口径，首仓使用当前账户净值的 10% 保证金；每次加仓新增当时账户净值的 5% 保证金；加仓仍是同一笔 trade 的 position adjustment，不新建独立仓位；半退关闭，只能由止损、趋势失效、追踪、时间退出或其它完整退出信号一次性离场。不要通过调仓位比例、最小仓位、最大仓位、并发仓数、加仓比例或半退比例来优化结果。
 
 工作区文件职责：
 - `src/strategy_macd_aggressive.py`：唯一允许修改的策略文件，包含入场参数 `PARAMS` 与退出参数 `EXIT_PARAMS`。
@@ -275,7 +330,8 @@ def build_strategy_agents_instructions() -> str:
 - 先想再写，先看历史再下手。
 - 当前运行环境约 `2 核 8G`；不要假设可以做大网格搜索、超长额外回测或重型试错。
 - 不要 hard code，不要堆屎。
-- 最近结构化失败证据、实时评分拆解和真实漏斗优先级最高；不要被静态弱侧、旧 champion 缺陷或上一轮叙事锚定。
+- 最近结构化失败证据、实时评分拆解和真实漏斗优先级最高；不要被静态 capture 弱项、旧 champion 缺陷或上一轮叙事锚定。
+- long-only 阶段不把 short/bear capture 当成可优化目标；只检查 short 是否仍为 0，以及 long 是否能在震荡或低趋势环境抓住向上释放。
 - 每轮只验证一个可证伪假设；改动要能映射到真实交易路径变化，而不是只制造源码 diff。
 - 当前策略已经改成固定框架 + 固定因子槽；主框架不能改，只能在既有参数、开放退出参数、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体里表达假设。
 - 因子槽接近满复杂度时，先删旧、并旧、替换旧；新增或启用因子前，必须说明被替换的是哪条旧条件或为什么不需要增加复杂度。
@@ -291,10 +347,12 @@ def build_strategy_agents_instructions() -> str:
 源码护栏：
 - `src/strategy_macd_aggressive.py` 现在是硬锁框架：`_strategy_core()` 编排、候选生成顺序、slot 名称/数量/签名、`strategy()` / `strategy_decision()` 入口都不能改。
 - 允许修改的区域只有：`PARAMS` 既有 key 的值、开放的 `EXIT_PARAMS` 值、`FACTOR_SLOT_PARAMS` 中既有 slot 的数值、固定 `_slot_*()` 函数体。
+{_boundary_card_block()}
 - 你不需要再自报 `edited_regions`；系统会根据真实 diff 自动归类 region / family，并据此做重复探索与结构诊断。
 - 必须保留这些符号，不允许删除、改名或合并回旧结构：{_required_symbol_text()}。
 - 不允许新增 `PARAMS` 键、`EXIT_PARAMS` 键、slot 名称、top-level 常量或 helper；需要新因子时只能放进现有 `_slot_*()` 槽。
-- `EXIT_PARAMS` 中允许调止损、止盈、保本、追踪、持仓时间、趋势失效退出、`position_fraction`、`max_concurrent_positions`、`pyramid_trigger_pnl`、`pyramid_adx_min`；禁止修改 `leverage`、`position_size_min`、`position_size_max`、`pyramid_enabled`、`pyramid_max_times`、`pyramid_size_ratio`。
+- `EXIT_PARAMS` 中允许调止损、止盈、保本、追踪、持仓时间、趋势失效退出、`pyramid_trigger_pnl`、`pyramid_adx_min`；禁止修改 `leverage`、`position_fraction`、`position_size_min`、`position_size_max`、`max_concurrent_positions`、`pyramid_enabled`、`pyramid_max_times`、`pyramid_size_ratio`、`tp1_close_fraction`、`breakout_tp1_close_fraction`、`short_breakdown_tp1_close_fraction`、`short_trend_tp1_close_fraction`。
+- 仓位规则固定为 20 倍 BTC 保证金口径：首仓投入当前账户净值的 10% 保证金；每次加仓新增当时账户净值的 5% 保证金，例如本金 10 首仓 1.0，第一次加仓再加 0.5；若净值涨到 20，下一次加仓再加 1.0。加仓次数执行层不设固定上限，但只允许通过 `pyramid_trigger_pnl` 和 `pyramid_adx_min` 等信号条件控制；半退固定关闭，只允许完整退出。
 - 不要引入网络、文件写入、随机数、外部依赖，也不要做无关重构、批量改名或大面积格式化。
 - 不要 hard code 针对单个日期、窗口、行情段或历史结果表的特判。
 """
@@ -308,7 +366,16 @@ def build_strategy_planner_system_prompt() -> str:
 - 先复盘最近结构化失败证据，再决定 round brief；不要先替当前方向辩护。
 - 你只能产出 round brief，不要直接编辑文件。
 - 除 `candidate_id` 与 `change_tags` 外，其余说明字段必须使用简体中文。
+- 策略默认画像是阶段性 `long-only / flat` BTC 上涨捕获器，不是多空均衡器；目标是在震荡或低趋势环境里识别向上释放、EMA 区域回踩再站上、趋势二次加速，并在趋势仍有效时拿住 long。
+- 当前主线是价格结构优先，ADX/CHOP/ATR、成交量与 flow 用作环境和质量过滤，MACD 只做后置确认；不要把研究退回到 MACD 单因子或固定 clean trend 段追分。
+- `行情标签诊断` 是回测后的解释层，不进评分、不做 gate，也不是策略可学习标签；它把 train/val 按主升浪、快速拉升、可交易震荡上行、震荡、回调等行情分类，用来定位策略在哪类行情错过机会或错误参与。test 标签只供人工只读观察。
+- long-only 若在本轮运行提示中启用，就是硬 gate，不是建议。short 入口暂时关闭。
+- long-only 阶段不要规划、讨论或优化 short capture；short 只作为“必须没有新开仓”的安全检查项。
+- 默认用中到大步长探索：优先改变真实交易路径、slot 层、choke point、规则链或最终放行层；不要只在旧阈值附近小幅挪动。
+- 若最近出现 `behavioral_noop`、失败核重复或同一方向高热，本轮必须先删旧、并旧或替换旧条件，再换一条能触达真实交易的路径。
+- 如果想法点名锁区 helper，`change_plan` 必须同时指向对应的 `_slot_*()`、`PARAMS`、`EXIT_PARAMS` 或 `FACTOR_SLOT_PARAMS` 可改空间；只写“改 `_trend_quality_long()` / `_strategy_core()`”会被系统判为非法 brief。
 - 不允许把 `blocked` / `no_edit` / `no_change` / `sandbox_blocked` / “未执行代码改动” 这类占位说明当成合法提交结果。
+{_boundary_card_block()}
 {_text_only_output_contract()}
 {_single_strategy_file_scope_rule()}
 {_missing_memory_is_not_no_edit_rule()}
@@ -321,6 +388,7 @@ def build_strategy_edit_worker_system_prompt() -> str:
 你当前是短生命周期 `edit_worker`，不是持久研究 planner。
 - 不要重新做全量历史研究，不要重新定义本轮方向。
 - 只根据当前提示里的 round brief，直接修改 `src/strategy_macd_aggressive.py`。
+- 如果 brief 点名锁区 helper，不要直接改锁区；按锁区翻译规则落到对应 `_slot_*()`、`PARAMS`、`EXIT_PARAMS` 或 `FACTOR_SLOT_PARAMS`。
 - {_single_strategy_file_scope_rule()}
 - 完成编辑后只回复 `EDIT_DONE`。
 - 禁止输出 JSON、markdown、解释、计划或源码。
@@ -335,6 +403,7 @@ def build_strategy_repair_worker_system_prompt() -> str:
 - 不要重新做全量历史研究，不要重新定义本轮方向。
 - 只根据当前提示里的 repair 指令修技术错误、校验错误或 no-edit 问题，直接修改 `src/strategy_macd_aggressive.py`。
 - 不要重写研究方向，不要把 repair 变成新一轮探索。
+- 如果错误提示里出现 locked / blocked region，优先把改动迁回对应 `_slot_*()`、`PARAMS`、`EXIT_PARAMS` 或 `FACTOR_SLOT_PARAMS`，不要放开主框架。
 - {_single_strategy_file_scope_rule()}
 - 完成编辑后只回复 `EDIT_DONE`。
 - 禁止输出 JSON、markdown、解释、计划或源码。
@@ -375,7 +444,11 @@ def _safe_metric(metrics: dict[str, Any] | None, key: str) -> float:
         return 0.0
 
 
-def _side_balance_diagnostic(reference_metrics: dict[str, Any] | None) -> str:
+def _side_balance_diagnostic(
+    reference_metrics: dict[str, Any] | None,
+    *,
+    enforce_long_only_gate: bool = False,
+) -> str:
     bull = _safe_metric(reference_metrics, "validation_bull_capture_score")
     bear = _safe_metric(reference_metrics, "validation_bear_capture_score")
     hit_rate = _safe_metric(reference_metrics, "validation_segment_hit_rate")
@@ -383,11 +456,19 @@ def _side_balance_diagnostic(reference_metrics: dict[str, Any] | None) -> str:
     if gap < 0.08 and hit_rate >= 0.20:
         return ""
 
+    if enforce_long_only_gate:
+        return (
+            "方向表现诊断（long-only 口径，事实提示，不是方向指令）:\n"
+            f"- 当前主参考 val 多头抓取 / 下行段表现 = {bull:.2f} / {bear:.2f}，命中率 = {hit_rate:.0%}。\n"
+            "- 下行段表现弱只用于解释风险和回撤，不是恢复 short 的理由。\n"
+            "- 本轮先看主评分短板、long 真实漏斗、持仓覆盖和 28 天收益块，再决定要改哪条 long 交易路径。"
+        )
+
     return (
         "多空结构诊断（事实提示，不是方向指令）:\n"
         f"- 当前主参考 val 多头/空头捕获 = {bull:.2f} / {bear:.2f}，命中率 = {hit_rate:.0%}。\n"
         "- 捕获落差只能说明需要检查对应漏斗和收益块，不能直接推出本轮必须改 long、short 或 mixed。\n"
-        "- 先看主评分短板、真实漏斗、交易活跃度和持仓覆盖，再决定本轮最该改哪条交易路径。"
+        "- 先看主评分短板、真实漏斗、持仓覆盖和惩罚项，再决定本轮最该改哪条交易路径。"
     )
 
 
@@ -399,7 +480,7 @@ def build_strategy_research_prompt(
     reference_metrics: dict[str, Any] | None = None,
     benchmark_label: str = "champion",
     current_base_role: str = "champion",
-    score_regime: str = "robust_block_v28_activity_drawdown_allowance",
+    score_regime: str = "robust_block_v29_return_holding_penalty",
     current_complexity_headroom_text: str = "",
     structural_audit_trigger_text: str = "",
     session_mode: str = "resume",
@@ -419,29 +500,26 @@ def build_strategy_research_prompt(
     min_validation_block_floor: float = -0.10,
     max_validation_block_failures: int = 3,
     min_validation_closed_trades: int = 0,
-    min_train_monthly_entries: float = 5.0,
-    min_validation_monthly_entries: float = 5.0,
+    min_train_monthly_entries: float = 0.0,
+    min_validation_monthly_entries: float = 0.0,
     min_train_position_exposure_pct: float = 5.0,
     min_validation_position_exposure_pct: float = 5.0,
+    enforce_long_only_gate: bool = False,
     max_dev_validation_gap: float = 0.30,
     trade_activity_train_range_low: int = 180,
     trade_activity_train_range_high: int = 270,
     trade_activity_validation_range_low: int = 120,
     trade_activity_validation_range_high: int = 180,
-    activity_multiplier_floor_monthly_entries: float = 5.0,
-    activity_multiplier_low_monthly_entries: float = 7.0,
-    activity_multiplier_preferred_monthly_entries: float = 10.0,
-    activity_multiplier_full_monthly_entries: float = 15.0,
-    activity_multiplier_floor_value: float = 0.10,
-    activity_multiplier_low_value: float = 0.35,
-    activity_multiplier_preferred_value: float = 0.70,
     exposure_multiplier_full_pct: float = 16.0,
 ) -> str:
     _ = (
         current_complexity_headroom_text,
         min_validation_closed_trades,
     )
-    side_balance_diagnostic = _side_balance_diagnostic(reference_metrics)
+    side_balance_diagnostic = _side_balance_diagnostic(
+        reference_metrics,
+        enforce_long_only_gate=enforce_long_only_gate,
+    )
     side_balance_block = f"\n{side_balance_diagnostic}\n" if side_balance_diagnostic else ""
     structural_audit_block = ""
     if structural_audit_trigger_text.strip():
@@ -466,6 +544,12 @@ def build_strategy_research_prompt(
         "- 本轮是结构自检修复例外：仍要过 `gate`，但通过基础安全门后跳过 `promotion_score` 比较；这不是普通低分替换通道。"
         if structural_audit_block
         else "- 晋升要求是 `gate` 通过，且 `promotion_score` 严格高于当前 active reference；已取消的是额外晋级边际，不是“低分也可替换”"
+    )
+    long_only_gate_line = (
+        "long-only 是硬 gate：val short 非加仓开仓数必须为 `0`，train+val short 非加仓开仓数也必须为 `0`；"
+        "只要出现 short 新开仓，候选不能晋级。short 退出和风控代码可以保留，但不能恢复 short 入场。"
+        if enforce_long_only_gate
+        else "long-only 当前只做方向提醒；如果启用对应 gate，运行提示会明确要求 short 非加仓开仓数为 0。"
     )
     bootstrap_excerpt = _bootstrap_journal_excerpt(journal_summary, max_lines=10, max_chars=900)
     bootstrap_block = ""
@@ -509,18 +593,23 @@ def build_strategy_research_prompt(
 - session 状态：`{session_label}`；先复盘最近结构化失败证据，再决定继续还是转向。
 - 围绕一个可证伪假设先写 round brief，交给后续 edit worker 落码。
 - 本轮目标是改变真实交易路径，不是只制造源码 diff；若 smoke 行为完全不变，会被系统按 `behavioral_noop` 拒收。
-- 高优先级软约束：默认避免只做近邻阈值微调；如果确实需要小步长参数修正，必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。参数小改不会被技术拒收，但没有行为变化仍会被 `behavioral_noop` 拒收。
+- 高优先级软约束：默认用中到大步长探索，优先改变真实交易路径、slot 层、choke point、规则链或最终放行层；如果确实需要小步长参数修正，必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。参数小改不会被技术拒收，但没有行为变化仍会被 `behavioral_noop` 拒收。
 {promotion_rule_line}
-- `promotion_score` 现在以 v28 有效活跃度调整时间块主分为核心：train/val 各自用 28 天收益块的 mean/median/P25 聚合，min 只做诊断；正收益会按有效活跃度打倍率，负收益不打折。正向 buy&hold 稳健分会按 0.25 形成轻量基准扣分。回撤惩罚只扣超过有效活跃度容忍线的部分，严重回撤仍重罚；最终再减去轻量鲁棒性软惩罚。
-- `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率。不要再为固定 clean 单边段过拟合；优先让多数时间块稳定，同时用 regime scorecard 判断动量在哪些环境该开、该缩、该停。
-- 策略画像提醒：默认可以是 `long / flat`；`short` 不是必须对称参与的主引擎，只应作为高置信辅助。short 占比、多空 capture 只做诊断，不进入评分；若 short 无法证明能改善 train/val 稳健收益、回撤或 val 弱块，允许主动收窄 short，甚至阶段性接近 long-only。
+- `promotion_score = return_score + holding_time_score - penalty_score`。`return_score` 是主分：train/val 各自用 28 天收益块的 mean/median/P25 聚合，min 只做诊断；再减去正向 buy&hold 稳健分的 0.25 作为轻量基准扣分。
+- `return_score = robust_time_score - benchmark_hurdle_score`。
+- `holding_time_score` 是辅助分，只看持仓覆盖是否足以参与行情：低于覆盖下限会扣分，达到有效覆盖后只给小额加分，过度接近 buy-and-hold 会轻扣。开仓数和月频只做诊断，不进入主分，不要刷交易次数。
+- `penalty_score` 是回撤、鲁棒性、手续费拖累和过拟合软惩罚的加总。回撤惩罚按持仓覆盖给少量容忍，严重回撤仍重罚。
+- 鲁棒性软惩罚只复用已有 train/val 稳健收益块和 `train/val` Ulcer，不额外回测。
+- `capture_score` / `capture_core` 只作为低优先级诊断，不进入主评分，也不再给收益做倍率。不要围绕固定 clean 单边段或 bull/bear capture 追分；优先让多数时间块稳定，同时用 regime scorecard 判断动量在哪些环境该开、该缩、该停。
+- 策略画像提醒：当前阶段是 `long-only / flat`；研究重点是让 long 在震荡或低趋势环境里抓住向上释放。{long_only_gate_line} capture 仍只做诊断，不进入评分；不要因为 bear/downside 表现弱就恢复、放宽或优化 short。
 - Regime scorecard 只用已有数据：ADX/CHOP/ATR、flow_imbalance、Fear & Greed 和价格自身波动。它是解释工具，不是硬 gate；不能使用 holdout 或部署判断信息。
-- Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。低活跃度是硬 gate：train/val 月非加仓开仓都必须 >= `{min_train_monthly_entries:.1f}`/`{min_validation_monthly_entries:.1f}`，持仓覆盖都必须 >= `{min_train_position_exposure_pct:.1f}%`/`{min_validation_position_exposure_pct:.1f}%`。过 gate 后，正收益还会继续按月频和持仓覆盖打倍率；单纯刷开仓数但大部分时间空仓仍会显著折扣正收益。月频 `{activity_multiplier_floor_monthly_entries:.1f}`/`{activity_multiplier_low_monthly_entries:.1f}`/`{activity_multiplier_preferred_monthly_entries:.1f}`/`{activity_multiplier_full_monthly_entries:.1f}` 对应开仓倍率约 `{activity_multiplier_floor_value:.2f}`/`{activity_multiplier_low_value:.2f}`/`{activity_multiplier_preferred_value:.2f}`/`1.00`；持仓覆盖率约 `{exposure_multiplier_full_pct:.1f}%` 起给满覆盖倍率。
-- 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓不占这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
-- `capture_score` 只使用 clean trend segments：先用中度放开的趋势段候选，再过滤掉趋势效率或方向一致性不足的震荡段；`train/val` 连续趋势抓取分采用“段等权均分 50% + 原权重均分 50%”的混合方式。
+- `行情标签诊断` 只解释 train/val 回测后的表现：主升浪看有没有拿住，可交易震荡上行看有没有参与，普通震荡/高波动乱震/回调看有没有错误参与。它不进入 `promotion_score`、gate 或候选晋升；不要为了某个标签硬编码日期或历史段。
+- Sharpe 只作为人工筛选和通知展示，不进入主评分，也不是 planner 优化目标。硬 gate 只要求最低持仓覆盖：train/val 持仓覆盖都必须 >= `{min_train_position_exposure_pct:.1f}%`/`{min_validation_position_exposure_pct:.1f}%`；月非加仓开仓数和月频都只做诊断，当前 gate 阈值为 `{min_train_monthly_entries:.1f}`/`{min_validation_monthly_entries:.1f}`。持仓覆盖率约 `{exposure_multiplier_full_pct:.1f}%` 起视为充分参与行情。
+- 回测执行层仍保留多空仓位处理能力用于安全退出，但本阶段策略入口只允许 long；`max_concurrent_positions` 固定为 `1`，首仓是当前净值 10% 保证金，每次加仓是当前净值 5% 保证金；加仓不新建独立 position，只提高同一笔 trade 的保证金规模。仓位大小、加仓比例和半退出不作为优化自由度，回撤控制交给评分和退出逻辑。
+- capture 明细只用于解释“有没有抓到明显趋势”，不作为 planner 的默认施力层；过拟合保护优先看稳健收益块分布、正收益集中度和覆盖率。
 - Fear & Greed 情绪数据已作为可选 `market_state` 输入暴露给策略，可读取 `sentiment`、`fear_greed_value`、`fear_greed_ema7`、`fear_greed_delta1/3/7`；它不进入评分或 gate，不是必须使用的信号。
 - 鲁棒性只做轻量软惩罚：用已有 train/val 稳健收益块的 median/IQR/std 比较分布是否离谱，再轻查 `train/val` Ulcer 比；不额外回测。
-- `train` 滚动窗口均值/中位数只做诊断；严重过拟合集中度仍保留为 gate；二者都不直接进入 `promotion_score` 主公式。
+- `train` 滚动窗口均值/中位数只做诊断；严重过拟合集中度仍保留为 gate，但只看正收益集中度和覆盖率，不再因为 capture 落差或多空 capture 偏科直接淘汰；二者都不直接进入 `promotion_score` 主公式。
 
 当前 active reference 角色：`{current_base_role}`
 当前 {benchmark_label} 参考晋级分：{previous_best_score:.2f}
@@ -540,15 +629,18 @@ def build_strategy_research_prompt(
 本轮执行框架：
 - 先判断上一版为什么失败，再决定继续还是转向；不要只因为某个诊断字段仍弱，就留在旧路线。
 - 若 `primary_direction` 已高热，本轮至少要换失败层、关键规则链或真实触达路径，不要只换标签。
-- 新增 path 不等于新增交易；长侧重点看 `long_signal_path_ok -> long_final_veto_clear -> _trend_followthrough_long()`，空侧重点看 `breakdown_ready -> short_final_veto_clear -> _trend_followthrough_short()`。
-- 如果本轮选择扩大 short 或让 short 更频繁，必须说明它如何改善整体 train/val 稳健收益、回撤或 val 弱块；不要因为 bear capture 弱就机械增加空头。
+- 新增 path 不等于新增交易；当前只研究长侧，重点看 `long_signal_path_ok -> long_final_veto_clear -> _trend_followthrough_long()`。
+- 本阶段不要扩大 short、放宽 short context、恢复 short 入口、延长 short 持仓，或围绕 short capture 追分；short 相关代码只允许作为退出/风控安全层保留。
 - 如果主要改 `_trend_followthrough_ok()`、`_trend_quality_ok()` 或 `_flow_confirmation_ok()`，必须确认现有 slot 和候选路径会触达；否则优先改对应 `_slot_*()` 或参数。
+- 如果研究想法点名锁区 helper，必须把行动落点翻译到可改空间：
+{_boundary_card_block()}
 - 若最近连续 `behavioral_noop` 或结果盆地重复，默认必须放大步长：优先换方向簇、换 choke point 或换最终放行链。
 - 若漏斗显示一侧长期 0 交易、outer_context 几乎全死，或 path 能过但 final_veto 基本全死，可以考虑结构性删减轮。
 - 读不到 `{direction_board_path}`、`{duplicate_watchlist_path}`、`{failure_wiki_path}` 或 `{history_package_path}` 不是合法 no-edit 理由；当前源码仍是硬事实源。
 
 当前口径的 gate / 评分提醒：
-- 有效活跃度先过硬 gate：train/val 月非加仓开仓都必须 >= `{min_train_monthly_entries:.1f}`/`{min_validation_monthly_entries:.1f}`，持仓覆盖都必须 >= `{min_train_position_exposure_pct:.1f}%`/`{min_validation_position_exposure_pct:.1f}%`；目标仍约 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`，也就是约 10-15 笔/月，同时要有足够持仓覆盖。趋势机会覆盖短缺只做诊断，不要为了刷交易数制造无收益短交易。
+- 持仓覆盖先过硬 gate：train/val 持仓覆盖都必须 >= `{min_train_position_exposure_pct:.1f}%`/`{min_validation_position_exposure_pct:.1f}%`；月非加仓开仓频率只用于诊断交易形态，目标仍可参考 `train {trade_activity_train_range_low}-{trade_activity_train_range_high} / val {trade_activity_validation_range_low}-{trade_activity_validation_range_high}`，但不要为了刷交易数制造无收益短交易。
+- {long_only_gate_line}
 - capture、val趋势命中率、多空捕获、val趋势分块只做诊断，不是硬 gate
 {promotion_reminder_line}
 - 手续费拖累 <= 11.5%
@@ -560,7 +652,7 @@ def build_strategy_research_prompt(
 {build_candidate_response_format_instructions()}
 - 主进程还会把这份 `draft` 交给 `reviewer` 审稿；若 reviewer 打回，本轮必须先吸收反馈再重写。
 - `primary_direction` 只写本轮主动施力方向；`change_plan` 必须具体到规则块、阈值或最终放行链。
-- 默认优先找更稳的泛化形态：先改善 `val` 最差块、`train/val` 分布离群度和交易活跃度，再决定改哪条路径；若一个方案主要让强的一侧更强，却不能改善这些稳定性指标，默认降权。
+- 默认优先找更稳的泛化形态：先改善 `val` 最差块、`train/val` 分布离群度、持仓覆盖和惩罚项，再决定改哪条路径；若一个方案主要让强的一侧更强，却不能改善这些稳定性指标，默认降权。
 - 如果本轮主要改 `EXIT_PARAMS` 里的连续数值，可以用 `exit_range_scan` 给一个 3 点小范围；系统只在预筛阶段做这次轻量扫描。
 - `novelty_proof` 不是自我辩护。{_novelty_proof_rule()}
 - 不允许把“未执行代码改动”“blocked”“no_edit”“no_change”这类占位回复当成完成。
@@ -620,11 +712,13 @@ def build_strategy_reviewer_prompt(
 1. 先判断它的 `primary_direction` 是否命中当前方向账本里的高热方向。
 2. 如果没有命中高热方向，默认允许首次或低热尝试进入落码，不要因为“解释不够漂亮”就打回。
 3. `PASS` 前确认 draft 已说明它预计新增、删除或迁移哪类真实交易；若没有交易路径变化说明，应判 `REVISE`。
-4. 如果 draft 主要是放宽 `short_context`、增加 short 入口、延长 short exit 或扩大 trailing，但没有说明它如何改善整体 train/val 稳健收益、回撤或 val 弱块，只是因为 bear capture 弱就加空头，应判 `REVISE`。
-5. 如果命中高热方向，重点检查它是否明确换了失败层、关键规则链或真实触达路径。
-6. 如果它仍只是换措辞、换标签或局部阈值，没有明确换层，应判 `REVISE`。
-7. `REVISE` 时不要替 planner 写新方案；只指出它必须换哪一层。
-8. 若证据不足，优先回看摘要来源；不要因为 draft 自己写了 `novelty_proof` 就直接放行。
+4. 如果 draft 主要是放宽 `short_context`、增加 short 入口、恢复 short 入场、延长 short exit 或扩大 short trailing，应判 `REVISE`；当前阶段 short 只保留退出和风控安全层。
+5. 如果 draft 点名锁区 helper，却没有说明要落到可改 slot 或参数空间，应判 `REVISE`；只指出它必须补齐可改落点，不要替它写具体方案。
+{_boundary_card_block(region_text=round_brief_text)}
+6. 如果命中高热方向，重点检查它是否明确换了失败层、关键规则链或真实触达路径。
+7. 如果它仍只是换措辞、换标签或局部阈值，没有明确换层，应判 `REVISE`。
+8. `REVISE` 时不要替 planner 写新方案；只指出它必须换哪一层。
+9. 若证据不足，优先回看摘要来源；不要因为 draft 自己写了 `novelty_proof` 就直接放行。
 
 输出要求：
 {build_reviewer_response_format_instructions()}
@@ -683,6 +777,8 @@ def build_strategy_edit_worker_prompt(
 - 只修改 `src/strategy_macd_aggressive.py`。
 - 先读取当前源码，再按上面的 brief 落一版真实代码改动。
 - 策略主框架已硬锁；只能改 `PARAMS`、开放 `EXIT_PARAMS`、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体。
+- 若 brief 里点名了锁区 helper，按下表翻译成可改空间，不要直接改锁区：
+{_boundary_card_block()}
 - 优先改已经存在的命名规则块、阈值和最终放行链；不要为了造 diff 新写一套近似逻辑。
 - 如果你判断 brief 指向的 choke point 根本不在当前代码路径上，应在同一主题内改成能真实触达交易路径的实现，但不要改写研究方向本身。
 - 单轮改动预算只是参考，不是硬 gate：典型情况下优先控制为小 diff，少量新增、少量删除、少量参数或条件调整；超出这个范围必须是为了打通真实路径或删除旧冗余。
@@ -805,6 +901,8 @@ def build_strategy_round_brief_repair_prompt(
 补正规则：
 - 不要输出随笔、自然段解释、JSON 或 markdown。
 - 必须输出完整字段头，并确保 `primary_direction`、`hypothesis`、`change_plan`、`novelty_proof`、`change_tags` 非空。
+- 如果上一版点名锁区 helper，必须在 `change_plan` 中补出对应可改落点；直接写锁区会再次被判非法。
+{_boundary_card_block()}
 - `candidate_id` 可以保留原值或重写。
 - `expected_effects` 与 `core_factors` 可以为空，但如果填写，必须和本轮方向一致。
 - 不要把“未读到文件”“blocked”“no_edit”“未执行代码改动”当成 round brief 内容。
@@ -930,6 +1028,8 @@ def build_strategy_runtime_repair_prompt(
 - 若报错涉及 `UnboundLocalError` / `NameError` / 条件变量缺失，优先恢复缺失变量定义，或把该变量的所有引用同步替换到新的等价变量；禁止只修一处而留下半残引用。
 - 除非原标签明显不准确，否则尽量保持 `primary_direction`、`change_tags`、`edited_regions` 稳定。
 - 只能修允许区域；不要借修复机会改 `_strategy_core()`、候选选择、slot 名称或入口签名。
+- 若错误显示修改了 locked / blocked region，必须把改动迁回映射的可改落点：
+{_boundary_card_block()}
 - 不要引入网络、文件、随机数、外部依赖。
 - 不要趁修复机会重写无关逻辑，也不要 hard code 针对单个窗口或单段行情的特判。
 - 修复后的代码仍必须保持简洁、结构化、可读，避免补丁式堆条件。
@@ -995,6 +1095,8 @@ def build_strategy_exploration_repair_prompt(
 - 优先切到不同方向簇；若留在同簇，至少换外层 choke point、最终放行链、目标侧或核心规则块中的一项。
 - 若上一版是 `behavioral_noop`，默认说明局部假设没有触达真实行为层；不要沿用原 hypothesis / change_plan 只换表述。
 - 重生后的候选必须预计改变 smoke 窗口实际交易路径；如果上一版只是 helper / followthrough 变化但没有触发新交易，优先改对应 `_slot_*()`、`FACTOR_SLOT_PARAMS` 或参数阈值。
+- 如果上一版把锁区 helper 当成行动目标，重生时必须先翻译到可改空间：
+{_boundary_card_block()}
 - 若附加反馈显示漏斗堵点仍在 `outer_context` 或 `final_veto`，允许直接做结构性删减轮：`remove_dead_gate`、`merge_veto`、`widen_outer_context`。
 - 动手前先看 `wiki/last_rejected_snapshot.md` 与 `wiki/reviewer_summary_card.md`；提交前再核对 `wiki/duplicate_watchlist.md` 与 `wiki/failure_wiki.md`。
 - 不要引入网络、文件、随机数、外部依赖；代码仍必须简洁、结构化、可读。

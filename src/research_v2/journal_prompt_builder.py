@@ -130,13 +130,14 @@ def build_journal_prompt_summary_impl(
                 )
                 if prompt_compact:
                     weak_side = str(operating_metrics.get("weak_side", "")).strip() or "-"
+                    focus_note = f"诊断弱项={weak_side}" if weak_side != "-" else "关注=评分短板/long漏斗"
                     parts.append(
                         "当前 stage 运营摘记: "
                         f"accept={mod._score_value(operating_metrics.get('accept_rate')):.0%} | "
                         f"noop={mod._score_value(operating_metrics.get('behavioral_noop_rate')):.0%} | "
                         f"explore_block={mod._score_value(operating_metrics.get('exploration_blocked_rate')):.0%} | "
                         f"smoke->full={mod._score_value(operating_metrics.get('smoke_to_full_eval_rate')):.0%} | "
-                        f"弱侧={weak_side}"
+                        f"{focus_note}"
                     )
                 else:
                     overfit_lines = mod._overfit_risk_board(board_entries, limit=min(8, limit))

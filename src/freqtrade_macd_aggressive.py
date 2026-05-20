@@ -2,7 +2,7 @@
 
 这层的目标不是复刻自研回测器的全部出场细节，而是：
 1. 复用主策略的单一参数源，避免第二份参数长期漂移。
-2. 为 freqtrade / 对比工具提供尽量一致的入场信号形态。
+2. 为 freqtrade / 对比工具提供尽量一致的 long 入场信号形态。
 """
 
 from __future__ import annotations
@@ -336,11 +336,8 @@ def apply_entry_logic(dataframe: DataFrame) -> DataFrame:
     signal_series = pd.Series(signals, index=frame.index, dtype="object")
     path_tag_series = pd.Series(path_tags, index=frame.index, dtype="object")
     long_mask = signal_series == "long_pullback"
-    short_mask = signal_series == "short_breakdown"
     frame.loc[long_mask, "enter_long"] = 1
     frame.loc[long_mask, "enter_tag"] = path_tag_series.loc[long_mask]
-    frame.loc[short_mask, "enter_short"] = 1
-    frame.loc[short_mask, "enter_tag"] = path_tag_series.loc[short_mask]
     return frame
 
 
@@ -450,6 +447,28 @@ def _trade_entry_tag(trade: Trade) -> str:
 
 def _trade_side(trade: Trade) -> str:
     return "short" if getattr(trade, "is_short", False) else "long"
+
+
+def _fractional_stake_target(total_equity: float) -> float:
+    fraction = max(0.0, float(E.get("position_fraction", 0.10)))
+    return _stake_target_from_fraction(total_equity, fraction)
+
+
+def _pyramid_stake_target(total_equity: float) -> float:
+    fraction = max(0.0, float(E.get("pyramid_size_ratio", E.get("position_fraction", 0.10))))
+    return _stake_target_from_fraction(total_equity, fraction)
+
+
+def _stake_target_from_fraction(total_equity: float, fraction: float) -> float:
+    cap = float(E.get("position_size_max", 0.0))
+    target = max(0.0, total_equity) * fraction
+    return min(target, cap) if cap > 0.0 else target
+
+
+def _minimum_stake_floor(min_stake: float | None) -> float:
+    configured_min = max(0.0, float(E.get("position_size_min", 0.0)))
+    broker_min = 0.0 if min_stake is None else max(0.0, float(min_stake))
+    return max(configured_min, broker_min)
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -608,7 +627,7 @@ def _row_to_market_state(row: pd.Series, prev_row: pd.Series | None = None) -> d
 class MacdAggressiveStrategy(IStrategy):
     INTERFACE_VERSION = 3
     timeframe = "15m"
-    can_short = True
+    can_short = False
     minimal_roi = {"0": 999}
     stoploss = -E["stop_max_loss_pct"] / 100.0 / max(E["leverage"], 1)
     leverage_value = E["leverage"]
@@ -618,7 +637,8 @@ class MacdAggressiveStrategy(IStrategy):
     ignore_roi_if_entry_signal = True
     use_custom_stoploss = True
     position_adjustment_enable = True
-    max_entry_position_adjustment = max(0, int(E.get("pyramid_max_times", 0)))
+    _pyramid_max_times = int(E.get("pyramid_max_times", 0))
+    max_entry_position_adjustment = -1 if _pyramid_max_times < 0 else max(0, _pyramid_max_times)
 
     macd_fast = P["macd_fast"]
     macd_slow = P["macd_slow"]
@@ -693,6 +713,29 @@ class MacdAggressiveStrategy(IStrategy):
     def leverage(self, pair, current_time, current_rate, proposed_leverage, max_leverage, entry_tag, side, **kwargs):
         return min(self.leverage_value, max_leverage)
 
+    def _total_stake_equity(self, fallback_available: float = 0.0, include_trade_stake: float = 0.0) -> float:
+        wallets = getattr(self, "wallets", None)
+        if wallets is not None:
+            for method_name in ("get_total_stake_amount", "get_available_stake_amount"):
+                method = getattr(wallets, method_name, None)
+                if callable(method):
+                    try:
+                        value = float(method())
+                    except (TypeError, ValueError):
+                        continue
+                    if value > 0.0:
+                        return value
+            stake_currency = str(getattr(self, "config", {}).get("stake_currency", "") or "")
+            get_total = getattr(wallets, "get_total", None)
+            if stake_currency and callable(get_total):
+                try:
+                    value = float(get_total(stake_currency))
+                except (TypeError, ValueError):
+                    value = 0.0
+                if value > 0.0:
+                    return value
+        return max(0.0, float(fallback_available)) + max(0.0, float(include_trade_stake))
+
     def informative_pairs(self):
         return [
             ("BTC/USDT:USDT", "1h"),
@@ -732,14 +775,16 @@ class MacdAggressiveStrategy(IStrategy):
         **kwargs,
     ) -> float:
         row, prev_row = self._get_pair_context(pair, current_time)
-        if row is None:
-            return proposed_stake
-        market_state = _row_to_market_state(row, prev_row)
-        risk_profile = backtest_module._market_risk_profile(market_state, E)
-        target_stake = min(proposed_stake, max_stake) * risk_profile["position_fraction_scale"]
-        if min_stake is not None:
-            target_stake = max(target_stake, min_stake)
-        return min(target_stake, max_stake)
+        if row is not None:
+            _ = _row_to_market_state(row, prev_row)
+        total_equity = self._total_stake_equity(
+            fallback_available=max(float(max_stake), float(proposed_stake), 0.0),
+        )
+        target_stake = min(_fractional_stake_target(total_equity), max_stake)
+        stake_floor = _minimum_stake_floor(min_stake)
+        if target_stake < stake_floor:
+            return 0.0
+        return max(0.0, target_stake)
 
     def custom_stoploss(
         self,
@@ -866,25 +911,13 @@ class MacdAggressiveStrategy(IStrategy):
         market_state = _row_to_market_state(row, prev_row)
         close_pnl_pct = current_entry_profit * 100.0
 
-        tp1_done = bool(trade.get_custom_data("tp1_done", False))
-        tp1_pnl_pct = float(backtest_module._exit_value(E, pseudo_position, "tp1_pnl_pct"))
-        tp1_close_fraction = float(backtest_module._exit_value(E, pseudo_position, "tp1_close_fraction"))
-        if (
-            not tp1_done
-            and tp1_close_fraction > 0.0
-            and current_exit_profit * 100.0 >= tp1_pnl_pct
-            and trade.stake_amount > 0.0
-        ):
-            return (-trade.stake_amount * tp1_close_fraction, "tp1")
-
-        risk_profile = backtest_module._market_risk_profile(market_state, E)
         pyramids_done = max(0, int(getattr(trade, "nr_of_successful_entries", 1)) - 1)
+        max_pyramid_times = int(E.get("pyramid_max_times", 0))
         side = _trade_side(trade)
         pyramid_allowed = (
-            risk_profile["allow_pyramid"]
-            and int(E.get("pyramid_enabled", 0)) > 0
-            and pyramids_done < int(E.get("pyramid_max_times", 0))
-            and entry_signal in {"long_breakout", "long_pullback", "short_breakdown"}
+            int(E.get("pyramid_enabled", 0)) > 0
+            and (max_pyramid_times < 0 or pyramids_done < max_pyramid_times)
+            and entry_signal in {"long_breakout", "long_pullback"}
             and close_pnl_pct >= float(E.get("pyramid_trigger_pnl", 20.0))
             and market_state["adx"] >= float(E.get("pyramid_adx_min", 30.0))
             and market_state["hourly"] is not None
@@ -902,9 +935,12 @@ class MacdAggressiveStrategy(IStrategy):
         if not pyramid_allowed:
             return None
 
-        add_ratio = float(E.get("pyramid_size_ratio", 0.5))
-        additional_stake = min(max_stake, trade.stake_amount * add_ratio)
-        if min_stake is not None and additional_stake < min_stake:
+        total_equity = self._total_stake_equity(
+            fallback_available=max(float(max_stake), 0.0),
+            include_trade_stake=max(float(trade.stake_amount), 0.0),
+        )
+        additional_stake = min(max_stake, _pyramid_stake_target(total_equity))
+        if additional_stake < _minimum_stake_floor(min_stake):
             return None
         if additional_stake <= 0.0:
             return None

@@ -107,6 +107,9 @@ from research_v2.round_artifacts import (
     update_round_artifact_test_payload,
 )
 from research_v2.strategy_code import (
+    allowed_edit_targets_for_locked_region,
+    build_locked_region_edit_guidance,
+    locked_regions_mentioned_in_text,
     REQUIRED_FUNCTIONS,
     StrategyCandidate,
     StrategyCoreFactor,
@@ -142,7 +145,7 @@ DISCORD_CONFIG = load_discord_config()
 EVAL_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "eval")
 VALIDATION_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "validation")
 TEST_WINDOW_COUNT = sum(1 for window in WINDOWS if window.group == "test")
-SCORE_REGIME = "robust_block_v28_activity_drawdown_allowance"
+SCORE_REGIME = "robust_block_v29_return_holding_penalty"
 MODEL_WORKSPACE_STRATEGY_PATH = Path("src/strategy_macd_aggressive.py")
 PRIMARY_DIRECTION_DOMAINS = frozenset({"long", "short", "mixed", "structure"})
 PLANNER_BRIEF_REQUIRED_FIELDS = ("primary_direction", "hypothesis", "change_plan", "novelty_proof", "change_tags")
@@ -2241,12 +2244,37 @@ def _round_brief_missing_fields(payload: dict[str, Any]) -> tuple[str, ...]:
     return tuple(missing)
 
 
+def _round_brief_locked_region_errors(payload: dict[str, Any]) -> tuple[str, ...]:
+    hypothesis = str(payload.get("hypothesis", "")).strip()
+    change_plan = str(payload.get("change_plan", "")).strip()
+    if not change_plan:
+        return tuple()
+    proposal_text = "\n".join(part for part in (hypothesis, change_plan) if part)
+    locked_regions = locked_regions_mentioned_in_text(proposal_text)
+    if not locked_regions:
+        return tuple()
+    violations: list[str] = []
+    for region_name in locked_regions:
+        targets = allowed_edit_targets_for_locked_region(region_name)
+        if targets and not any(target in change_plan for target in targets):
+            violations.append(region_name)
+    return tuple(violations)
+
+
 def _validate_round_brief_payload(payload: dict[str, Any]) -> None:
     missing_fields = _round_brief_missing_fields(payload)
     if missing_fields:
         raise StrategySourceError(
             "planner round brief missing required fields: "
             + ", ".join(missing_fields)
+        )
+    locked_regions = _round_brief_locked_region_errors(payload)
+    if locked_regions:
+        guidance = build_locked_region_edit_guidance(locked_regions)
+        raise StrategySourceError(
+            "planner round brief points at locked regions without a mapped editable target: "
+            + ", ".join(locked_regions)
+            + ("\neditable targets:\n" + guidance if guidance else "")
         )
     _normalize_primary_direction(str(payload.get("primary_direction", "")).strip())
 
@@ -3350,18 +3378,12 @@ def _build_model_round_brief(
         min_validation_monthly_entries=RUNTIME.gates.min_validation_monthly_entries,
         min_train_position_exposure_pct=RUNTIME.gates.min_train_position_exposure_pct,
         min_validation_position_exposure_pct=RUNTIME.gates.min_validation_position_exposure_pct,
+        enforce_long_only_gate=RUNTIME.gates.enforce_long_only_gate,
         max_dev_validation_gap=RUNTIME.gates.max_dev_validation_gap,
         trade_activity_train_range_low=RUNTIME.scoring.trade_activity_train_range_low,
         trade_activity_train_range_high=RUNTIME.scoring.trade_activity_train_range_high,
         trade_activity_validation_range_low=RUNTIME.scoring.trade_activity_validation_range_low,
         trade_activity_validation_range_high=RUNTIME.scoring.trade_activity_validation_range_high,
-        activity_multiplier_floor_monthly_entries=RUNTIME.scoring.activity_multiplier_floor_monthly_entries,
-        activity_multiplier_low_monthly_entries=RUNTIME.scoring.activity_multiplier_low_monthly_entries,
-        activity_multiplier_preferred_monthly_entries=RUNTIME.scoring.activity_multiplier_preferred_monthly_entries,
-        activity_multiplier_full_monthly_entries=RUNTIME.scoring.activity_multiplier_full_monthly_entries,
-        activity_multiplier_floor_value=RUNTIME.scoring.activity_multiplier_floor_value,
-        activity_multiplier_low_value=RUNTIME.scoring.activity_multiplier_low_value,
-        activity_multiplier_preferred_value=RUNTIME.scoring.activity_multiplier_preferred_value,
         exposure_multiplier_full_pct=RUNTIME.scoring.exposure_multiplier_full_pct,
     )
     round_brief = _request_validated_round_brief(
@@ -3401,23 +3423,32 @@ def _build_edit_worker_evaluation_digest(report: EvaluationReport | None) -> str
     if report is None:
         return ""
     metrics = report.metrics
-    bull = _metric_float(metrics, "validation_bull_capture_score")
-    bear = _metric_float(metrics, "validation_bear_capture_score")
-    hit_rate = _metric_float(metrics, "validation_segment_hit_rate")
+    train_block = _metric_float(metrics, "train_robust_block_score")
+    validation_block = _metric_float(metrics, "validation_robust_block_score")
+    return_score = _metric_float(metrics, "return_score")
+    holding_time_score = _metric_float(metrics, "holding_time_score")
+    penalty_score = _metric_float(metrics, "penalty_score")
+    validation_p25 = _metric_float(metrics, "validation_robust_block_p25_score")
+    validation_min = _metric_float(metrics, "validation_robust_block_min_score")
     weakest_candidates = (
-        ("val趋势捕获", _metric_float(metrics, "validation_trend_capture_score")),
-        ("val到来", _metric_float(metrics, "validation_arrival_capture_score")),
-        ("val陪跑", _metric_float(metrics, "validation_escort_capture_score")),
-        ("val掉头", _metric_float(metrics, "validation_turn_adaptation_score")),
-        ("val多头捕获", bull),
-        ("val空头捕获", bear),
+        ("val稳健时间块", validation_block),
+        ("val P25块", validation_p25),
+        ("val最差块", validation_min),
+        ("train稳健时间块", train_block),
+        ("收益主分", return_score),
+        ("持仓时间辅助", holding_time_score),
     )
     weakest_name, weakest_value = min(weakest_candidates, key=lambda item: item[1])
     return "\n".join(
         [
             f"- gate: {report.gate_reason}",
             f"- 最弱维度: {weakest_name}={weakest_value:.2f}",
-            f"- val多/空捕获={bull:.2f}/{bear:.2f}，命中率={hit_rate:.0%}",
+            (
+                "- robust blocks: "
+                f"train/val={train_block:.2f}/{validation_block:.2f}，"
+                f"return={return_score:.2f}，holding={holding_time_score:.2f}，"
+                f"penalty={penalty_score:.2f}，val P25/最差={validation_p25:.2f}/{validation_min:.2f}"
+            ),
         ]
     )
 

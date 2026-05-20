@@ -7,6 +7,17 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from research_v2 import evaluation as mod
+from research_v2.regime_diagnostics import (
+    daily_regime_rows_from_result,
+    regime_metric_payload,
+    regime_prompt_text,
+    regime_summary_lines,
+)
+
+
+CLEAN_TREND_UP_MOVE_MIN = 0.05
+CLEAN_TREND_ADX_MIN = 18.0
+CLEAN_TREND_CHOP_MAX = 58.0
 
 
 def _equal_segment_score(report: mod.TrendScoreReport) -> float:
@@ -120,48 +131,11 @@ def _daily_regime_rows(
     before_date: str = "",
     on_or_after_date: str = "",
 ) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    curve = result.get("daily_equity_curve", [])
-    market_history: list[float] = []
-    for idx in range(1, len(curve)):
-        prev_point = curve[idx - 1]
-        point = curve[idx]
-        day = str(point.get("date", "")).strip()
-        prev_close = float(prev_point.get("market_close", 0.0) or 0.0)
-        current_close = float(point.get("market_close", 0.0) or 0.0)
-        prev_equity = float(prev_point.get("equity", 0.0) or 0.0)
-        current_equity = float(point.get("equity", 0.0) or 0.0)
-        if not day or prev_close <= 1e-9 or prev_equity <= 1e-9:
-            continue
-        market_return = current_close / prev_close - 1.0
-        market_history.append(market_return)
-        if before_date and day >= before_date:
-            continue
-        if on_or_after_date and day < on_or_after_date:
-            continue
-        lookback = market_history[-14:]
-        lookback_growth = 1.0
-        for value in lookback:
-            lookback_growth *= max(1e-9, 1.0 + value)
-        trend_move = lookback_growth - 1.0
-        realized_vol = mod._std(lookback)
-        fear_greed_value = point.get("fear_greed_value")
-        flow_imbalance = float(point.get("flow_imbalance", 0.0) or 0.0)
-        rows.append(
-            {
-                "date": day,
-                "strategy_return": current_equity / prev_equity - 1.0,
-                "market_return": market_return,
-                "trend_move": trend_move,
-                "realized_vol": realized_vol,
-                "adx": float(point.get("adx", 0.0) or 0.0),
-                "chop": float(point.get("chop", 0.0) or 0.0),
-                "atr_ratio": float(point.get("atr_ratio", 0.0) or 0.0),
-                "flow_imbalance": flow_imbalance,
-                "fear_greed_value": None if fear_greed_value in (None, "") else float(fear_greed_value),
-            }
-        )
-    return rows
+    return daily_regime_rows_from_result(
+        result,
+        before_date=before_date,
+        on_or_after_date=on_or_after_date,
+    )
 
 
 def _compound_return_pct(returns: list[float]) -> float:
@@ -186,9 +160,9 @@ def _regime_scorecard_lines(train_rows: list[dict[str, Any]], validation_rows: l
         move = float(row.get("trend_move", 0.0))
         adx = float(row.get("adx", 0.0))
         chop = float(row.get("chop", 0.0))
-        if move >= 0.05 and adx >= 18.0 and chop < 58.0:
+        if move >= CLEAN_TREND_UP_MOVE_MIN and adx >= CLEAN_TREND_ADX_MIN and chop < CLEAN_TREND_CHOP_MAX:
             return "trend_up"
-        if move <= -0.05 and adx >= 18.0 and chop < 58.0:
+        if move <= -CLEAN_TREND_UP_MOVE_MIN and adx >= CLEAN_TREND_ADX_MIN and chop < CLEAN_TREND_CHOP_MAX:
             return "trend_down"
         return "chop"
 
@@ -409,34 +383,64 @@ def summarize_evaluation_impl(
         if "trades_detail" in validation_source
         else 1.0
     )
-    train_activity_multiplier = train_entry_activity_multiplier * train_exposure_multiplier
-    validation_activity_multiplier = validation_entry_activity_multiplier * validation_exposure_multiplier
+    train_activity_multiplier = train_exposure_multiplier
+    validation_activity_multiplier = validation_exposure_multiplier
     activity_multiplier = (
         mod.TRAIN_VAL_SCORE_WEIGHT * train_activity_multiplier
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_activity_multiplier
     )
-    train_activity_adjusted_robust_block_score = (
-        min(train_robust_block_report.robust_score, 0.0)
-        + max(train_robust_block_report.robust_score, 0.0) * train_activity_multiplier
-    )
-    validation_activity_adjusted_robust_block_score = (
-        min(validation_robust_block_report.robust_score, 0.0)
-        + max(validation_robust_block_report.robust_score, 0.0) * validation_activity_multiplier
-    )
+    train_activity_adjusted_robust_block_score = train_robust_block_report.robust_score
+    validation_activity_adjusted_robust_block_score = validation_robust_block_report.robust_score
     raw_robust_time_score = (
         mod.TRAIN_VAL_SCORE_WEIGHT * train_robust_block_report.robust_score
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_robust_block_report.robust_score
     )
-    robust_time_score = (
-        mod.TRAIN_VAL_SCORE_WEIGHT * train_activity_adjusted_robust_block_score
-        + mod.TRAIN_VAL_SCORE_WEIGHT * validation_activity_adjusted_robust_block_score
-    )
+    robust_time_score = raw_robust_time_score
     buy_hold_robust_score = (
         mod.TRAIN_VAL_SCORE_WEIGHT * train_benchmark_block_report.robust_score
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_benchmark_block_report.robust_score
     )
     benchmark_hurdle = max(0.0, buy_hold_robust_score) * max(0.0, float(scoring.benchmark_hurdle_weight))
-    main_score = robust_time_score - benchmark_hurdle
+    return_score = robust_time_score - benchmark_hurdle
+    main_score = return_score
+    train_holding_exposure_pct = (
+        train_position_exposure_pct
+        if "trades_detail" in selection_source
+        else max(0.0, float(scoring.holding_time_min_exposure_pct))
+    )
+    validation_holding_exposure_pct = (
+        validation_position_exposure_pct
+        if "trades_detail" in validation_source
+        else max(0.0, float(scoring.holding_time_min_exposure_pct))
+    )
+    train_holding_payload = mod._holding_time_score_from_exposure(
+        train_holding_exposure_pct,
+        train_robust_block_report.robust_score,
+        scoring,
+    )
+    validation_holding_payload = mod._holding_time_score_from_exposure(
+        validation_holding_exposure_pct,
+        validation_robust_block_report.robust_score,
+        scoring,
+    )
+    train_holding_time_score = train_holding_payload["score"]
+    validation_holding_time_score = validation_holding_payload["score"]
+    holding_time_score = (
+        mod.TRAIN_VAL_SCORE_WEIGHT * train_holding_time_score
+        + mod.TRAIN_VAL_SCORE_WEIGHT * validation_holding_time_score
+    )
+    holding_time_bonus_score = (
+        mod.TRAIN_VAL_SCORE_WEIGHT * train_holding_payload["adequate_bonus"]
+        + mod.TRAIN_VAL_SCORE_WEIGHT * validation_holding_payload["adequate_bonus"]
+    )
+    holding_time_underexposure_penalty_score = (
+        mod.TRAIN_VAL_SCORE_WEIGHT * train_holding_payload["underexposure_penalty"]
+        + mod.TRAIN_VAL_SCORE_WEIGHT * validation_holding_payload["underexposure_penalty"]
+    )
+    holding_time_overexposure_penalty_score = (
+        mod.TRAIN_VAL_SCORE_WEIGHT * train_holding_payload["overexposure_penalty"]
+        + mod.TRAIN_VAL_SCORE_WEIGHT * validation_holding_payload["overexposure_penalty"]
+    )
     train_drawdown_risk_report = mod._drawdown_risk_side_report(train_daily_returns, scoring)
     validation_drawdown_risk_report = mod._drawdown_risk_side_report(validation_daily_path.returns, scoring)
     train_drawdown_risk_score = train_drawdown_risk_report.risk_score
@@ -445,7 +449,11 @@ def summarize_evaluation_impl(
         mod.TRAIN_VAL_SCORE_WEIGHT * train_drawdown_risk_score
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_drawdown_risk_score
     )
-    drawdown_risk_allowance_score = mod._promotion_drawdown_allowance(activity_multiplier, scoring)
+    exposure_allowance_multiplier = (
+        mod.TRAIN_VAL_SCORE_WEIGHT * train_exposure_multiplier
+        + mod.TRAIN_VAL_SCORE_WEIGHT * validation_exposure_multiplier
+    )
+    drawdown_risk_allowance_score = mod._promotion_drawdown_allowance(exposure_allowance_multiplier, scoring)
     drawdown_risk_excess_score = max(drawdown_risk_score - drawdown_risk_allowance_score, 0.0)
     drawdown_risk_severe_excess_score = max(
         drawdown_risk_score - max(0.0, float(scoring.promotion_drawdown_knee)),
@@ -454,7 +462,7 @@ def summarize_evaluation_impl(
     drawdown_penalty_score = mod._promotion_drawdown_penalty(
         drawdown_risk_score,
         scoring,
-        activity_multiplier=activity_multiplier,
+        activity_multiplier=exposure_allowance_multiplier,
     )
     train_turn_protection_score = train_continuous_trend_report.turn_protection_score
     validation_turn_protection_score = validation_trend_report.turn_protection_score
@@ -462,7 +470,7 @@ def summarize_evaluation_impl(
         mod.TRAIN_VAL_SCORE_WEIGHT * train_turn_protection_score
         + mod.TRAIN_VAL_SCORE_WEIGHT * validation_turn_protection_score
     )
-    quality_score = train_activity_adjusted_robust_block_score
+    quality_score = train_robust_block_report.robust_score
     raw_validation_score = mod._period_score(validation_trend_report)
     validation_block_report = mod._validation_block_report(
         validation_source,
@@ -480,6 +488,8 @@ def summarize_evaluation_impl(
         scoring=scoring,
     )
     robustness_penalty_score = robustness_penalty_payload["robustness_penalty_score"]
+    fee_drag_penalty_score = mod._fee_drag_penalty(avg_fee_drag, scoring)
+    overfit_penalty_score = mod._overfit_soft_penalty(overfit_report.risk_score, scoring)
     _trend_participation_penalty, train_trend_participation_shortfall, validation_trend_participation_shortfall = (
         mod._trend_participation_penalty(
             train_continuous_trend_report.hit_rate,
@@ -488,9 +498,15 @@ def summarize_evaluation_impl(
         )
     )
     trend_participation_penalty = 0.0
-    promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score
-    promotion_main_contribution = main_score
-    promotion_penalty_total = drawdown_penalty_score + robustness_penalty_score
+    penalty_score = (
+        drawdown_penalty_score
+        + robustness_penalty_score
+        + fee_drag_penalty_score
+        + overfit_penalty_score
+    )
+    promotion_score = return_score + holding_time_score - penalty_score
+    promotion_main_contribution = return_score
+    promotion_penalty_total = penalty_score
     eval_funnel_counts = mod._aggregate_funnel_counts(results, "eval")
     validation_funnel_counts = mod._result_funnel_counts(validation_source)
     selection_funnel_counts = mod._result_funnel_counts(selection_source)
@@ -540,6 +556,11 @@ def summarize_evaluation_impl(
             "val持仓覆盖过低"
             f"({validation_position_exposure_pct:.2f}% < {min_validation_position_exposure_pct:.2f}%)"
         )
+    if gates.enforce_long_only_gate:
+        if validation_short_entries > 0:
+            gate_reasons.append(f"val short开仓未关闭({validation_short_entries} > 0)")
+        if selection_short_entries > 0:
+            gate_reasons.append(f"train+val short开仓未关闭({selection_short_entries} > 0)")
     if overfit_report.hard_fail:
         gate_reasons.append(
             "train+val过拟合集中度严重"
@@ -560,6 +581,10 @@ def summarize_evaluation_impl(
     train_regime_rows = _daily_regime_rows(selection_source, before_date=validation_start_date)
     validation_regime_rows = _daily_regime_rows(validation_source)
     regime_scorecard_lines = _regime_scorecard_lines(train_regime_rows, validation_regime_rows)
+    regime_label_summary_lines = regime_summary_lines(train_regime_rows, validation_regime_rows)
+    regime_label_prompt_text = regime_prompt_text(train_regime_rows, validation_regime_rows)
+    train_regime_metrics = regime_metric_payload(train_regime_rows, prefix="train_")
+    validation_regime_metrics = regime_metric_payload(validation_regime_rows, prefix="validation_")
 
     weakest_signals = mod._aggregate_signal_stats(results, "eval")
     weakest_signal_paths = mod._aggregate_signal_stats(results, "eval", stats_key="signal_path_stats")
@@ -571,16 +596,19 @@ def summarize_evaluation_impl(
             f"{development_score_std:.2f} / {profitable_window_ratio:.0%}"
         ),
         (
-            "v28稳健时间块分(train/val原始 -> 有效活跃度调整 / 合成) / buy&hold稳健分 / 基准扣分 / 主分: "
+            "v29收益主分(train/val稳健块 / 合成稳健收益 / buy&hold稳健 / 基准扣分 / return_score): "
             f"{train_robust_block_report.robust_score:.2f} / "
             f"{validation_robust_block_report.robust_score:.2f} / "
-            f"{train_activity_adjusted_robust_block_score:.2f} / "
-            f"{validation_activity_adjusted_robust_block_score:.2f} / "
             f"{robust_time_score:.2f} / {buy_hold_robust_score:.2f} / "
-            f"{benchmark_hurdle:.2f} / {main_score:.2f}"
+            f"{benchmark_hurdle:.2f} / {return_score:.2f}"
         ),
         (
-            "v28时间块明细(train均值/中位/P25/最差/n | val均值/中位/P25/最差/n): "
+            "v29评分拆解(return_score + holding_time_score - penalty_score = promotion): "
+            f"{return_score:.2f} + {holding_time_score:.2f} - {penalty_score:.2f} = "
+            f"{promotion_score:.2f}"
+        ),
+        (
+            "v29时间块明细(train均值/中位/P25/最差/n | val均值/中位/P25/最差/n): "
             f"{train_robust_block_report.mean_score:.2f}/"
             f"{train_robust_block_report.median_score:.2f}/"
             f"{train_robust_block_report.p25_score:.2f}/"
@@ -594,6 +622,7 @@ def summarize_evaluation_impl(
         ),
         "regime scorecard（诊断，不进主评分）:",
         *regime_scorecard_lines,
+        *regime_label_summary_lines,
         (
             "capture诊断(train/val clean混合分 / 平均抓取 / capture_core，不进主评分): "
             f"{train_capture_score:.2f} / {validation_capture_score:.2f} / "
@@ -625,20 +654,21 @@ def summarize_evaluation_impl(
             f"{validation_trend_report.bear_segment_count}/"
             f"{_hit_segment_count(validation_trend_report)}"
         ),
-        f"主评分数据源: v28时间块={train_daily_return_source}；capture仅诊断={train_capture_source}",
+        f"主评分数据源: v29时间块收益={train_daily_return_source}；capture仅诊断={train_capture_source}",
         (
-            "train/val按日收益年化分 / v28主分 / 固定窗口回撤风险分 / 回撤罚分 / 晋级分: "
+            "train/val按日收益年化分 / 收益主分 / 持仓时间辅助分 / 惩罚合计 / 晋级分: "
             f"{train_timed_return_score:.2f} / {validation_timed_return_score:.2f} / "
-            f"{main_score:.2f} / "
-            f"{drawdown_risk_score:.2f} / {drawdown_penalty_score:.2f} / {promotion_score:.2f}"
+            f"{return_score:.2f} / {holding_time_score:.2f} / "
+            f"{penalty_score:.2f} / {promotion_score:.2f}"
         ),
         (
-            "有效活跃度(月频train/val, 持仓覆盖train/val -> 开仓倍率 / 覆盖倍率 / 综合倍率): "
+            "持仓时间辅助(train/val覆盖 -> 覆盖倍率 / bonus / under / over / score): "
             f"{train_monthly_entries:.2f} / {validation_monthly_entries:.2f} -> "
             f"{train_position_exposure_pct:.1f}% / {validation_position_exposure_pct:.1f}% -> "
-            f"{train_entry_activity_multiplier:.2f}/{validation_entry_activity_multiplier:.2f} / "
             f"{train_exposure_multiplier:.2f}/{validation_exposure_multiplier:.2f} / "
-            f"{train_activity_multiplier:.2f}/{validation_activity_multiplier:.2f}/{activity_multiplier:.2f}"
+            f"{holding_time_bonus_score:.2f} / "
+            f"{holding_time_underexposure_penalty_score:.2f} / "
+            f"{holding_time_overexposure_penalty_score:.2f} / {holding_time_score:.2f}"
         ),
         (
             "趋势机会覆盖短缺率(train/val，诊断不扣分): "
@@ -651,7 +681,7 @@ def summarize_evaluation_impl(
             f"{validation_drawdown_risk_score:.2f}({validation_drawdown_risk_report.window_count})"
         ),
         (
-            "回撤罚分公式(allow_base / allow_activity_bonus / base_weight / knee / severe_weight): "
+            "回撤罚分公式(allow_base / allow_exposure_bonus / base_weight / knee / severe_weight): "
             f"{scoring.promotion_drawdown_allowance_base:.2f} / "
             f"{scoring.promotion_drawdown_allowance_activity_bonus:.2f} / "
             f"{scoring.promotion_drawdown_base_weight:.2f} / "
@@ -679,7 +709,9 @@ def summarize_evaluation_impl(
         f"val趋势段 / 命中率: {validation_trend_report.segment_count} / {validation_trend_report.hit_rate:.0%}",
         f"val连续综合分 / 收益分: {raw_validation_score:.2f} / {validation_trend_report.return_score:.2f}",
         f"val多 / 空平仓数: {validation_long_trades} / {validation_short_trades}",
-        f"val多 / 空非加仓开仓数: {validation_long_entries} / {validation_short_entries}",
+        (
+            f"val多 / 空非加仓开仓数: {validation_long_entries} / {validation_short_entries}"
+        ),
         mod._format_funnel_line("train滚动漏斗(long)", eval_funnel_counts["long"]),
         mod._format_funnel_line("train滚动漏斗(short)", eval_funnel_counts["short"]),
         mod._format_funnel_line("val连续漏斗(long)", validation_funnel_counts["long"]),
@@ -707,6 +739,12 @@ def summarize_evaluation_impl(
             f"{robustness_penalty_score:.2f}"
         ),
         (
+            "惩罚合计(drawdown/robustness/fee_drag/overfit -> penalty): "
+            f"{drawdown_penalty_score:.2f} / {robustness_penalty_score:.2f} / "
+            f"{fee_drag_penalty_score:.2f} / {overfit_penalty_score:.2f} -> "
+            f"{penalty_score:.2f}"
+        ),
+        (
             "鲁棒性分布诊断(train中位/IQR/std, val中位/std, 中位差IQR倍数/波动比/包络溢出IQR倍数/Ulcer比): "
             f"{robustness_penalty_payload['robustness_train_score_median']:.2f} / "
             f"{robustness_penalty_payload['robustness_train_score_iqr']:.2f} / "
@@ -724,7 +762,7 @@ def summarize_evaluation_impl(
             f"单段正向贡献={overfit_report.top1_positive_share:.0%}，"
             f"同向链贡献={overfit_report.max_chain_positive_share:.0%}，"
             f"覆盖率={overfit_report.coverage_ratio:.0%}，"
-            f"多空落差={overfit_report.bull_bear_gap:.2f}，"
+            f"capture落差={overfit_report.capture_drop_abs:.2f}，"
             f"处置={mod.overfit_reference_action(overfit_report.risk_score, overfit_report.hard_fail)}"
         ),
         f"train+val连续趋势捕获分 / 收益分: {selection_trend_report.trend_score:.2f} / {selection_trend_report.return_score:.2f}",
@@ -744,7 +782,11 @@ def summarize_evaluation_impl(
             f"{train_entry_trades} / {validation_entry_trades} / "
             f"{selection_closed_trades}/{train_closed_trades}/{validation_closed_trades} / {liquidations}"
         ),
-        f"质量分(train活跃度调整时间块分) / 晋级分: {quality_score:.2f} / {promotion_score:.2f}",
+        (
+            f"long-only诊断: val short开仓={validation_short_entries}，"
+            f"train+val short开仓={selection_short_entries}"
+        ),
+        f"质量分(train稳健时间块分) / 晋级分: {quality_score:.2f} / {promotion_score:.2f}",
         f"Gate: {gate_reason}",
         "",
         "窗口明细:",
@@ -760,14 +802,14 @@ def summarize_evaluation_impl(
     prompt_lines = [
         "当前诊断（必须先读）:",
         (
-            f"- 当前基底: 质量分(train活跃度调整时间块分)={quality_score:.2f}，晋级分={promotion_score:.2f}，"
-            f"v28主分={main_score:.2f}，时间块稳健分原始(train/val)="
+            f"- 当前基底: 质量分(train稳健时间块分)={quality_score:.2f}，晋级分={promotion_score:.2f}，"
+            f"收益主分={return_score:.2f}，持仓时间辅助={holding_time_score:.2f}，惩罚合计={penalty_score:.2f}，"
+            f"时间块稳健分(train/val)="
             f"{train_robust_block_report.robust_score:.2f}/{validation_robust_block_report.robust_score:.2f}，"
-            f"活跃度调整后={train_activity_adjusted_robust_block_score:.2f}/"
-            f"{validation_activity_adjusted_robust_block_score:.2f}，"
             f"buy&hold基准扣分={benchmark_hurdle:.2f}，capture诊断={capture_score:.2f}/{capture_core_score:.2f}，"
             f"回撤风险分={drawdown_risk_score:.2f}，回撤罚分={drawdown_penalty_score:.2f}，"
-            f"鲁棒性软惩罚={robustness_penalty_score:.2f}，"
+            f"鲁棒性/费用/过拟合惩罚={robustness_penalty_score:.2f}/{fee_drag_penalty_score:.2f}/"
+            f"{overfit_penalty_score:.2f}，"
             f"gate={gate_reason}"
         ),
         f"- 当前主短板: {validation_weakest_axis}",
@@ -777,7 +819,8 @@ def summarize_evaluation_impl(
             f"{validation_trend_report.hit_rate:.0%}，"
             f"多头/空头捕获={validation_trend_report.bull_score:.2f}/"
             f"{validation_trend_report.bear_score:.2f}，"
-            f"多/空平仓数={validation_long_trades}/{validation_short_trades}"
+            f"多/空平仓数={validation_long_trades}/{validation_short_trades}，"
+            f"多/空开仓={validation_long_entries}/{validation_short_entries}"
         ),
         (
             "- val 漏斗堵点: "
@@ -791,34 +834,40 @@ def summarize_evaluation_impl(
             f"{development_score_std:.2f}/{profitable_window_ratio:.0%}"
         ),
         "- regime scorecard（诊断，不进主评分）: " + " | ".join(regime_scorecard_lines),
+        f"- {regime_label_prompt_text}",
         (
-            f"- promotion breakdown: v28主分={main_score:.2f} "
-            f"(原始稳健时间块={raw_robust_time_score:.2f}, 活跃度调整后={robust_time_score:.2f}, "
+            f"- promotion breakdown: return_score={return_score:.2f} "
+            f"(稳健时间块={raw_robust_time_score:.2f}, "
             f"buy&hold稳健={buy_hold_robust_score:.2f}, "
             f"基准扣分={benchmark_hurdle:.2f})，"
-            f"回撤扣分={drawdown_penalty_score:.2f}，鲁棒性扣分={robustness_penalty_score:.2f}，"
+            f"holding_time_score={holding_time_score:.2f}，"
+            f"penalty={penalty_score:.2f}"
+            f"(回撤/鲁棒性/费用/过拟合={drawdown_penalty_score:.2f}/"
+            f"{robustness_penalty_score:.2f}/{fee_drag_penalty_score:.2f}/{overfit_penalty_score:.2f})，"
             f"最终promotion={promotion_score:.2f}"
         ),
         (
-            f"- activity diagnostic: train/val非加仓开仓={train_entry_trades}/{validation_entry_trades}，"
+            f"- 持仓与交易诊断: train/val非加仓开仓={train_entry_trades}/{validation_entry_trades}，"
             f"月频={train_monthly_entries:.2f}/{validation_monthly_entries:.2f}，"
-            f"开仓倍率={train_entry_activity_multiplier:.2f}/{validation_entry_activity_multiplier:.2f}，"
             f"持仓覆盖={train_position_exposure_pct:.1f}%/{validation_position_exposure_pct:.1f}% "
             f"(覆盖倍率={train_exposure_multiplier:.2f}/{validation_exposure_multiplier:.2f})，"
-            f"综合倍率={train_activity_multiplier:.2f}/{validation_activity_multiplier:.2f}，"
+            f"持仓时间分={train_holding_time_score:.2f}/{validation_holding_time_score:.2f}，"
             f"趋势机会覆盖短缺={train_trend_participation_shortfall:.2f}/"
             f"{validation_trend_participation_shortfall:.2f}"
         ),
         (
+            f"- long-only diagnostic: val short开仓={validation_short_entries}，"
+            f"train+val short开仓={selection_short_entries}"
+        ),
+        (
             f"- risk diagnostic: train/val固定窗口回撤风险={train_drawdown_risk_score:.2f}/"
             f"{validation_drawdown_risk_score:.2f}，回撤扣分={drawdown_penalty_score:.2f}，"
-            f"鲁棒性软惩罚={robustness_penalty_score:.2f}"
+            f"鲁棒性/费用/过拟合惩罚={robustness_penalty_score:.2f}/"
+            f"{fee_drag_penalty_score:.2f}/{overfit_penalty_score:.2f}"
         ),
         (
             f"- 当前评分组成: train/val稳健时间块原始={train_robust_block_report.robust_score:.2f}/"
             f"{validation_robust_block_report.robust_score:.2f}，"
-            f"活跃度调整后={train_activity_adjusted_robust_block_score:.2f}/"
-            f"{validation_activity_adjusted_robust_block_score:.2f}，"
             f"块数={train_robust_block_report.block_count}/{validation_robust_block_report.block_count}，"
             f"capture仅诊断={train_capture_score:.2f}/{validation_capture_score:.2f}，"
             f"趋势段(train总/多/空/命中)="
@@ -834,13 +883,12 @@ def summarize_evaluation_impl(
             f"train/val 按日收益年化分={train_timed_return_score:.2f}/{validation_timed_return_score:.2f}，"
             f"train/val 非加仓开仓={train_entry_trades}/{validation_entry_trades}，"
             f"月频={train_monthly_entries:.2f}/{validation_monthly_entries:.2f}，"
-            f"开仓倍率={train_entry_activity_multiplier:.2f}/{validation_entry_activity_multiplier:.2f}，"
             f"持仓覆盖={train_position_exposure_pct:.1f}%/{validation_position_exposure_pct:.1f}%，"
             f"覆盖倍率={train_exposure_multiplier:.2f}/{validation_exposure_multiplier:.2f}，"
-            f"综合活跃度倍率={train_activity_multiplier:.2f}/{validation_activity_multiplier:.2f}，"
+            f"持仓时间分={train_holding_time_score:.2f}/{validation_holding_time_score:.2f}，"
             f"趋势机会覆盖短缺={train_trend_participation_shortfall:.2f}/{validation_trend_participation_shortfall:.2f}，"
             f"train/val 固定窗口回撤风险分={train_drawdown_risk_score:.2f}/{validation_drawdown_risk_score:.2f}，"
-            f"回撤罚分={drawdown_penalty_score:.2f}，鲁棒性软惩罚={robustness_penalty_score:.2f}"
+            f"回撤罚分={drawdown_penalty_score:.2f}，惩罚合计={penalty_score:.2f}"
         ),
         (
             f"- 鲁棒性分布: train分数中位/IQR={robustness_penalty_payload['robustness_train_score_median']:.2f}/"
@@ -869,7 +917,7 @@ def summarize_evaluation_impl(
         (
             f"- 集中度诊断: {overfit_report.risk_level}({overfit_report.risk_score:.0f})，"
             f"覆盖率={overfit_report.coverage_ratio:.0%}，"
-            f"多空落差={overfit_report.bull_bear_gap:.2f}，"
+            f"capture落差={overfit_report.capture_drop_abs:.2f}，"
             f"处置={mod.overfit_reference_action(overfit_report.risk_score, overfit_report.hard_fail)}"
         ),
     ]
@@ -927,6 +975,19 @@ def summarize_evaluation_impl(
         "train_timed_return_score": train_timed_return_score,
         "validation_timed_return_score": validation_timed_return_score,
         "timed_return_score": timed_return_score,
+        "return_score": return_score,
+        "train_holding_time_score": train_holding_time_score,
+        "validation_holding_time_score": validation_holding_time_score,
+        "holding_time_score": holding_time_score,
+        "holding_time_bonus_score": holding_time_bonus_score,
+        "holding_time_underexposure_penalty_score": holding_time_underexposure_penalty_score,
+        "holding_time_overexposure_penalty_score": holding_time_overexposure_penalty_score,
+        "train_holding_time_bonus_score": train_holding_payload["adequate_bonus"],
+        "validation_holding_time_bonus_score": validation_holding_payload["adequate_bonus"],
+        "train_holding_time_underexposure_penalty_score": train_holding_payload["underexposure_penalty"],
+        "validation_holding_time_underexposure_penalty_score": validation_holding_payload["underexposure_penalty"],
+        "train_holding_time_overexposure_penalty_score": train_holding_payload["overexposure_penalty"],
+        "validation_holding_time_overexposure_penalty_score": validation_holding_payload["overexposure_penalty"],
         "train_drawdown_risk_score": train_drawdown_risk_score,
         "validation_drawdown_risk_score": validation_drawdown_risk_score,
         "drawdown_risk_score": drawdown_risk_score,
@@ -1001,6 +1062,8 @@ def summarize_evaluation_impl(
         "validation_short_entries": float(validation_short_entries),
         "selection_long_entries": float(selection_long_entries),
         "selection_short_entries": float(selection_short_entries),
+        "validation_short_entry_blocked": 1.0 if validation_short_entries > 0 else 0.0,
+        "selection_short_entry_blocked": 1.0 if selection_short_entries > 0 else 0.0,
         "train_entry_trades": float(train_entry_trades),
         "validation_entry_trades": float(validation_entry_trades),
         "selection_entry_trades": float(selection_entry_trades),
@@ -1016,6 +1079,8 @@ def summarize_evaluation_impl(
         "train_trend_participation_shortfall": train_trend_participation_shortfall,
         "validation_trend_participation_shortfall": validation_trend_participation_shortfall,
         "trend_participation_penalty": trend_participation_penalty,
+        **train_regime_metrics,
+        **validation_regime_metrics,
         "selection_long_closed_trades": float(selection_long_trades),
         "selection_short_closed_trades": float(selection_short_trades),
         "validation_closed_trades": float(validation_closed_trades),
@@ -1078,6 +1143,9 @@ def summarize_evaluation_impl(
         "ulcer_ratio_penalty_score": robustness_penalty_payload["ulcer_ratio_penalty_score"],
         "robustness_penalty_score_raw": robustness_penalty_payload["robustness_penalty_score_raw"],
         "robustness_penalty_score": robustness_penalty_score,
+        "fee_drag_penalty_score": fee_drag_penalty_score,
+        "overfit_penalty_score": overfit_penalty_score,
+        "penalty_score": penalty_score,
         "overfit_risk_score": overfit_report.risk_score,
         "overfit_top1_positive_share": overfit_report.top1_positive_share,
         "overfit_chain_positive_share": overfit_report.max_chain_positive_share,

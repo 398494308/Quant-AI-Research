@@ -35,6 +35,8 @@ from research_v2.charting import PerformanceChartPaths, charts_available, render
 from research_v2.config import GateConfig, ScoringConfig
 from research_v2.evaluation import (
     EvaluationReport,
+    SegmentScoreDetail,
+    TrendScoreReport,
     _activity_multiplier_from_monthly_entries,
     _annualized_return_score,
     _balanced_pair_score,
@@ -50,6 +52,7 @@ from research_v2.evaluation import (
     _promotion_drawdown_allowance,
     _promotion_drawdown_penalty,
     _robust_block_report,
+    _overfit_risk_report,
     _trend_clean_quality,
     _robustness_penalty_payload,
     _exposure_multiplier_from_position_exposure_pct,
@@ -60,6 +63,14 @@ from research_v2.evaluation import (
     partial_eval_gate_snapshot_from_results,
     summarize_evaluation,
     summarize_test_result,
+)
+from research_v2.regime_diagnostics import (
+    daily_regime_rows_from_result,
+    market_regime_label,
+    regime_diagnostic_payload,
+    regime_label_from_id,
+    regime_metric_payload,
+    regime_summary_lines,
 )
 from research_v2.journal import (
     ORDINARY_REGION_FAMILIES,
@@ -108,6 +119,7 @@ from research_v2.strategy_code import (
     StrategyCandidate,
     StrategyCoreFactor,
     StrategySourceError,
+    build_strategy_edit_boundary_card,
     build_strategy_complexity_pressure,
     build_strategy_complexity_delta,
     build_system_edit_signature,
@@ -134,6 +146,7 @@ def make_gate_config(**overrides):
         "min_validation_monthly_entries": 0.0,
         "min_train_position_exposure_pct": 0.0,
         "min_validation_position_exposure_pct": 0.0,
+        "enforce_long_only_gate": False,
         "validation_block_count": 3,
         "min_validation_block_floor": -100.0,
         "max_validation_block_failures": 100,
@@ -171,7 +184,7 @@ def _minimal_required_strategy_source(*, trend_quality_bool_ops: int = 0) -> str
         "# PARAMS_END",
         "",
         "# EXIT_PARAMS_START",
-        "EXIT_PARAMS = {'leverage': 20, 'position_fraction': 0.17, 'position_size_min': 5000, 'position_size_max': 30000, 'max_concurrent_positions': 4, 'pyramid_enabled': 1, 'pyramid_max_times': 2, 'pyramid_size_ratio': 0.28, 'tp1_pnl_pct': 65.7}",
+            "EXIT_PARAMS = {'leverage': 20, 'position_fraction': 0.10, 'position_size_min': 0, 'position_size_max': 0, 'max_concurrent_positions': 1, 'pyramid_enabled': 1, 'pyramid_max_times': -1, 'pyramid_size_ratio': 0.05, 'breakout_tp1_close_fraction': 0.0, 'short_breakdown_tp1_close_fraction': 0.0, 'short_trend_tp1_close_fraction': 0.0, 'tp1_close_fraction': 0.0, 'tp1_pnl_pct': 65.7}",
         "# EXIT_PARAMS_END",
         "",
         "ENTRY_SIGNAL_ALIASES = {}",
@@ -375,6 +388,75 @@ class BacktestFixesTest(unittest.TestCase):
         allowed = backtest._should_pyramid(position, market_state, close_pnl_pct=18.0, exit_p=exit_params)
 
         self.assertTrue(allowed)
+
+    def test_fractional_margin_sizing_uses_fixed_initial_and_add_fractions(self):
+        exit_params = dict(backtest.EXIT_PARAMS)
+        exit_params.update(
+            {
+                "position_fraction": 0.10,
+                "pyramid_size_ratio": 0.05,
+                "position_size_min": 0,
+                "position_size_max": 0,
+                "trading_fee_enabled": 1,
+                "okx_taker_fee_rate": 0.0005,
+            }
+        )
+
+        self.assertAlmostEqual(backtest._target_initial_margin(10.0, exit_params), 1.0)
+        self.assertAlmostEqual(
+            backtest._target_pyramid_add_margin(
+                {"size": 1.0, "pyramids_done": 0},
+                10.0,
+                exit_params,
+            ),
+            0.5,
+        )
+        self.assertAlmostEqual(
+            backtest._target_pyramid_add_margin(
+                {"size": 1.5, "pyramids_done": 1},
+                20.0,
+                exit_params,
+            ),
+            1.0,
+        )
+        self.assertAlmostEqual(
+            backtest._max_affordable_margin(100000.0, 20.0, exit_params),
+            99009.900990099,
+        )
+
+    def test_pyramid_max_times_negative_means_unlimited(self):
+        position = {
+            "entry_signal": "long_pullback",
+            "pyramids_done": 12,
+        }
+        market_state = {
+            "adx": 30.0,
+            "macd_line": 2.0,
+            "signal_line": 1.0,
+            "hourly": {"close": 105.0, "ema_fast": 100.0},
+        }
+        exit_params = {
+            "pyramid_enabled": 1,
+            "pyramid_max_times": -1,
+            "pyramid_trigger_pnl": 16.0,
+            "pyramid_adx_min": 19.0,
+        }
+
+        allowed = backtest._should_pyramid(position, market_state, close_pnl_pct=18.0, exit_p=exit_params)
+
+        self.assertTrue(allowed)
+
+    def test_tp1_partial_exit_is_disabled_when_close_fraction_is_zero(self):
+        position = {
+            "entry_signal": "long_pullback",
+            "entry_price": 100.0,
+            "tp1_done": False,
+        }
+        subbar = {"high": 120.0, "low": 95.0}
+        exit_params = dict(backtest.EXIT_PARAMS)
+        exit_params.update({"tp1_close_fraction": 0.0, "tp1_pnl_pct": 1.0})
+
+        self.assertFalse(backtest._intrabar_tp1_first(position, subbar, 20.0, exit_params))
 
     def test_backtest_opens_opposite_side_without_reverse_exit(self):
         interval_ms = 15 * 60 * 1000
@@ -1264,8 +1346,11 @@ class EvaluationFixesTest(unittest.TestCase):
             report.metrics["promotion_score"],
             (
                 report.metrics["main_score"]
+                + report.metrics["holding_time_score"]
                 - expected_drawdown_penalty
                 - report.metrics["robustness_penalty_score"]
+                - report.metrics["fee_drag_penalty_score"]
+                - report.metrics["overfit_penalty_score"]
             ),
         )
 
@@ -1317,6 +1402,42 @@ class EvaluationFixesTest(unittest.TestCase):
             weak_side_period_score * 0.35,
         )
 
+    def test_overfit_risk_ignores_capture_drop_and_side_gap_for_gate(self):
+        details = tuple(
+            SegmentScoreDetail(
+                direction=1 if idx % 2 == 0 else -1,
+                score=0.3,
+                weight=1.0,
+                duration_bars=(24, 160, 360, 32, 190, 420)[idx],
+                avg_atr_ratio=(0.006, 0.012, 0.022, 0.008, 0.014, 0.024)[idx],
+            )
+            for idx in range(6)
+        )
+        report = TrendScoreReport(
+            trend_score=0.2,
+            return_score=0.2,
+            arrival_score=0.2,
+            escort_score=0.2,
+            turn_score=0.2,
+            turn_protection_score=0.0,
+            turn_protection_event_count=0,
+            bull_score=0.90,
+            bear_score=-0.20,
+            hit_rate=1.0,
+            segment_count=len(details),
+            bull_segment_count=3,
+            bear_segment_count=3,
+            path_return_pct=10.0,
+            segment_details=details,
+        )
+
+        payload = _overfit_risk_report(report, capture_drop=0.80)
+
+        self.assertEqual(payload.risk_score, 0.0)
+        self.assertFalse(payload.hard_fail)
+        self.assertAlmostEqual(payload.bull_bear_gap, 1.10)
+        self.assertAlmostEqual(payload.capture_drop_abs, 0.80)
+
     def test_trend_participation_diagnostic_uses_existing_hit_rates_without_penalty(self):
         scoring = ScoringConfig()
 
@@ -1332,6 +1453,125 @@ class EvaluationFixesTest(unittest.TestCase):
         self.assertAlmostEqual(train_shortfall, 1.0)
         self.assertAlmostEqual(validation_shortfall, 1.0)
         self.assertAlmostEqual(penalty, 0.0)
+
+    def test_regime_diagnostic_labels_tradeable_chop_and_noise_separately(self):
+        tradeable_row = {
+            "trend_move_7": 0.02,
+            "trend_move_14": 0.05,
+            "trend_move_28": 0.06,
+            "direction_efficiency_14": 0.35,
+            "max_drawdown_14": 0.01,
+            "peak_giveback_14": 0.01,
+            "one_day_positive_share_14": 0.30,
+            "realized_vol": 0.018,
+            "atr_ratio": 0.010,
+            "adx": 14.0,
+            "chop": 62.0,
+        }
+        noisy_row = {
+            "trend_move_7": 0.01,
+            "trend_move_14": 0.01,
+            "trend_move_28": 0.01,
+            "direction_efficiency_14": 0.10,
+            "path_abs_14": 0.20,
+            "realized_vol": 0.045,
+            "atr_ratio": 0.026,
+            "adx": 11.0,
+            "chop": 66.0,
+        }
+        drawdown_row = {"trend_move_7": -0.09, "trend_move_14": -0.11}
+
+        self.assertEqual(market_regime_label(tradeable_row), "可交易震荡上行")
+        self.assertEqual(market_regime_label(noisy_row), "高波动乱震")
+        self.assertEqual(market_regime_label(drawdown_row), "大幅回调")
+
+    def test_regime_diagnostic_payload_selects_opportunity_and_damage(self):
+        rows = [
+            {
+                "date": "2025-01-01",
+                "market_return": 0.02,
+                "strategy_return": 0.0,
+                "trend_move_14": 0.05,
+                "direction_efficiency_14": 0.35,
+                "max_drawdown_14": 0.01,
+                "peak_giveback_14": 0.01,
+                "one_day_positive_share_14": 0.30,
+                "adx": 12.0,
+                "chop": 62.0,
+            },
+            {
+                "date": "2025-01-02",
+                "market_return": 0.02,
+                "strategy_return": -0.01,
+                "trend_move_14": 0.05,
+                "direction_efficiency_14": 0.35,
+                "max_drawdown_14": 0.01,
+                "peak_giveback_14": 0.01,
+                "one_day_positive_share_14": 0.30,
+                "adx": 12.0,
+                "chop": 62.0,
+            },
+            {
+                "date": "2025-01-03",
+                "market_return": 0.00,
+                "strategy_return": -0.02,
+                "trend_move_14": 0.01,
+                "direction_efficiency_14": 0.10,
+                "path_abs_14": 0.20,
+                "realized_vol": 0.045,
+                "atr_ratio": 0.026,
+                "adx": 10.0,
+                "chop": 70.0,
+            },
+            {
+                "date": "2025-01-04",
+                "market_return": 0.00,
+                "strategy_return": -0.02,
+                "trend_move_14": 0.01,
+                "direction_efficiency_14": 0.10,
+                "path_abs_14": 0.20,
+                "realized_vol": 0.045,
+                "atr_ratio": 0.026,
+                "adx": 10.0,
+                "chop": 70.0,
+            },
+        ]
+
+        payload = regime_diagnostic_payload(rows)
+        metrics = regime_metric_payload(rows, prefix="validation_")
+        lines = regime_summary_lines(rows, rows)
+
+        self.assertEqual(payload["opportunity_weakness_label"], "可交易震荡上行")
+        self.assertEqual(payload["damage_label"], "高波动乱震")
+        self.assertEqual(
+            regime_label_from_id(metrics["validation_regime_opportunity_weakness_label_id"]),
+            "可交易震荡上行",
+        )
+        self.assertIn("行情标签表现", "\n".join(lines))
+        self.assertIn("不进主评分", "\n".join(lines))
+
+    def test_daily_regime_rows_from_result_enriches_direction_efficiency(self):
+        curve = [{"date": "2025-01-01", "equity": 100.0, "market_close": 100.0}]
+        close = 100.0
+        equity = 100.0
+        for idx in range(1, 16):
+            close *= 1.004
+            equity *= 1.002
+            curve.append(
+                {
+                    "date": f"2025-01-{idx + 1:02d}",
+                    "equity": equity,
+                    "market_close": close,
+                    "adx": 12.0,
+                    "chop": 62.0,
+                    "atr_ratio": 0.01,
+                }
+            )
+
+        rows = daily_regime_rows_from_result({"daily_equity_curve": curve})
+
+        self.assertGreater(rows[-1]["trend_move_14"], 0.03)
+        self.assertGreater(rows[-1]["direction_efficiency_14"], 0.90)
 
     def test_entry_side_counts_prefers_filled_entries_and_ignores_pyramids(self):
         result = {
@@ -1557,6 +1797,138 @@ class EvaluationFixesTest(unittest.TestCase):
 
         self.assertTrue(report.gate_passed)
         self.assertEqual(report.gate_reason, "通过")
+
+    def _long_primary_gate_report(
+        self,
+        *,
+        train_long_entries: int = 5,
+        train_short_entries: int = 0,
+        validation_long_entries: int = 5,
+        validation_short_entries: int = 5,
+    ):
+        month_ms = int(30.4375 * 24 * 60 * 60 * 1000)
+        validation_start = month_ms
+        period_end = 2 * month_ms
+        eval_window = type(
+            "Window",
+            (),
+            {"group": "eval", "label": "train1", "start_date": "1970-01-01", "end_date": "1970-01-31"},
+        )()
+        validation_window = type(
+            "Window",
+            (),
+            {"group": "validation", "label": "val1", "start_date": "1970-02-01", "end_date": "1970-02-28"},
+        )()
+        eval_points = self._trend_points_from_closes([100, 102, 104])
+        validation_points = [
+            {**point, "timestamp": validation_start + int(point["timestamp"])}
+            for point in self._trend_points_from_closes([104, 103, 105])
+        ]
+        train_entries = train_long_entries + train_short_entries
+        validation_entries = validation_long_entries + validation_short_entries
+        results = [
+            {
+                "window": eval_window,
+                "result": {
+                    "return": 1.0,
+                    "max_drawdown": 1.0,
+                    "trades": train_entries,
+                    "fee_drag_pct": 0.1,
+                    "liquidations": 0,
+                    "daily_returns": [0.01, 0.0],
+                    "trend_capture_points": eval_points,
+                    "filled_side_entries": {"long": train_long_entries, "short": train_short_entries},
+                },
+            },
+            {
+                "window": validation_window,
+                "result": {
+                    "return": 1.0,
+                    "max_drawdown": 1.0,
+                    "trades": validation_entries,
+                    "fee_drag_pct": 0.1,
+                    "liquidations": 0,
+                    "daily_returns": [0.01, 0.0],
+                    "trend_capture_points": validation_points,
+                    "filled_side_entries": {"long": validation_long_entries, "short": validation_short_entries},
+                },
+            },
+        ]
+        validation_continuous_result = {
+            "return": 1.0,
+            "max_drawdown": 1.0,
+            "trades": validation_entries,
+            "fee_drag_pct": 0.1,
+            "liquidations": 0,
+            "daily_returns": [0.01, 0.0],
+            "trend_capture_points": validation_points,
+            "filled_side_entries": {"long": validation_long_entries, "short": validation_short_entries},
+            "period_start_timestamp": validation_start,
+            "period_end_timestamp": period_end,
+        }
+        full_period_result = {
+            "return": 2.0,
+            "max_drawdown": 1.0,
+            "trades": train_entries + validation_entries,
+            "fee_drag_pct": 0.2,
+            "liquidations": 0,
+            "daily_returns": [0.01, 0.0, 0.01, 0.0],
+            "trend_capture_points": eval_points + validation_points,
+            "filled_side_entries": {
+                "long": train_long_entries + validation_long_entries,
+                "short": train_short_entries + validation_short_entries,
+            },
+            "period_start_timestamp": 0,
+            "period_end_timestamp": period_end,
+        }
+        return summarize_evaluation(
+            results,
+            make_gate_config(
+                enforce_long_only_gate=True,
+            ),
+            validation_continuous_result=validation_continuous_result,
+            full_period_result=full_period_result,
+        )
+
+    def test_long_only_gate_rejects_validation_short_entries(self):
+        report = self._long_primary_gate_report(
+            train_long_entries=10,
+            train_short_entries=0,
+            validation_long_entries=3,
+            validation_short_entries=5,
+        )
+
+        self.assertFalse(report.gate_passed)
+        self.assertIn("val short开仓未关闭", report.gate_reason)
+        self.assertEqual(report.metrics["validation_short_entry_blocked"], 1.0)
+        self.assertEqual(report.metrics["selection_short_entry_blocked"], 1.0)
+
+    def test_long_only_gate_rejects_selection_short_entries(self):
+        report = self._long_primary_gate_report(
+            train_long_entries=0,
+            train_short_entries=5,
+            validation_long_entries=5,
+            validation_short_entries=5,
+        )
+
+        self.assertFalse(report.gate_passed)
+        self.assertIn("train+val short开仓未关闭", report.gate_reason)
+        self.assertIn("val short开仓未关闭", report.gate_reason)
+        self.assertEqual(report.metrics["validation_short_entry_blocked"], 1.0)
+        self.assertEqual(report.metrics["selection_short_entry_blocked"], 1.0)
+
+    def test_long_only_gate_allows_zero_short_entries(self):
+        long_only_report = self._long_primary_gate_report(
+            train_long_entries=5,
+            train_short_entries=0,
+            validation_long_entries=5,
+            validation_short_entries=0,
+        )
+
+        self.assertTrue(long_only_report.gate_passed)
+        self.assertEqual(long_only_report.gate_reason, "通过")
+        self.assertEqual(long_only_report.metrics["validation_short_entry_blocked"], 0.0)
+        self.assertEqual(long_only_report.metrics["selection_short_entry_blocked"], 0.0)
 
     def test_period_months_from_timestamps_uses_average_calendar_month(self):
         self.assertAlmostEqual(
@@ -1925,6 +2297,10 @@ class EvaluationFixesTest(unittest.TestCase):
 
         self.assertIn("train滚动漏斗(long)", report.summary_text)
         self.assertIn("val连续漏斗(short)", report.summary_text)
+        self.assertIn("行情标签表现", report.summary_text)
+        self.assertIn("行情标签诊断", report.prompt_summary_text)
+        self.assertNotIn("中幅上行震荡诊断", report.summary_text)
+        self.assertNotIn("中幅上行震荡诊断", report.prompt_summary_text)
         self.assertNotIn("低活动度信号（软触发，不是硬 gate）", report.summary_text)
         self.assertNotIn("下一轮优先做放宽/删减/合并类假设", report.summary_text)
         self.assertNotIn("低活动度软触发=", report.prompt_summary_text)
@@ -2017,7 +2393,7 @@ class StrategyValidationFixesTest(unittest.TestCase):
             "# PARAMS_END",
             "",
             "# EXIT_PARAMS_START",
-            "EXIT_PARAMS = {'leverage': 20, 'position_fraction': 0.17, 'position_size_min': 5000, 'position_size_max': 30000, 'max_concurrent_positions': 4, 'pyramid_enabled': 1, 'pyramid_max_times': 2, 'pyramid_size_ratio': 0.28, 'tp1_pnl_pct': 65.7}",
+        "EXIT_PARAMS = {'leverage': 20, 'position_fraction': 0.10, 'position_size_min': 0, 'position_size_max': 0, 'max_concurrent_positions': 1, 'pyramid_enabled': 1, 'pyramid_max_times': -1, 'pyramid_size_ratio': 0.05, 'breakout_tp1_close_fraction': 0.0, 'short_breakdown_tp1_close_fraction': 0.0, 'short_trend_tp1_close_fraction': 0.0, 'tp1_close_fraction': 0.0, 'tp1_pnl_pct': 65.7}",
             "# EXIT_PARAMS_END",
             "",
             "ENTRY_SIGNAL_ALIASES = {}",
@@ -2197,7 +2573,7 @@ class StrategyValidationFixesTest(unittest.TestCase):
         self.assertEqual(decision["entry_side"], "long")
         self.assertEqual(decision["entry_path_key"], "long_breakout")
 
-    def test_strategy_funnel_diagnostics_track_long_and_short_gate_passes(self):
+    def test_strategy_funnel_diagnostics_do_not_emit_short_entry_when_long_veto_blocks(self):
         strategy_module.reset_funnel_diagnostics()
 
         strategy_context = {
@@ -2244,7 +2620,7 @@ class StrategyValidationFixesTest(unittest.TestCase):
             )
 
         funnel = strategy_module.get_funnel_diagnostics()
-        self.assertEqual(signal, "short_breakdown")
+        self.assertIsNone(signal)
         self.assertEqual(
             funnel["long"],
             {
@@ -2258,9 +2634,9 @@ class StrategyValidationFixesTest(unittest.TestCase):
             funnel["short"],
             {
                 "sideways_pass": 1,
-                "outer_context_pass": 1,
-                "path_pass": 1,
-                "final_veto_pass": 1,
+                "outer_context_pass": 0,
+                "path_pass": 0,
+                "final_veto_pass": 0,
             },
         )
 
@@ -2607,9 +2983,9 @@ def strategy(*args, **kwargs):
     def test_validate_strategy_source_rejects_new_factor_slot_key(self):
         base_source = (REPO_ROOT / "src/strategy_macd_aggressive.py").read_text()
         source = base_source.replace(
-            '    "short_extra_2": {"enabled": 0, "weight": 0.20, "threshold": 0.50},\n',
+            '    "short_extra_2": {"enabled": 0, "weight": 0.00, "threshold": 0.00},\n',
             (
-                '    "short_extra_2": {"enabled": 0, "weight": 0.20, "threshold": 0.50},\n'
+                '    "short_extra_2": {"enabled": 0, "weight": 0.00, "threshold": 0.00},\n'
                 '    "new_extra_slot": {"enabled": 0, "weight": 0.20, "threshold": 0.50},\n'
             ),
             1,
@@ -2914,9 +3290,22 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("wiki/direction_board.md", prompt)
         self.assertIn("wiki/duplicate_watchlist.md", prompt)
         self.assertIn("wiki/failure_wiki.md", prompt)
+        self.assertIn("wiki/strategy_edit_boundary_card.md", prompt)
         self.assertIn("先想再写", prompt)
         self.assertIn("不要 hard code", prompt)
         self.assertIn("固定框架 + 固定因子槽", prompt)
+
+    def test_strategy_edit_boundary_card_is_loaded_from_wiki_template(self):
+        template_path = REPO_ROOT / "wiki/strategy_edit_boundary_card.md"
+        template_text = template_path.read_text(encoding="utf-8")
+        card = build_strategy_edit_boundary_card(("_trend_quality_long",))
+
+        self.assertIn("策略编辑边界卡", template_text)
+        self.assertIn("{{LOCKED_REGION_GUIDANCE}}", template_text)
+        self.assertIn("wiki/strategy_edit_boundary_card.md", card)
+        self.assertIn("`_trend_quality_long` ->", card)
+        self.assertIn("`_slot_long_context()`", card)
+        self.assertNotIn("{{LOCKED_REGION_GUIDANCE}}", card)
 
     def test_build_strategy_runtime_prompt_mentions_refresh_rule(self):
         prompt = build_strategy_research_prompt(
@@ -2926,26 +3315,31 @@ class JournalPromptFixesTest(unittest.TestCase):
         )
 
         self.assertIn("promotion_score` 严格高于当前 active reference", prompt)
-        self.assertIn("v28 有效活跃度调整时间块主分", prompt)
+        self.assertIn("return_score = robust_time_score - benchmark_hurdle_score", prompt)
+        self.assertIn("promotion_score = return_score + holding_time_score - penalty_score", prompt)
         self.assertIn("mean/median/P25", prompt)
         self.assertIn("buy&hold", prompt)
-        self.assertIn("capture_score` / `capture_core` 只作为趋势诊断", prompt)
-        self.assertIn("默认可以是 `long / flat`", prompt)
-        self.assertIn("short 占比、多空 capture 只做诊断，不进入评分", prompt)
-        self.assertIn("允许主动收窄 short", prompt)
+        self.assertIn("capture_score` / `capture_core` 只作为低优先级诊断", prompt)
+        self.assertIn("当前阶段是 `long-only / flat`", prompt)
+        self.assertIn("capture 仍只做诊断，不进入评分", prompt)
+        self.assertIn("不要因为 bear/downside 表现弱就恢复、放宽或优化 short", prompt)
         self.assertIn("Regime scorecard", prompt)
+        self.assertIn("行情标签诊断", prompt)
+        self.assertIn("只做诊断，不进入主分", prompt)
         self.assertIn("Sharpe 只作为人工筛选", prompt)
         self.assertNotIn("activity_adjusted_sharpe_score", prompt)
         self.assertIn("回撤惩罚", prompt)
-        self.assertIn("超过有效活跃度容忍线", prompt)
-        self.assertIn("鲁棒性软惩罚", prompt)
-        self.assertIn("低活跃度是硬 gate", prompt)
-        self.assertIn("过 gate 后，正收益还会继续按月频和持仓覆盖打倍率", prompt)
+        self.assertIn("按持仓覆盖给少量容忍", prompt)
+        self.assertIn("鲁棒性只做轻量软惩罚", prompt)
+        self.assertIn("不再因为 capture 落差或多空 capture 偏科直接淘汰", prompt)
+        self.assertIn("持仓覆盖先过硬 gate", prompt)
+        self.assertIn("long-only 当前只做方向提醒", prompt)
+        self.assertIn("月非加仓开仓数和月频都只做诊断", prompt)
         self.assertIn("train 180-270 / val 120-180", prompt)
         self.assertIn("持仓覆盖率约", prompt)
-        self.assertIn("只做诊断，不是硬 gate", prompt)
+        self.assertIn("只做诊断，不进入主分", prompt)
         self.assertIn("默认优先找更稳的泛化形态", prompt)
-        self.assertIn("不要因为 bear capture 弱就机械增加空头", prompt)
+        self.assertIn("围绕 short capture 追分", prompt)
         self.assertNotIn("ineffective_short_penalty", prompt)
         self.assertNotIn("promotion_delta >", prompt)
         self.assertIn("当前回合任务", prompt)
@@ -2979,6 +3373,19 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("不要为了追分新增复杂分支", prompt)
         self.assertNotIn("严格高于当前 active reference", prompt)
 
+    def test_build_strategy_runtime_prompt_mentions_long_only_gate_when_enabled(self):
+        prompt = build_strategy_research_prompt(
+            evaluation_summary="诊断",
+            journal_summary="记忆",
+            previous_best_score=1.23,
+            enforce_long_only_gate=True,
+        )
+
+        self.assertIn("long-only 是硬 gate", prompt)
+        self.assertIn("val short 非加仓开仓数必须为 `0`", prompt)
+        self.assertIn("train+val short 非加仓开仓数也必须为 `0`", prompt)
+        self.assertIn("不能恢复 short 入场", prompt)
+
     def test_build_strategy_runtime_prompt_can_include_reviewer_summary_card(self):
         prompt = build_strategy_research_prompt(
             evaluation_summary="诊断",
@@ -3010,7 +3417,7 @@ class JournalPromptFixesTest(unittest.TestCase):
             [
                 "# 研究器人工方向卡",
                 "## 优先方向",
-                "- 当前评分口径是 `robust_block_v28_activity_drawdown_allowance`。",
+                "- 当前评分口径是 `robust_block_v29_return_holding_penalty`。",
                 "- 当前 active reference 分数以运行器实时注入为准。",
                 "- 当前交易量已经足够，不要把主要预算浪费在刷交易量。",
                 "- 当前核心短板仍是趋势捕获质量。",
@@ -3116,7 +3523,7 @@ class JournalPromptFixesTest(unittest.TestCase):
 
         self.assertIn("多空结构诊断（事实提示，不是方向指令）", prompt)
         self.assertIn("不能直接推出本轮必须改 long、short 或 mixed", prompt)
-        self.assertIn("先看主评分短板、真实漏斗、交易活跃度和持仓覆盖", prompt)
+        self.assertIn("先看主评分短板、真实漏斗、持仓覆盖和惩罚项", prompt)
 
     def test_build_strategy_agents_instructions_mentions_all_required_symbols(self):
         prompt = build_strategy_agents_instructions()
@@ -3147,6 +3554,11 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("纯文本候选摘要", prompt)
         self.assertIn("未读到文件", prompt)
         self.assertIn("你只能产出 round brief", prompt)
+        self.assertIn("锁区想法翻译规则", prompt)
+        self.assertIn("_trend_quality_long()", prompt)
+        self.assertIn("_slot_long_context()", prompt)
+        self.assertIn("行情标签诊断", prompt)
+        self.assertIn("不进评分", prompt)
 
     def test_build_candidate_response_format_instructions_mentions_system_derived_regions(self):
         prompt = build_candidate_response_format_instructions()
@@ -3191,14 +3603,18 @@ class JournalPromptFixesTest(unittest.TestCase):
             closest_failed_cluster="participation_cluster",
             novelty_proof="这次直接改最终可达性，不再停留在内层 helper 微调。",
             current_complexity_headroom_text="当前基底复杂度余量：trend_quality_family bool_ops 剩 4",
-            evaluation_digest_text="- gate: 通过\n- 最弱维度: val陪跑=0.12\n- val多/空捕获=0.20/0.40，命中率=38%",
+            evaluation_digest_text=(
+                "- gate: 通过\n"
+                "- 最弱维度: val稳健时间块=-0.12\n"
+                "- robust blocks: train/val=0.08/-0.12，return=0.04，holding=0.02，penalty=0.06，val P25/最差=-0.20/-0.36"
+            ),
         )
 
         self.assertIn("round brief", prompt)
         self.assertIn("只修改 `src/strategy_macd_aggressive.py`", prompt)
         self.assertIn("策略主框架已硬锁", prompt)
         self.assertIn("当前紧凑诊断", prompt)
-        self.assertIn("最弱维度: val陪跑=0.12", prompt)
+        self.assertIn("最弱维度: val稳健时间块=-0.12", prompt)
         self.assertIn("单轮改动预算只是参考，不是硬 gate", prompt)
         self.assertIn("只回复 `EDIT_DONE`", prompt)
         self.assertNotIn("当前基底复杂度余量", prompt)
@@ -3282,7 +3698,8 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("不能替 planner 发明新方向", prompt)
         self.assertIn("预计新增、删除或迁移哪类真实交易", prompt)
         self.assertIn("放宽 `short_context`", prompt)
-        self.assertIn("没有说明它如何改善整体 train/val 稳健收益", prompt)
+        self.assertIn("恢复 short 入场", prompt)
+        self.assertIn("当前阶段 short 只保留退出和风控安全层", prompt)
 
     def test_build_strategy_round_brief_repair_prompt_mentions_required_fields(self):
         prompt = build_strategy_round_brief_repair_prompt(
@@ -3297,6 +3714,50 @@ class JournalPromptFixesTest(unittest.TestCase):
         self.assertIn("change_tags", prompt)
         self.assertIn("不要输出随笔", prompt)
         self.assertIn("纯文本候选摘要", prompt)
+        self.assertIn("锁区想法翻译规则", prompt)
+
+    def test_build_strategy_reviewer_prompt_requires_locked_region_translation(self):
+        prompt = build_strategy_reviewer_prompt(
+            evaluation_summary="当前主参考多头偏弱",
+            journal_summary="当前 stage 执行摘要\n- 当前过热近邻/慎入区: 簇=ownership_cluster",
+            round_brief_text=(
+                "- candidate_id: c1\n"
+                "- hypothesis: 继续修 `_trend_quality_long()`\n"
+                "- change_plan: 直接改 `_trend_quality_long()` 提高 long 入场\n"
+            ),
+        )
+
+        self.assertIn("锁区想法翻译规则", prompt)
+        self.assertIn("必须补齐可改落点", prompt)
+
+    def test_validate_round_brief_payload_rejects_locked_region_without_mapped_target(self):
+        payload = research_script._parse_model_candidate_payload(
+            """
+candidate_id: candidate_locked
+primary_direction: long | translate locked region
+hypothesis: 继续修 `_trend_quality_long()`
+change_plan: 直接改 `_trend_quality_long()`，让 long 更容易过
+change_tags: long, trend_quality
+novelty_proof: 这次要落到锁区本身。
+"""
+        )
+
+        with self.assertRaisesRegex(StrategySourceError, "locked regions without a mapped editable target"):
+            research_script._validate_round_brief_payload(payload)
+
+    def test_validate_round_brief_payload_allows_locked_region_with_mapped_target(self):
+        payload = research_script._parse_model_candidate_payload(
+            """
+candidate_id: candidate_locked_ok
+primary_direction: long | translate locked region
+hypothesis: 目标在 `_trend_quality_long()`，落码改 `_slot_long_context()`
+change_plan: 目标在 `_trend_quality_long()`，落码改 `_slot_long_context()` 和 `_slot_long_veto()`
+change_tags: long, trend_quality
+novelty_proof: 这次把想法翻译到可改 slot。
+"""
+        )
+
+        research_script._validate_round_brief_payload(payload)
 
     def test_build_strategy_reviewer_repair_prompt_mentions_required_fields(self):
         prompt = build_strategy_reviewer_repair_prompt(
@@ -4179,8 +4640,54 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
 
         self.assertEqual(int(signal_frame.loc[0, "enter_long"]), 1)
         self.assertEqual(signal_frame.loc[0, "enter_tag"], "long_impulse")
-        self.assertEqual(int(signal_frame.loc[2, "enter_short"]), 1)
-        self.assertEqual(signal_frame.loc[2, "enter_tag"], "short_reaccel")
+        self.assertEqual(int(signal_frame.loc[2, "enter_short"]), 0)
+        self.assertIsNone(signal_frame.loc[2, "enter_tag"])
+
+    def test_freqtrade_adapter_is_long_only_at_entry_layer(self):
+        self.assertFalse(ft_adapter.MacdAggressiveStrategy.can_short)
+
+    def test_freqtrade_position_sizing_uses_ten_percent_initial_five_percent_add(self):
+        self.assertEqual(ft_adapter.MacdAggressiveStrategy.max_entry_position_adjustment, -1)
+        self.assertAlmostEqual(ft_adapter._fractional_stake_target(100.0), 10.0)
+        self.assertAlmostEqual(ft_adapter._pyramid_stake_target(100.0), 5.0)
+
+    def test_freqtrade_adjust_trade_position_does_not_partial_exit(self):
+        strategy = ft_adapter.MacdAggressiveStrategy()
+
+        class DummyTrade:
+            pair = "BTC/USDT:USDT"
+            stake_amount = 10.0
+            nr_of_successful_entries = 1
+            is_short = False
+            enter_tag = "long_pullback"
+            buy_tag = None
+
+            def get_custom_data(self, key, default=None):
+                return default
+
+        row = pd.Series(
+            {
+                "adx": 5.0,
+                "macd_line": 0.0,
+                "macd_signal_line": 1.0,
+                "histogram": -1.0,
+            }
+        )
+        with mock.patch.object(strategy, "_get_pair_context", return_value=(row, row)):
+            result = strategy.adjust_trade_position(
+                DummyTrade(),
+                pd.Timestamp("2024-01-01").to_pydatetime(),
+                current_rate=110.0,
+                current_profit=1.0,
+                min_stake=0.0,
+                max_stake=100.0,
+                current_entry_rate=100.0,
+                current_exit_rate=110.0,
+                current_entry_profit=1.0,
+                current_exit_profit=1.0,
+            )
+
+        self.assertIsNone(result)
 
     def test_cluster_key_prefers_stable_canonical_cluster(self):
         self.assertEqual(
@@ -5480,7 +5987,7 @@ class FreqtradeAdapterFixesTest(unittest.TestCase):
 
         self.assertIn("当前 stage 运营指标表", summary)
         self.assertIn("smoke->full_eval", summary)
-        self.assertIn("| 25% | 25% | 25% | 67% | 1.00 | 弱侧(long) 75% |", summary)
+        self.assertIn("| 25% | 25% | 25% | 67% | 1.00 | 诊断弱项(long) 75% |", summary)
 
     def test_journal_summary_displays_candidate_validation_stage(self):
         entries = [

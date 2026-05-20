@@ -55,26 +55,29 @@ flowchart TB
 - 标的：`BTC-USDT-SWAP`，策略按 `20x` 合约研究。
 - 事实层：`15m`；`1h / 4h` 由 `15m` 聚合，只做确认层。
 - 执行层：优先使用 `1m` 回测成交。
-- 评分口径：`robust_block_v28_activity_drawdown_allowance`。
+- 评分口径：`robust_block_v29_return_holding_penalty`。
 - `train`：`2023-07-01` 到 `2024-12-31`。
 - `val`：`2025-01-01` 到 `2025-12-31`。
 - `test`：`2026-01-01` 到 `2026-04-30`。
 - 晋升条件：候选先过 `gate`；已有 champion 时，还必须 `promotion_score` 严格高于当前 active reference。当前取消的是额外晋级边际，不是取消“评分更高才替换”的核心规则。
 - 唯一例外是系统排队的“结构自检修复轮”：它不是普通追分轮，只在通过现有基础安全门后跳过 `promotion_score` 比较，用来替换掉明显局部过拟合或结构膨胀的 active reference。
-- v28 主分是有效活跃度调整后的稳健时间块收益：train/val 各自用 `28` 天收益块的 `mean/median/P25` 聚合，`min` 只做诊断；低月频或低持仓覆盖先触发硬 gate，过 gate 后正收益仍按活跃度打倍率。
+- v29 主分是稳健时间块收益：train/val 各自用 `28` 天收益块的 `mean/median/P25` 聚合，`min` 只做诊断；月开仓数只做诊断，不给主分打倍率。
 - `benchmark_hurdle_score = max(0, buy_hold_robust_score) * 0.25`，只在 buy&hold 自身稳健分为正时形成轻量基准扣分。
-- `main_score = robust_time_score - benchmark_hurdle_score`。
-- `promotion_score = main_score - drawdown_penalty_score - robustness_penalty_score`。
+- `return_score = robust_time_score - benchmark_hurdle_score`。
+- `holding_time_score` 是小额辅助分：持仓覆盖太低扣分，达到有效覆盖给小额加分，过度接近 buy-and-hold 轻扣。
+- `penalty_score = drawdown_penalty_score + robustness_penalty_score + fee_drag_penalty_score + overfit_penalty_score`。
+- `promotion_score = return_score + holding_time_score - penalty_score`。
 - 主评分使用连续 `train / val` 数据源；`train` 从已有 `train+val` 连续回测按 `val` 起点切出，walk-forward 继续用于诊断和早停。
-- walk-forward 诊断按 v28 robust block 分；提前淘汰直接复用已完成的 walk-forward 窗口结果，不再额外重跑累计 train 区间。
-- `capture_score` / `capture_core` 只作为趋势诊断，不进入主评分，也不再给收益做倍率。capture 仍使用固定 clean trend segments，并保留“段等权均分 50% + 原权重均分 50%”的混合口径。
-- 默认研究画像是 `long / flat`；`short` 只作为高置信辅助。short 占比和多空 capture 只做诊断，不进入评分或 gate；若 short 不能改善整体 train/val 稳健收益、回撤或 val 弱块，planner 可以主动收窄 short。
-- 参数步长现在是高优先级软约束，不是技术 gate：默认避免只做近邻阈值微调；如果需要小步长修正，planner 必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。真正的硬拦截是 smoke 行为不变、源码安全校验、gate 和 promotion。
+- walk-forward 诊断按 v29 robust block 分；提前淘汰直接复用已完成的 walk-forward 窗口结果，不再额外重跑累计 train 区间。
+- `capture_score` / `capture_core` 只作为低优先级趋势诊断，不进入主评分，也不再给收益做倍率。不要围绕固定 clean trend segments 或 bull/bear capture 追分；鲁棒性优先看稳健收益块分布、正收益集中度和覆盖率。
+- 当前阶段默认研究画像是 `long-only / flat`；short 入场权限关闭，val 与 train+val short 非加仓开仓数必须为 `0`。short 退出和风控代码只作为安全层保留。
+- 参数步长现在是高优先级软约束，不是技术 gate：默认用中到大步长，优先换真实交易路径、slot 层、choke point、规则链或最终放行层；如果需要小步长修正，planner 必须说明它会改变哪条真实交易路径、漏斗节点或持仓管理行为。真正的硬拦截是 smoke 行为不变、源码安全校验、gate 和 promotion。
 - 当前策略源码已做等价压缩；复杂度默认只做诊断，不拦普通候选。结构自检修复不再按复杂度阈值或连续失败即时触发，而是按周期整理。
 - Fear & Greed 情绪数据只作为策略可选输入暴露在 `market_state`，不进入评分、gate 或强制优化目标。
 - Sharpe 不进入主评分，只保留为人工筛选和通知展示指标。
-- 有效活跃度按“非加仓开仓月频 × 持仓覆盖率”计算；train/val 必须分别达到至少 `5` 笔/月和 `5%` 持仓覆盖，否则 gate 失败。开仓目标约 `train 180-270 / val 120-180`，也就是 `10-15` 笔/月。持仓覆盖率约 `16%` 起给满覆盖倍率；趋势机会覆盖只做诊断。
-- 回测执行层允许总仓位上限内多空并行；`max_concurrent_positions` 统计独立 position，加仓只改变已有 position 的规模，不占用这个数量；混合持仓时，信号层按方向扫描持仓，不再只看第一个 position。
+- 持仓覆盖是当前参与度 gate：train/val 必须分别达到至少 `5%` 持仓覆盖，否则 gate 失败。开仓数和月频只做诊断参考，不进入主分；持仓覆盖率约 `16%` 起视为充分参与行情，趋势机会覆盖只做诊断。
+- 回测执行层按 long-only 单 trade 管理仓位；`max_concurrent_positions` 固定为 `1`，加仓只提高同一 trade 的保证金规模，不新建独立 position。
+- 仓位是固定 20 倍 BTC 保证金口径：首仓使用当前账户净值的 `10%` 保证金；每次加仓新增当时账户净值的 `5%` 保证金；半退关闭，只能通过完整退出信号离场。
 - 交易数、`filled_entries` 和漏斗通过量只保留观察价值，不再作为下一轮方向的默认软触发。
 - Regime scorecard 只做解释工具，不进入评分或 gate；它复用已有 ADX/CHOP/ATR、flow、成交量代理、Fear & Greed 和价格自身波动，帮助判断什么时候适合动量、什么时候应该缩手。
 - 鲁棒性软惩罚不额外回测；它复用已有 train/val 稳健收益块和 `train/val` Ulcer，检查两侧分布是否严重不一致。
@@ -90,6 +93,7 @@ flowchart TB
 6. 若 `PASS`，`edit_worker` 把方向落到策略源码。
 7. 若出现 no-edit、语法错误、缺 helper、校验失败等技术问题，`repair_worker` 只修技术错误。
 8. 主进程检查真实 diff、重复源码、smoke 行为和关键漏斗变化。
+9. 如果 planner draft 或 repair 文本点名锁区 helper，但没有同时指向可改 slot / 参数落点，主进程会先把它判无效并要求重写，不会让它继续撞锁区。
 9. 如果 brief 指定单个连续型 `EXIT_PARAMS` 的 `exit_range_scan`，主进程最多扫 3 个值，只做轻量预筛。
 10. 主进程跑完整 `train walk-forward + val`；评分阶段只使用已有评估结果和轻量预筛结果。若候选在前段 walk-forward robust 分与收益分都很差，会直接提前淘汰。
 11. 主进程执行 gate 与 promotion 判断。
@@ -140,7 +144,7 @@ flowchart TB
 - 只改 `src/strategy_macd_aggressive.py`。
 - 当前策略是固定框架 + 固定因子槽结构；只能调整 `PARAMS` 既有 key、开放的 `EXIT_PARAMS`、`FACTOR_SLOT_PARAMS` 和固定 `_slot_*()` 函数体。
 - 不允许改 `_strategy_core()`、候选生成顺序、slot 名称/数量/签名、`strategy()` / `strategy_decision()` 入口，也不允许新增 top-level helper 或参数 key。
-- 杠杆、单仓上下限和加仓规模保持固定；`position_fraction` 与 `max_concurrent_positions` 现在允许研究器探索。
+- 杠杆、仓位比例、单仓上下限、并发仓数、加仓规模和半退比例保持固定；研究器只能调整信号、完整退出、追踪和加仓触发条件，不能通过调仓位风险键改善分数。
 
 ### repair_worker
 

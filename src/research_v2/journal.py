@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from research_v2.evaluation import OVERFIT_WARN_SCORE, overfit_reference_action, overfit_risk_level_from_score
+from research_v2.regime_diagnostics import regime_label_from_id
 from research_v2.strategy_code import build_system_edit_signature
 
 
@@ -45,6 +46,10 @@ LOW_CHANGE_STREAK = 3
 LOW_CHANGE_PROMOTION_DELTA_EPS = 0.02
 LOW_CHANGE_PROMOTION_SCORE_SPAN = 0.05
 LOW_CHANGE_QUALITY_SCORE_SPAN = 0.08
+LOW_CHANGE_RETURN_SCORE_SPAN = 0.06
+LOW_CHANGE_HOLDING_SCORE_SPAN = 0.03
+LOW_CHANGE_PENALTY_SCORE_SPAN = 0.05
+LOW_CHANGE_EXPOSURE_PCT_SPAN = 2.0
 LOW_CHANGE_TREND_SCORE_SPAN = 0.08
 LOW_CHANGE_HIT_RATE_SPAN = 0.08
 LOW_CHANGE_SIDE_CAPTURE_SPAN = 0.12
@@ -1871,8 +1876,8 @@ def _overfit_risk_board(entries: list[dict[str, Any]], limit: int) -> list[str]:
     flagged_rows: list[tuple[float, str]] = []
     lines = [
         "过拟合风险表（谨慎参考）:",
-        "| 轮次 | 结果 | promotion | 风险 | 分数 | top1+ | chain+ | 覆盖 | 多空偏科 | 落差 | 建议 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 轮次 | 结果 | promotion | 风险 | 分数 | top1+ | chain+ | 覆盖 | capture差 | 建议 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for entry in entries:
         risk_score = _metric_from_entry(entry, "overfit_risk_score")
@@ -1890,12 +1895,11 @@ def _overfit_risk_board(entries: list[dict[str, Any]], limit: int) -> list[str]:
             f"{_metric_from_entry(entry, 'overfit_top1_positive_share'):.0%} | " \
             f"{_metric_from_entry(entry, 'overfit_chain_positive_share'):.0%} | " \
             f"{_metric_from_entry(entry, 'overfit_coverage_ratio'):.0%} | " \
-            f"{_metric_from_entry(entry, 'overfit_bull_bear_gap'):.2f} | " \
             f"{_metric_from_entry(entry, 'overfit_capture_drop_abs'):.2f} | {action} |"
         flagged_rows.append((risk_score + (1000.0 if hard_fail else 0.0), sort_key))
 
     if not flagged_rows:
-        lines.append("| - | - | - | 低 | 0 | - | - | - | - | - | 最近未发现需要降权的高风险轮次 |")
+        lines.append("| - | - | - | 低 | 0 | - | - | - | - | 最近未发现需要降权的高风险轮次 |")
         return lines
 
     for _, row in sorted(flagged_rows, key=lambda item: item[0], reverse=True)[:limit]:
@@ -1933,6 +1937,31 @@ def _low_change_tail(entries: list[dict[str, Any]], streak: int = LOW_CHANGE_STR
         return []
     if _span([_score_value(entry.get("quality_score")) for entry in tail]) > LOW_CHANGE_QUALITY_SCORE_SPAN:
         return []
+    has_v29_metrics = any(
+        any(
+            _has_metric(entry, key)
+            for key in (
+                "return_score",
+                "holding_time_score",
+                "penalty_score",
+                "train_position_exposure_pct",
+                "validation_position_exposure_pct",
+            )
+        )
+        for entry in tail
+    )
+    if has_v29_metrics:
+        if _span([_metric_from_entry(entry, "return_score") for entry in tail]) > LOW_CHANGE_RETURN_SCORE_SPAN:
+            return []
+        if _span([_metric_from_entry(entry, "holding_time_score") for entry in tail]) > LOW_CHANGE_HOLDING_SCORE_SPAN:
+            return []
+        if _span([_metric_from_entry(entry, "penalty_score") for entry in tail]) > LOW_CHANGE_PENALTY_SCORE_SPAN:
+            return []
+        if _span([_metric_from_entry(entry, "validation_position_exposure_pct") for entry in tail]) > LOW_CHANGE_EXPOSURE_PCT_SPAN:
+            return []
+        if _span([_metric_from_entry(entry, "avg_fee_drag") for entry in tail]) > LOW_CHANGE_FEE_DRAG_SPAN:
+            return []
+        return tail
     if _span([_metric_from_entry(entry, "combined_trend_capture_score") for entry in tail]) > LOW_CHANGE_TREND_SCORE_SPAN:
         return []
     if _span([_metric_from_entry(entry, "segment_hit_rate") for entry in tail]) > LOW_CHANGE_HIT_RATE_SPAN:
@@ -2002,7 +2031,7 @@ def _exploration_trigger_lines(entries: list[dict[str, Any]], limit: int) -> lis
             f"最近 {LOW_CHANGE_STREAK} 轮都没有产生有效代码改动或 smoke 交易行为变化，已按重复探索记入历史。",
             f"- 重复原因：{'；'.join(reasons[:limit]) or '-'}",
             f"- 近期近邻方向簇：{', '.join(clusters[:limit]) or '-'}；标签：{', '.join(tags[:limit]) or '-'}；高频区域：{', '.join(regions[:limit]) or '-'}",
-            "- 下一轮必须先产出有效 diff，并且必须改变 smoke 窗口的实际交易路径；若继续沿用相近方向，至少切换方向簇、普通 family、long-short target 中的一项。",
+            "- 下一轮必须先产出有效 diff，并且必须改变 smoke 窗口的实际交易路径；若继续沿用相近方向，至少切换方向簇、普通 family、slot 层、choke point 或最终放行链中的一项。",
         ]
 
     repeated_basin_tail = _repeated_result_basin_tail(entries)
@@ -2029,7 +2058,7 @@ def _exploration_trigger_lines(entries: list[dict[str, Any]], limit: int) -> lis
 
         return [
             "探索触发（必须执行）:",
-            f"最近 {LOW_CHANGE_STREAK} 轮反复落回同一结果盆地：分数、命中率、弱侧捕获和 gate 原因几乎一致，不应继续把它们当成独立新证据。",
+            f"最近 {LOW_CHANGE_STREAK} 轮反复落回同一结果盆地：晋级分、收益主分、持仓覆盖、惩罚项或 gate 原因几乎一致，不应继续把它们当成独立新证据。",
             f"- 结果盆地原因：{'；'.join(reasons[:limit]) or '-'}",
             f"- 近期近邻方向簇：{', '.join(clusters[:limit]) or '-'}；标签：{', '.join(tags[:limit]) or '-'}；高频区域：{', '.join(regions[:limit]) or '-'}",
             "- 下一轮必须优先切不同方向簇；若仍留在同簇，必须切不同 choke point、不同机制层或不同最终放行链，而不是继续换候选名、tag 或措辞。",
@@ -2057,10 +2086,10 @@ def _exploration_trigger_lines(entries: list[dict[str, Any]], limit: int) -> lis
 
     lines = [
         "探索触发（必须执行）:",
-        f"最近 {LOW_CHANGE_STREAK} 轮都属于低变化轮次：晋级分没有实质提升，且 trend_score / hit_rate / bull_bear_capture / fee_drag 基本不变。",
+        f"最近 {LOW_CHANGE_STREAK} 轮都属于低变化轮次：晋级分没有实质提升，且 v29 主评分拆解、持仓覆盖或费用拖累基本不变。",
         f"- 近期近邻方向簇：{', '.join(clusters[:limit]) or '-'}；标签：{', '.join(tags[:limit]) or '-'}；高频区域：{', '.join(regions[:limit]) or '-'}",
-        "- 下一轮必须把它当作探索轮：优先切簇；若无法切簇，至少切换普通 family、long-short target 或真实交易路径层级中的一项。",
-        "- 目标是让 segment_hit_rate、bull_capture_score、bear_capture_score、avg_fee_drag、total_trades 中至少两项明显变化。",
+        "- 下一轮必须把它当作探索轮：优先切簇；若无法切簇，至少切换普通 family、slot 层、choke point 或真实交易路径层级中的一项。",
+        "- 目标是让 return_score、holding_time_score、penalty_score、持仓覆盖或 avg_fee_drag 中至少两项明显变化；capture 和交易数只作诊断。",
     ]
     return lines
 
@@ -2241,8 +2270,51 @@ def _weak_side_from_reference_metrics(reference_metrics: dict[str, Any] | None) 
     if bull_score < bear_score:
         return "long"
     if bear_score < bull_score:
+        if _reference_is_long_only(reference_metrics):
+            return ""
         return "short"
     return ""
+
+
+def _reference_is_long_only(reference_metrics: dict[str, Any] | None) -> bool:
+    if not isinstance(reference_metrics, dict):
+        return False
+    known_keys = (
+        "validation_short_entries",
+        "selection_short_entries",
+        "validation_short_closed_trades",
+        "selection_short_closed_trades",
+    )
+    if not any(key in reference_metrics for key in known_keys):
+        return False
+    return all(_score_value(reference_metrics.get(key)) <= 0.0 for key in known_keys)
+
+
+def _regime_weakness_note_from_metrics(metrics: dict[str, Any] | None, *, prefix: str = "validation_") -> str:
+    if not isinstance(metrics, dict):
+        return ""
+    label = regime_label_from_id(metrics.get(f"{prefix}regime_opportunity_weakness_label_id"))
+    if not label:
+        return ""
+    market_return = _score_value(metrics.get(f"{prefix}regime_opportunity_weakness_market_return_pct"))
+    strategy_return = _score_value(metrics.get(f"{prefix}regime_opportunity_weakness_strategy_return_pct"))
+    gap = _score_value(metrics.get(f"{prefix}regime_opportunity_weakness_gap_pct"))
+    days = _score_value(metrics.get(f"{prefix}regime_opportunity_weakness_days"))
+    return f"{label} {days:.0f}天，盘面{market_return:.1f}%，策略{strategy_return:.1f}%，差{gap:.1f}%"
+
+
+def _recent_regime_weakness_labels(entries: list[dict[str, Any]], *, limit: int = 6) -> str:
+    counter: Counter[str] = Counter()
+    for entry in entries[-max(1, limit):]:
+        metrics = entry.get("metrics", {})
+        if not isinstance(metrics, dict):
+            continue
+        label = regime_label_from_id(metrics.get("validation_regime_opportunity_weakness_label_id"))
+        if label:
+            counter[label] += 1
+    if not counter:
+        return "-"
+    return _top_counter_labels(counter, 3)
 
 
 def _entry_smoke_passed(entry: dict[str, Any]) -> bool:
@@ -2316,14 +2388,14 @@ def _format_stage_operating_metrics(
     stage_name: str,
 ) -> list[str]:
     weak_side = str(metrics.get("weak_side", "")).strip()
-    weak_side_label = {"long": "弱侧(long)", "short": "弱侧(short)"}.get(weak_side, "弱侧")
+    weak_side_label = {"long": "诊断弱项(long)", "short": "诊断弱项(short)"}.get(weak_side, "诊断弱项")
     weak_side_share = (
         f"{_score_value(metrics.get('weak_side_share')):.0%}"
         if weak_side else "-"
     )
     return [
         f"{stage_name} 运营指标表:",
-        "| accept rate | behavioral_noop rate | exploration_blocked rate | smoke->full_eval | 平均改动 ordinary families | 弱侧探索占比 |",
+        "| accept rate | behavioral_noop rate | exploration_blocked rate | smoke->full_eval | 平均改动 ordinary families | 诊断弱项探索占比 |",
         "| --- | --- | --- | --- | --- | --- |",
         (
             f"| {_score_value(metrics.get('accept_rate')):.0%} | "
@@ -2429,11 +2501,18 @@ def _stage_executive_summary_lines(
     if not entries:
         return []
 
+    long_only_reference = _reference_is_long_only(reference_metrics)
     weak_side = _weak_side_from_reference_metrics(reference_metrics)
-    target_text = {
-        "long": "当前多头捕获相对弱；这只是诊断事实，不是方向指令。先看主评分短板、真实漏斗和有效活跃度，再决定是否改 long、short 或 mixed。",
-        "short": "当前空头捕获相对弱；这只是诊断事实，不是方向指令。先看主评分短板、真实漏斗和有效活跃度，再决定是否改 long、short 或 mixed。",
-    }.get(weak_side, "当前多空没有明显弱侧；默认先看最影响 gate 和 promotion 的主短板。")
+    if long_only_reference:
+        target_text = (
+            "当前阶段是 long-only；先看主评分短板、long 真实漏斗、持仓覆盖、惩罚项和 28 天收益块。"
+            "下行段表现只用于解释风险，不作为恢复 short 的方向。"
+        )
+    else:
+        target_text = {
+            "long": "当前多头捕获相对弱；这只是诊断事实，不是方向指令。先看主评分短板、真实漏斗、持仓覆盖、惩罚项和 28 天收益块，再决定是否改 long、short 或 mixed。",
+            "short": "当前空头捕获相对弱；这只是诊断事实，不是方向指令。先看主评分短板、真实漏斗、持仓覆盖、惩罚项和 28 天收益块，再决定是否改 long、short 或 mixed。",
+        }.get(weak_side, "当前多空没有明显弱侧；默认先看最影响 gate 和 promotion 的主短板。")
 
     accepted_count = sum(1 for entry in entries if str(entry.get("outcome", "")).strip() == "accepted")
     rejected_count = sum(1 for entry in entries if str(entry.get("outcome", "")).strip() == "rejected")
@@ -2461,6 +2540,14 @@ def _stage_executive_summary_lines(
         f"- 当前状态: 本 stage 共 {len(entries)} 条，完整评估 {full_eval_count} 条，"
         f"保留 {accepted_count} 条，未保留 {rejected_count} 条。"
     )
+    current_regime_note = _regime_weakness_note_from_metrics(reference_metrics)
+    recent_regime_labels = _recent_regime_weakness_labels(entries, limit=limit)
+    if current_regime_note or recent_regime_labels != "-":
+        lines.append(
+            "- 行情标签短板: "
+            f"当前reference val机会短板={current_regime_note or '-'}；"
+            f"最近完整评估常见短板={recent_regime_labels}。"
+        )
     if repeated_nucleus is not None:
         lines.append(
             f"- 重复失败核: 最近 {repeated_nucleus['count']} 轮都落在 "
@@ -2469,14 +2556,18 @@ def _stage_executive_summary_lines(
     else:
         lines.append("- 重复失败核: 当前还没有形成 2 轮以上的同核失败。")
     lines.append(
-        "- 当前复盘优先级: 最近结构化失败证据、实时评分拆解、真实漏斗 > 静态弱侧或旧叙事；先判断上一条路为什么失败，再决定是否继续同方向。"
+        "- 当前复盘优先级: 最近结构化失败证据、实时评分拆解、真实漏斗 > 静态 capture 弱项或旧叙事；先判断上一条路为什么失败，再决定是否继续同方向。"
     )
     lines.append(
         f"- 当前过热近邻/慎入区: 簇={_top_counter_labels(cluster_counter, 2)}；"
         f"ordinary family={_top_counter_labels(family_counter, 2)}；"
         f"标签={_top_counter_labels(tag_counter, 4)}"
     )
-    if weak_side == "long":
+    if long_only_reference:
+        lines.append(
+            "- 当前阅读提醒: `weak side` 在 long-only 阶段不作为前台目标；不要把 bear/downside 表现弱解读成需要补 short。"
+        )
+    elif weak_side == "long":
         lines.append(
             "- 当前阅读提醒: `weak side = long` 只说明多头捕获相对弱，不等于根因一定在 long 侧，也不等于必须继续补 long；若同一种补法已反复失败，先换机制层或路径。"
         )
@@ -3249,13 +3340,13 @@ def _empty_prompt_tables(stage_title: str = "当前 stage") -> list[str]:
         "| - | 0 | 0 | 0 | 0 | 0.00 | OPEN | - |",
         "",
         "过拟合风险表（谨慎参考）:",
-        "| 轮次 | 结果 | promotion | 风险 | 分数 | top1+ | chain+ | 覆盖 | 多空偏科 | 落差 | 建议 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-        "| - | - | - | 低 | 0 | - | - | - | - | - | 暂无需要降权的高风险轮次 |",
+        "| 轮次 | 结果 | promotion | 风险 | 分数 | top1+ | chain+ | 覆盖 | capture差 | 建议 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| - | - | - | 低 | 0 | - | - | - | - | 暂无需要降权的高风险轮次 |",
         "",
         f"{stage_title} 共 0 条：保留 0，未保留 0，重复跳过 0，结果盆地重复 0，探索拦截 0，提前淘汰 0，运行失败 0。",
         f"{stage_title} 运营指标表:",
-        "| accept rate | behavioral_noop rate | exploration_blocked rate | smoke->full_eval | 平均改动 ordinary families | 弱侧探索占比 |",
+        "| accept rate | behavioral_noop rate | exploration_blocked rate | smoke->full_eval | 平均改动 ordinary families | 诊断弱项探索占比 |",
         "| --- | --- | --- | --- | --- | --- |",
         "| 0% | 0% | 0% | 0% | 0.00 | - |",
         f"{stage_title} 核心指标表:",

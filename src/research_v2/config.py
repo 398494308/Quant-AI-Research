@@ -36,6 +36,11 @@ def _env_float(name: str, default: float) -> float:
     return float(os.getenv(name, str(default)))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _env_int_tuple(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
     raw = str(os.getenv(name, ",".join(str(item) for item in default))).strip()
     if not raw:
@@ -124,6 +129,19 @@ def _load_scoring_config(windows: "WindowConfig") -> "ScoringConfig":
         exposure_multiplier_floor_value=_env_float("MACD_V2_EXPOSURE_MULTIPLIER_FLOOR_VALUE", 0.25),
         exposure_multiplier_low_value=_env_float("MACD_V2_EXPOSURE_MULTIPLIER_LOW_VALUE", 0.45),
         exposure_multiplier_preferred_value=_env_float("MACD_V2_EXPOSURE_MULTIPLIER_PREFERRED_VALUE", 0.75),
+        holding_time_min_exposure_pct=_env_float("MACD_V2_HOLDING_TIME_MIN_EXPOSURE_PCT", 5.0),
+        holding_time_full_exposure_pct=_env_float("MACD_V2_HOLDING_TIME_FULL_EXPOSURE_PCT", 16.0),
+        holding_time_overexposure_warn_pct=_env_float("MACD_V2_HOLDING_TIME_OVEREXPOSURE_WARN_PCT", 45.0),
+        holding_time_overexposure_full_pct=_env_float("MACD_V2_HOLDING_TIME_OVEREXPOSURE_FULL_PCT", 75.0),
+        holding_time_bonus_cap=_env_float("MACD_V2_HOLDING_TIME_BONUS_CAP", 0.08),
+        holding_time_underexposure_penalty_cap=_env_float("MACD_V2_HOLDING_TIME_UNDEREXPOSURE_PENALTY_CAP", 0.12),
+        holding_time_overexposure_penalty_cap=_env_float("MACD_V2_HOLDING_TIME_OVEREXPOSURE_PENALTY_CAP", 0.08),
+        fee_drag_penalty_start_pct=_env_float("MACD_V2_FEE_DRAG_PENALTY_START_PCT", 5.0),
+        fee_drag_penalty_full_pct=_env_float("MACD_V2_FEE_DRAG_PENALTY_FULL_PCT", 11.5),
+        fee_drag_penalty_cap=_env_float("MACD_V2_FEE_DRAG_PENALTY_CAP", 0.12),
+        overfit_penalty_start_score=_env_float("MACD_V2_OVERFIT_PENALTY_START_SCORE", 20.0),
+        overfit_penalty_full_score=_env_float("MACD_V2_OVERFIT_PENALTY_FULL_SCORE", 60.0),
+        overfit_penalty_cap=_env_float("MACD_V2_OVERFIT_PENALTY_CAP", 0.12),
         capture_balance_gap_tolerance=_env_float("MACD_V2_CAPTURE_BALANCE_GAP_TOLERANCE", 0.08),
         capture_balance_gap_full=_env_float("MACD_V2_CAPTURE_BALANCE_GAP_FULL", 0.24),
         capture_balance_max_weak_weight=_env_float("MACD_V2_CAPTURE_BALANCE_MAX_WEAK_WEIGHT", 0.65),
@@ -215,10 +233,11 @@ class GateConfig:
     min_validation_bear_capture: float
     max_fee_drag_pct: float
     min_validation_closed_trades: int = 0
-    min_train_monthly_entries: float = 5.0
-    min_validation_monthly_entries: float = 5.0
+    min_train_monthly_entries: float = 0.0
+    min_validation_monthly_entries: float = 0.0
     min_train_position_exposure_pct: float = 5.0
     min_validation_position_exposure_pct: float = 5.0
+    enforce_long_only_gate: bool = False
     validation_block_count: int = 4
     min_validation_block_floor: float = -0.10
     max_validation_block_failures: int = 3
@@ -250,6 +269,19 @@ class ScoringConfig:
     exposure_multiplier_floor_value: float = 0.25
     exposure_multiplier_low_value: float = 0.45
     exposure_multiplier_preferred_value: float = 0.75
+    holding_time_min_exposure_pct: float = 5.0
+    holding_time_full_exposure_pct: float = 16.0
+    holding_time_overexposure_warn_pct: float = 45.0
+    holding_time_overexposure_full_pct: float = 75.0
+    holding_time_bonus_cap: float = 0.08
+    holding_time_underexposure_penalty_cap: float = 0.12
+    holding_time_overexposure_penalty_cap: float = 0.08
+    fee_drag_penalty_start_pct: float = 5.0
+    fee_drag_penalty_full_pct: float = 11.5
+    fee_drag_penalty_cap: float = 0.12
+    overfit_penalty_start_score: float = 20.0
+    overfit_penalty_full_score: float = 60.0
+    overfit_penalty_cap: float = 0.12
     capture_balance_gap_tolerance: float = 0.08
     capture_balance_gap_full: float = 0.24
     capture_balance_max_weak_weight: float = 0.65
@@ -365,10 +397,11 @@ def load_research_runtime_config(repo_root: Path) -> ResearchRuntimeConfig:
         min_validation_bear_capture=_env_float("MACD_V2_MIN_VALIDATION_BEAR_CAPTURE", 0.00),
         max_fee_drag_pct=_env_float("MACD_V2_MAX_FEE_DRAG_PCT", 11.5),
         min_validation_closed_trades=_env_int("MACD_V2_MIN_VALIDATION_CLOSED_TRADES", 0),
-        min_train_monthly_entries=_env_float("MACD_V2_MIN_TRAIN_MONTHLY_ENTRIES", 5.0),
-        min_validation_monthly_entries=_env_float("MACD_V2_MIN_VALIDATION_MONTHLY_ENTRIES", 5.0),
+        min_train_monthly_entries=_env_float("MACD_V2_MIN_TRAIN_MONTHLY_ENTRIES", 0.0),
+        min_validation_monthly_entries=_env_float("MACD_V2_MIN_VALIDATION_MONTHLY_ENTRIES", 0.0),
         min_train_position_exposure_pct=_env_float("MACD_V2_MIN_TRAIN_POSITION_EXPOSURE_PCT", 5.0),
         min_validation_position_exposure_pct=_env_float("MACD_V2_MIN_VALIDATION_POSITION_EXPOSURE_PCT", 5.0),
+        enforce_long_only_gate=_env_bool("MACD_V2_ENFORCE_LONG_ONLY_GATE", False),
         validation_block_count=_env_int("MACD_V2_VALIDATION_BLOCK_COUNT", 4),
         min_validation_block_floor=_env_float("MACD_V2_MIN_VALIDATION_BLOCK_FLOOR", -0.10),
         max_validation_block_failures=_env_int("MACD_V2_MAX_VALIDATION_BLOCK_FAILURES", 3),

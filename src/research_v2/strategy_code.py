@@ -58,12 +58,20 @@ DEFAULT_MODE_MAX_NEW_TOP_LEVEL_CONSTANTS = 2
 DEFAULT_MODE_MAX_NEW_TOP_LEVEL_HELPERS = 2
 FIXED_EXIT_PARAM_VALUES: dict[str, object] = {
     "leverage": 20,
-    "position_size_min": 5000,
-    "position_size_max": 30000,
+    "position_fraction": 0.10,
+    "position_size_min": 0,
+    "position_size_max": 0,
+    "max_concurrent_positions": 1,
     "pyramid_enabled": 1,
-    "pyramid_max_times": 2,
-    "pyramid_size_ratio": 0.28,
+    "pyramid_max_times": -1,
+    "pyramid_size_ratio": 0.05,
+    "breakout_tp1_close_fraction": 0.0,
+    "short_breakdown_tp1_close_fraction": 0.0,
+    "short_trend_tp1_close_fraction": 0.0,
+    "tp1_close_fraction": 0.0,
 }
+_STRATEGY_EDIT_BOUNDARY_CARD_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "wiki" / "strategy_edit_boundary_card.md"
+_LOCKED_REGION_GUIDANCE_PLACEHOLDER = "{{LOCKED_REGION_GUIDANCE}}"
 
 # 参数硬性范围：防止参数漂移到无意义的区域
 # 格式: key -> (最小值, 最大值)
@@ -175,6 +183,105 @@ FACTOR_SLOT_NAMES: tuple[str, ...] = (
     "short_extra_2",
 )
 FACTOR_SLOT_FUNCTIONS: tuple[str, ...] = tuple(f"_slot_{name}" for name in FACTOR_SLOT_NAMES)
+LOCKED_REGION_SLOT_MAP: dict[str, tuple[str, ...]] = {
+    "_trend_quality_long": ("_slot_regime_trend", "_slot_long_context", "_slot_long_reaccel"),
+    "_trend_quality_short": ("_slot_short_context", "_slot_short_reaccel"),
+    "_trend_quality_ok": ("_slot_regime_trend", "_slot_long_context", "_slot_long_reaccel"),
+    "long_outer_context_ok": ("_slot_long_context",),
+    "short_outer_context_ok": ("_slot_short_context",),
+    "_flow_signal_metrics": ("_slot_long_flow", "_slot_long_veto"),
+    "_flow_confirmation_ok": ("_slot_long_flow", "_slot_long_veto"),
+    "_flow_entry_ok": ("_slot_long_flow", "_slot_long_veto"),
+    "_trend_followthrough_long": ("_slot_long_reaccel", "_slot_long_veto", "EXIT_PARAMS"),
+    "_trend_followthrough_short": ("_slot_short_reaccel", "_slot_short_veto", "EXIT_PARAMS"),
+    "_trend_followthrough_ok": ("_slot_long_reaccel", "_slot_long_veto", "EXIT_PARAMS"),
+    "_build_signal_context": ("_slot_long_context", "_slot_long_breakout", "_slot_long_pullback"),
+    "_build_long_trend_state": ("_slot_long_context", "_slot_long_reaccel"),
+    "_decision_signal_strength": ("FACTOR_SLOT_PARAMS", "_slot_long_flow", "_slot_long_veto"),
+    "_slot_bundle_score": ("FACTOR_SLOT_PARAMS",),
+    "_slot_weight": ("FACTOR_SLOT_PARAMS",),
+    "_build_long_candidate": (
+        "_slot_long_context",
+        "_slot_long_breakout",
+        "_slot_long_pullback",
+        "_slot_long_reaccel",
+        "_slot_long_flow",
+        "_slot_long_veto",
+    ),
+    "_build_short_candidate": ("_slot_short_context", "_slot_short_breakdown", "_slot_short_veto"),
+    "_structured_short_path_key": ("_slot_short_context", "_slot_short_breakdown", "_slot_short_veto"),
+    "_select_entry_candidate": ("FACTOR_SLOT_PARAMS", "_slot_long_flow", "_slot_long_veto"),
+    "_strategy_core": ("PARAMS", "EXIT_PARAMS", "FACTOR_SLOT_PARAMS", "_slot_long_context", "_slot_long_veto"),
+}
+
+
+def allowed_edit_targets_for_locked_region(region_name: str) -> tuple[str, ...]:
+    """Return editable targets that can express a locked-region idea."""
+    return LOCKED_REGION_SLOT_MAP.get(str(region_name).strip(), tuple())
+
+
+def locked_regions_mentioned_in_text(text: str) -> tuple[str, ...]:
+    raw_text = str(text or "")
+    if not raw_text:
+        return tuple()
+    return tuple(
+        region_name
+        for region_name in LOCKED_REGION_SLOT_MAP
+        if region_name in raw_text
+    )
+
+
+def build_locked_region_edit_guidance(
+    region_names: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    names = tuple(LOCKED_REGION_SLOT_MAP) if region_names is None else tuple(region_names)
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw_name in names:
+        region_name = str(raw_name).strip()
+        if not region_name or region_name in seen:
+            continue
+        seen.add(region_name)
+        targets = allowed_edit_targets_for_locked_region(region_name)
+        if not targets:
+            continue
+        target_text = "、".join(f"`{_format_edit_target(target)}`" for target in targets)
+        lines.append(f"- `{region_name}` -> {target_text}")
+    return "\n".join(lines)
+
+
+def _format_edit_target(target: str) -> str:
+    target_name = str(target).strip()
+    if target_name.startswith("_slot_"):
+        return f"{target_name}()"
+    return target_name
+
+
+def _load_strategy_edit_boundary_card_template() -> str:
+    try:
+        return _STRATEGY_EDIT_BOUNDARY_CARD_TEMPLATE_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "\n".join(
+            [
+                "## 编辑边界卡",
+                "",
+                "- 模板文件缺失：`wiki/strategy_edit_boundary_card.md`。",
+                "",
+                "### 锁区 -> 可改",
+                _LOCKED_REGION_GUIDANCE_PLACEHOLDER,
+                "",
+                "### 锁区想法翻译规则",
+                "- 锁区想法需要映射到可改落点；不要直接把锁区 helper 当成行动目标。",
+            ]
+        )
+
+
+def build_strategy_edit_boundary_card(region_names: list[str] | tuple[str, ...] | None = None) -> str:
+    mapping_text = build_locked_region_edit_guidance(region_names) or "- 无"
+    template = _load_strategy_edit_boundary_card_template()
+    return template.replace(_LOCKED_REGION_GUIDANCE_PLACEHOLDER, mapping_text)
+
+
 FRAMEWORK_FUNCTIONS: tuple[str, ...] = (
     "_build_strategy_context",
     "_classify_strategy_regime",
@@ -1324,10 +1431,17 @@ def validate_editable_region_boundaries(
         if region_name not in allowed_regions
     )
     if blocked_regions:
+        guidance = build_locked_region_edit_guidance(list(blocked_regions))
+        guidance_text = (
+            "\nlocked region editable targets:\n" + guidance
+            if guidance
+            else ""
+        )
         raise StrategySourceError(
             "strategy framework is locked; only PARAMS, EXIT_PARAMS, FACTOR_SLOT_PARAMS "
             "and fixed _slot_* bodies may change. blocked regions: "
             + ", ".join(blocked_regions[:12])
+            + guidance_text
         )
 
     base_functions = _top_level_function_names(base_tree)

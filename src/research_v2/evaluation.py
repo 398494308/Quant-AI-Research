@@ -8,6 +8,7 @@ from statistics import median
 from typing import Any, Mapping
 
 from research_v2.config import GateConfig, ScoringConfig
+from research_v2.regime_diagnostics import daily_regime_rows_from_result, regime_metric_payload
 
 
 # ==================== 数据结构 ====================
@@ -140,11 +141,6 @@ OVERFIT_CHAIN_HARD = 0.75
 OVERFIT_COVERAGE_WARN = 0.67
 OVERFIT_COVERAGE_HIGH = 0.45
 OVERFIT_COVERAGE_HARD = 0.34
-OVERFIT_SIDE_GAP_WARN = 0.55
-OVERFIT_SIDE_GAP_HIGH = 0.85
-OVERFIT_WEAK_SIDE_WARN = 0.15
-OVERFIT_CAPTURE_DROP_WARN = 0.20
-OVERFIT_CAPTURE_DROP_HIGH = 0.35
 DURATION_SHORT_MAX_BARS = 96
 DURATION_MEDIUM_MAX_BARS = 288
 VOLATILITY_LOW_MAX_ATR_RATIO = 0.010
@@ -635,6 +631,61 @@ def _exposure_multiplier_from_position_exposure_pct(exposure_pct: float, scoring
         ),
     ]
     return _smooth_piecewise_multiplier(exposure_pct, points)
+
+
+def _linear_score(value: float, *, start: float, full: float, cap: float) -> float:
+    max_score = max(0.0, float(cap))
+    if max_score <= 0.0:
+        return 0.0
+    low = float(start)
+    high = float(full)
+    if high <= low:
+        return max_score if float(value) > low else 0.0
+    return max_score * _clamp((float(value) - low) / (high - low), 0.0, 1.0)
+
+
+def _holding_time_score_from_exposure(exposure_pct: float, return_score: float, scoring: ScoringConfig) -> dict[str, float]:
+    exposure = _clamp(float(exposure_pct), 0.0, 100.0)
+    min_exposure = max(0.0, float(scoring.holding_time_min_exposure_pct))
+    full_exposure = max(min_exposure + 1e-9, float(scoring.holding_time_full_exposure_pct))
+    over_warn = max(full_exposure, float(scoring.holding_time_overexposure_warn_pct))
+    over_full = max(over_warn + 1e-9, float(scoring.holding_time_overexposure_full_pct))
+    bonus_cap = max(0.0, float(scoring.holding_time_bonus_cap))
+    under_cap = max(0.0, float(scoring.holding_time_underexposure_penalty_cap))
+    over_cap = max(0.0, float(scoring.holding_time_overexposure_penalty_cap))
+
+    if exposure < min_exposure:
+        under_penalty = under_cap * _clamp((min_exposure - exposure) / max(min_exposure, 1e-9), 0.0, 1.0)
+    else:
+        under_penalty = 0.0
+    adequate_progress = _clamp((exposure - min_exposure) / (full_exposure - min_exposure), 0.0, 1.0)
+    adequate_bonus = bonus_cap * adequate_progress if return_score > 0.0 else 0.0
+    over_penalty = over_cap * _clamp((exposure - over_warn) / (over_full - over_warn), 0.0, 1.0)
+    score = adequate_bonus - under_penalty - over_penalty
+    return {
+        "score": score,
+        "adequate_bonus": adequate_bonus,
+        "underexposure_penalty": under_penalty,
+        "overexposure_penalty": over_penalty,
+    }
+
+
+def _fee_drag_penalty(avg_fee_drag_pct: float, scoring: ScoringConfig) -> float:
+    return _linear_score(
+        avg_fee_drag_pct,
+        start=scoring.fee_drag_penalty_start_pct,
+        full=scoring.fee_drag_penalty_full_pct,
+        cap=scoring.fee_drag_penalty_cap,
+    )
+
+
+def _overfit_soft_penalty(overfit_risk_score: float, scoring: ScoringConfig) -> float:
+    return _linear_score(
+        overfit_risk_score,
+        start=scoring.overfit_penalty_start_score,
+        full=scoring.overfit_penalty_full_score,
+        cap=scoring.overfit_penalty_cap,
+    )
 
 
 def _timestamp_value(value: Any) -> int | None:
@@ -1575,24 +1626,13 @@ def _overfit_risk_report(trend_report: TrendScoreReport, capture_drop: float) ->
         risk_score += _band_score(max_chain_positive_share, OVERFIT_CHAIN_WARN, OVERFIT_CHAIN_HIGH)
     if hit_details:
         risk_score += _reverse_band_score(coverage_ratio, OVERFIT_COVERAGE_WARN, OVERFIT_COVERAGE_HIGH)
-    if bull_bear_gap > OVERFIT_SIDE_GAP_HIGH and weak_side_capture_score < 0.0:
-        risk_score += 20.0
-    elif bull_bear_gap > OVERFIT_SIDE_GAP_WARN and weak_side_capture_score < OVERFIT_WEAK_SIDE_WARN:
-        risk_score += 10.0
-    if capture_drop_abs > OVERFIT_CAPTURE_DROP_HIGH:
-        risk_score += 20.0
-    elif capture_drop_abs > OVERFIT_CAPTURE_DROP_WARN:
-        risk_score += 10.0
-
     hard_reasons: list[str] = []
     if top1_positive_share > OVERFIT_TOP1_HARD:
         hard_reasons.append(f"单段正向贡献占比过高({top1_positive_share:.0%})")
     if max_chain_positive_share > OVERFIT_CHAIN_HARD:
         hard_reasons.append(f"同向连续段贡献占比过高({max_chain_positive_share:.0%})")
-    if coverage_ratio < OVERFIT_COVERAGE_HARD and bull_bear_gap > OVERFIT_SIDE_GAP_HIGH:
-        hard_reasons.append(
-            f"有效覆盖率过低且多空偏科严重({coverage_ratio:.0%}, gap={bull_bear_gap:.2f})"
-        )
+    if coverage_ratio < OVERFIT_COVERAGE_HARD and positive_total > 1e-9:
+        hard_reasons.append(f"有效覆盖率过低({coverage_ratio:.0%})")
 
     risk_score = min(100.0, risk_score)
     return OverfitRiskReport(
@@ -1798,7 +1838,7 @@ def summarize_test_result(result: dict[str, Any] | None) -> dict[str, float]:
     capture_score = _capture_score_from_report(trend_report)
     long_trades, short_trades = _trade_side_counts(result)
     daily_returns = [float(value) for value in (result or {}).get("daily_returns", [])]
-    return {
+    payload = {
         "test_score": _period_score(trend_report),
         "test_trend_capture_score": capture_score,
         "test_capture_equal_score": _equal_segment_score(trend_report),
@@ -1820,6 +1860,8 @@ def summarize_test_result(result: dict[str, Any] | None) -> dict[str, float]:
         "test_long_closed_trades": float(long_trades),
         "test_short_closed_trades": float(short_trades),
     }
+    payload.update(regime_metric_payload(daily_regime_rows_from_result(result or {}), prefix="test_"))
+    return payload
 
 # ==================== 总分计算 ====================
 

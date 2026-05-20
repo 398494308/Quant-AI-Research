@@ -27,7 +27,7 @@ EXIT_PARAMS = {'break_even_activation_pct': 40.0,
  'breakout_break_even_activation_pct': 60.0,
  'breakout_max_hold_bars': 384,
  'breakout_stop_atr_mult': 2.3,
- 'breakout_tp1_close_fraction': 0.16,
+ 'breakout_tp1_close_fraction': 0.0,
  'breakout_tp1_pnl_pct': 80.0,
  'breakout_trailing_activation_pct': 122.7,
  'breakout_trailing_giveback_pct': 46.6,
@@ -39,17 +39,17 @@ EXIT_PARAMS = {'break_even_activation_pct': 40.0,
  'execution_use_1m': 1,
  'funding_fee_enabled': 1,
  'leverage': 20,
- 'max_concurrent_positions': 4,
+ 'max_concurrent_positions': 1,
  'max_hold_bars': 288,
  'okx_maker_fee_rate': 0.0002,
  'okx_taker_fee_rate': 0.0005,
- 'position_fraction': 0.17,
- 'position_size_max': 30000,
- 'position_size_min': 5000,
+ 'position_fraction': 0.1,
+ 'position_size_max': 0,
+ 'position_size_min': 0,
  'pyramid_adx_min': 19.0,
  'pyramid_enabled': 1,
- 'pyramid_max_times': 2,
- 'pyramid_size_ratio': 0.28,
+ 'pyramid_max_times': -1,
+ 'pyramid_size_ratio': 0.05,
  'pyramid_trigger_pnl': 22.9,
  'regime_close_below_hourly_fast': 0,
  'regime_exit_confirm_bars': 1,
@@ -59,14 +59,14 @@ EXIT_PARAMS = {'break_even_activation_pct': 40.0,
  'short_breakdown_break_even_activation_pct': 25.7,
  'short_breakdown_max_hold_bars': 96,
  'short_breakdown_stop_atr_mult': 2.1,
- 'short_breakdown_tp1_close_fraction': 0.22,
+ 'short_breakdown_tp1_close_fraction': 0.0,
  'short_breakdown_tp1_pnl_pct': 31.4,
  'short_breakdown_trailing_activation_pct': 40.0,
  'short_breakdown_trailing_giveback_pct': 12.9,
  'slippage_pct': 0.0003,
  'stop_atr_mult': 3.1,
  'stop_max_loss_pct': 75.7,
- 'tp1_close_fraction': 0.04,
+ 'tp1_close_fraction': 0.0,
  'tp1_pnl_pct': 65.7,
  'trading_fee_enabled': 1,
  'trailing_activation_pct': 124.3,
@@ -698,6 +698,48 @@ def _close_cash_release(position_size, gross_pnl_amount, exit_fee=0.0, funding_p
     return position_size + gross_pnl_amount + funding_pnl - exit_fee
 
 
+def _portfolio_equity(capital, positions, price, leverage):
+    return capital + sum(
+        position["size"]
+        + _position_pnl_amount(position, price, leverage)
+        + position.get("funding_pnl", 0.0)
+        for position in positions
+    )
+
+
+def _position_fraction(exit_p):
+    return max(0.0, float(exit_p.get("position_fraction", 0.10)))
+
+
+def _pyramid_margin_fraction(exit_p):
+    return max(0.0, float(exit_p.get("pyramid_size_ratio", _position_fraction(exit_p))))
+
+
+def _position_size_cap(exit_p):
+    cap = float(exit_p.get("position_size_max", 0.0))
+    return cap if cap > 0.0 else math.inf
+
+
+def _position_size_floor(exit_p):
+    return max(0.0, float(exit_p.get("position_size_min", 0.0)))
+
+
+def _max_affordable_margin(capital, leverage, exit_p):
+    taker_fee_rate = float(exit_p["okx_taker_fee_rate"]) if int(exit_p.get("trading_fee_enabled", 1)) > 0 else 0.0
+    if taker_fee_rate <= 0.0:
+        return max(0.0, capital)
+    return max(0.0, capital) / (1.0 + leverage * taker_fee_rate)
+
+
+def _target_initial_margin(equity, exit_p):
+    return min(max(0.0, equity) * _position_fraction(exit_p), _position_size_cap(exit_p))
+
+
+def _target_pyramid_add_margin(position, equity, exit_p):
+    _ = position
+    return min(max(0.0, equity) * _pyramid_margin_fraction(exit_p), _position_size_cap(exit_p))
+
+
 def _settle_full_position(position, price, reason, leverage, exit_p, exit_timestamp=None):
     exit_notional = _position_notional(position, price, leverage)
     exit_fee = _trading_fee_amount(exit_notional, exit_p)
@@ -905,6 +947,8 @@ def _funding_window_coverage_report(funding_timestamps, start_ts, end_ts):
 def _intrabar_tp1_first(position, subbar, leverage, exit_p):
     if position.get("tp1_done"):
         return False
+    if float(_exit_value(exit_p, position, "tp1_close_fraction")) <= 0.0:
+        return False
     side = _position_side(position)
     tp1_pnl_pct = float(_exit_value(exit_p, position, "tp1_pnl_pct"))
     tp1_trigger = _tp_trigger_price(position["entry_price"], tp1_pnl_pct, leverage, side)
@@ -915,50 +959,10 @@ def _intrabar_tp1_first(position, subbar, leverage, exit_p):
 
 def _market_risk_profile(market_state, exit_p):
     base_max_positions = max(1, int(exit_p.get("max_concurrent_positions", 1)))
-    profile = {
-        "position_fraction_scale": 1.0,
+    return {
         "max_concurrent_positions": base_max_positions,
         "allow_pyramid": True,
     }
-
-    hourly = market_state.get("hourly")
-    four_hour = market_state.get("four_hour")
-    if hourly is None or four_hour is None:
-        return profile
-
-    atr_ratio = market_state.get("atr_ratio", 0.0)
-    weak_signals = 0
-    if market_state.get("chop", 0.0) >= 58.0 and hourly.get("chop", 0.0) >= 56.0:
-        weak_signals += 1
-    if market_state.get("adx", 0.0) < 16.0 and hourly.get("adx", 0.0) < 18.0:
-        weak_signals += 1
-    if (
-        abs(hourly.get("trend_spread_pct", 0.0)) < max(0.0018, atr_ratio * 0.75)
-        and abs(four_hour.get("trend_spread_pct", 0.0)) < max(0.0021, atr_ratio * 0.95)
-    ):
-        weak_signals += 1
-    if (
-        abs(hourly.get("ema_slow_slope_pct", 0.0)) < atr_ratio * 0.07
-        and abs(four_hour.get("ema_slow_slope_pct", 0.0)) < atr_ratio * 0.035
-    ):
-        weak_signals += 1
-
-    severe = weak_signals >= 3 or (
-        market_state.get("chop", 0.0) >= 60.0
-        and hourly.get("chop", 0.0) >= 58.0
-        and market_state.get("adx", 0.0) < 15.0
-    )
-    if severe:
-        profile["position_fraction_scale"] = 0.55
-        profile["max_concurrent_positions"] = min(base_max_positions, 2)
-        profile["allow_pyramid"] = False
-        return profile
-
-    if weak_signals >= 2:
-        profile["position_fraction_scale"] = 0.72
-        profile["max_concurrent_positions"] = min(base_max_positions, 3)
-        profile["allow_pyramid"] = False
-    return profile
 
 
 def _resolve_hold_limit(position, exit_params, market_state, close_pnl_pct):
@@ -995,13 +999,18 @@ def _resolve_hold_limit(position, exit_params, market_state, close_pnl_pct):
     return min(int(exit_params["dynamic_hold_max_bars"]), base_limit + extension)
 
 
+def _pyramid_limit_allows(position, exit_p):
+    max_times = int(exit_p.get("pyramid_max_times", 0))
+    return max_times < 0 or position.get("pyramids_done", 0) < max_times
+
+
 def _should_pyramid(position, market_state, close_pnl_pct, exit_p, allow_pyramid=True):
     side = _position_side(position)
     return (
         allow_pyramid
         and
         int(exit_p.get("pyramid_enabled", 0)) > 0
-        and position.get("pyramids_done", 0) < int(exit_p.get("pyramid_max_times", 3))
+        and _pyramid_limit_allows(position, exit_p)
         and position.get("entry_signal") in {"long_breakout", "long_pullback", "short_breakdown"}
         and close_pnl_pct >= float(exit_p.get("pyramid_trigger_pnl", 20.0))
         and market_state["adx"] >= float(exit_p.get("pyramid_adx_min", 30.0))
@@ -1422,9 +1431,7 @@ def backtest_macd_aggressive(
     capital = 100000.0
     initial_capital = capital
     leverage = float(exit_p["leverage"])
-    position_fraction = float(exit_p["position_fraction"])
-    position_size_min = float(exit_p["position_size_min"])
-    position_size_max = float(exit_p["position_size_max"])
+    position_size_min = _position_size_floor(exit_p)
     positions = []
     trades = []
     settlement_legs = []
@@ -1448,7 +1455,6 @@ def backtest_macd_aggressive(
     four_hour_equity_curve = []
     next_trade_id = 1
     delay_minutes = int(exit_p.get("entry_delay_minutes", 1))
-    taker_fee_rate = float(exit_p["okx_taker_fee_rate"]) if int(exit_p.get("trading_fee_enabled", 1)) > 0 else 0.0
     slippage_pct = float(exit_p.get("slippage_pct", 0.0003))
     four_hour_window_state = window_runtime.four_hour_window_state
     four_hour_window_close_timestamps = window_runtime.four_hour_window_close_timestamps
@@ -1664,9 +1670,12 @@ def backtest_macd_aggressive(
 
             if _should_pyramid(position, market_state, close_pnl_pct, exit_p, allow_pyramid=risk_profile["allow_pyramid"]):
                 pyramid_fill = _fill_with_slippage(market_fill_price, side, True, slippage_pct)
-                max_affordable_size = capital / (1.0 + leverage * taker_fee_rate)
-                add_size = min(max_affordable_size, position["size"] * float(exit_p.get("pyramid_size_ratio", 0.5)), position_size_max)
-                if add_size >= position_size_min:
+                equity_for_add = _portfolio_equity(capital, positions, bar["close"], leverage)
+                add_size = min(
+                    _max_affordable_margin(capital, leverage, exit_p),
+                    _target_pyramid_add_margin(position, equity_for_add, exit_p),
+                )
+                if add_size > 1e-9 and add_size >= position_size_min:
                     add_fee = _trading_fee_amount(add_size * leverage, exit_p)
                     total_size = position["size"] + add_size
                     position["entry_price"] = (
@@ -1730,13 +1739,16 @@ def backtest_macd_aggressive(
             positions,
             market_state,
         )
-        target_position_size = capital * position_fraction * risk_profile["position_fraction_scale"]
-        max_affordable_size = capital / (1.0 + leverage * taker_fee_rate) if taker_fee_rate > 0 else capital
-        target_position_size = min(position_size_max, target_position_size, max_affordable_size)
+        equity_for_entry = _portfolio_equity(capital, positions, bar["close"], leverage)
+        target_position_size = min(
+            _target_initial_margin(equity_for_entry, exit_p),
+            _max_affordable_margin(capital, leverage, exit_p),
+        )
         if (
             signal
             and len(positions) < risk_profile["max_concurrent_positions"]
             and capital >= position_size_min
+            and target_position_size > 1e-9
             and target_position_size >= position_size_min
             and market_state["atr"] > 0
         ):
@@ -1786,12 +1798,7 @@ def backtest_macd_aggressive(
                 )
                 next_trade_id += 1
 
-        equity = capital + sum(
-            position["size"]
-            + position["size"] * (_position_pnl_pct(position, bar["close"], leverage) / 100.0)
-            + position.get("funding_pnl", 0.0)
-            for position in positions
-        )
+        equity = _portfolio_equity(capital, positions, bar["close"], leverage)
         _append_daily_equity_point(daily_equity_curve, bar_close_ts, equity, bar["close"], market_state)
         while (
             include_diagnostics
