@@ -1,0 +1,14 @@
+[project]
+name = "quant-ai-research"
+version = "0.1.0"
+description = "可复现的虚拟货币策略研究与回测环境"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "matplotlib>=3.11,<4",
+    "pandas>=3,<4",
+    "requests>=2.34,<3",
+]
+
+[tool.uv]
+package = false

@@ -2422,8 +2422,8 @@ class StrategyValidationFixesTest(unittest.TestCase):
 
         validate_strategy_source(source)
 
-    def test_backup_strategy_source_validates(self):
-        source = (REPO_ROOT / "backups/strategy_macd_aggressive_v2_best.py").read_text()
+    def test_tracked_candidate_backup_strategy_source_validates(self):
+        source = (REPO_ROOT / "backups/strategy_macd_aggressive_v2_candidate.py").read_text()
 
         validate_strategy_source(source)
 
@@ -7115,7 +7115,7 @@ class ReferenceStateFixesTest(unittest.TestCase):
             self.assertFalse(payload.get("suppress_initialize_saved_reference_discord_once", False))
 
     def test_initialize_best_state_rebuilds_saved_reference_when_score_regime_changes(self):
-        valid_source = (REPO_ROOT / "backups/strategy_macd_aggressive_v2_best.py").read_text()
+        valid_source = (REPO_ROOT / "backups/strategy_macd_aggressive_v2_candidate.py").read_text()
         candidate_source = (REPO_ROOT / "src/strategy_macd_aggressive.py").read_text()
         report = EvaluationReport(
             metrics={"promotion_score": 0.52, "quality_score": 0.33},

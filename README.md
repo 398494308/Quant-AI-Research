@@ -150,7 +150,7 @@ flowchart TB
 1. 停掉研究器
 2. 手工瘦身当前策略，或手工替换 active reference
 3. 若替换旧 source，先迁移到当前固定因子槽结构
-4. 执行 `python3 scripts/research_macd_aggressive_v2.py --reset-champion --no-optimize`
+4. 执行 `.venv/bin/python scripts/research_macd_aggressive_v2.py --reset-champion --no-optimize`
 5. 执行 [scripts/reset_research_macd_aggressive_v2_stage.sh](scripts/reset_research_macd_aggressive_v2_stage.sh)
 6. 重新启动研究器，进入新 stage
 
@@ -164,10 +164,30 @@ flowchart TB
 
 ## 常用命令
 
+首次建立或恢复项目环境：
+
+```bash
+~/.local/bin/uv sync --locked
+```
+
+运行全部测试：
+
+```bash
+MPLCONFIGDIR=/tmp/quant-ai-matplotlib-cache .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
+```
+
+测试通过后保存全部代码并上传到 GitHub：
+
+```bash
+bash scripts/save_to_github.sh "说明这次修改了什么"
+```
+
+保存脚本会先运行测试、拦截常见敏感文件、创建本地提交，再推送并核对远程提交。即使网络推送失败，本地提交仍会保留，脚本会明确提示尚未完成远程备份。
+
 下载或重建本地 OKX 数据：
 
 ```bash
-python3 scripts/download_aggressive_data.py
+.venv/bin/python scripts/download_aggressive_data.py
 ```
 
 启动研究器：
@@ -197,7 +217,7 @@ bash scripts/reset_research_macd_aggressive_v2_stage.sh
 单轮运行一次研究器：
 
 ```bash
-python3 scripts/research_macd_aggressive_v2.py --once
+.venv/bin/python scripts/research_macd_aggressive_v2.py --once
 ```
 
 ## 文档导航

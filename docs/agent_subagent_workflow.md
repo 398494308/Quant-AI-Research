@@ -199,7 +199,7 @@ champion_code_hash: <当前 champion hash>
 1. 停掉研究器：`bash scripts/manage_research_macd_aggressive_v2.sh stop`
 2. 手工修改策略或替换 active reference。
 3. 如果替换的是旧 source，先迁移到当前固定因子槽结构，并确认 `validate_strategy_source()` 能通过。
-4. 用当前源码重建 reference：`python3 scripts/research_macd_aggressive_v2.py --reset-champion --no-optimize`
+4. 用当前源码重建 reference：`.venv/bin/python scripts/research_macd_aggressive_v2.py --reset-champion --no-optimize`
 5. 重开 stage：`bash scripts/reset_research_macd_aggressive_v2_stage.sh`
 6. 启动研究器：`bash scripts/manage_research_macd_aggressive_v2.sh start`
 7. 跟状态：`bash scripts/manage_research_macd_aggressive_v2.sh status`
@@ -225,10 +225,10 @@ bash scripts/manage_research_macd_aggressive_v2.sh stop
 bash scripts/reset_research_macd_aggressive_v2_stage.sh
 
 # 单轮运行
-python3 scripts/research_macd_aggressive_v2.py --once
+.venv/bin/python scripts/research_macd_aggressive_v2.py --once
 
 # 重建 OKX 数据
-python3 scripts/download_aggressive_data.py
+.venv/bin/python scripts/download_aggressive_data.py
 ```
 
 ## 运行产物
