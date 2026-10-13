@@ -94,6 +94,10 @@ kill_pid_or_group() {
 }
 
 cmd_start() {
+  if [[ "${MACD_V2_ALLOW_LEGACY:-0}" != "1" ]]; then
+    echo "旧版多 Agent 自动循环已暂停。若确需恢复，请显式设置 MACD_V2_ALLOW_LEGACY=1；新研究管理入口见 scripts/research_control.py。" >&2
+    exit 1
+  fi
   if is_running; then
     echo "already running: pid=$(cat "${PID_FILE}")"
     exit 0

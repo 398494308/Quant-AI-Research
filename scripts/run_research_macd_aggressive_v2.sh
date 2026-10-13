@@ -12,6 +12,11 @@ LOCAL_ENV="${REPO_ROOT}/config/research_v2.env"
 RESTART_DELAY_SECONDS="${MACD_V2_SUPERVISOR_RESTART_SECONDS:-10}"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
+if [[ "${MACD_V2_ALLOW_LEGACY:-0}" != "1" ]]; then
+  echo "旧版多 Agent 自动循环默认暂停；请使用 scripts/research_control.py。" >&2
+  exit 1
+fi
+
 mkdir -p "${REPO_ROOT}/logs" "${REPO_ROOT}/state"
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then

@@ -1,0 +1,28 @@
+[research]
+market = "BTC-USDT-SWAP"
+goal = "寻找计入交易成本后，在滚动验证和未参与优化的数据上仍稳定的虚拟货币策略"
+directions = ["entry", "exit", "risk", "regime"]
+
+[windows]
+training = ["2023-07-01", "2024-12-31"]
+validation = [
+    ["2025-01-01", "2025-03-31"],
+    ["2025-04-01", "2025-06-30"],
+    ["2025-07-01", "2025-09-30"],
+    ["2025-10-01", "2025-12-31"],
+]
+score_id = "legacy_backtest_score_v1"
+
+[decision]
+# 以下是研究管理的初始筛选门槛；取得新数据后按基线波动重新校准。
+min_validation_score_gain = 1.0
+min_positive_validation_blocks = 3
+max_drawdown_increase_points = 2.0
+max_attempts_without_progress = 4
+
+[ai]
+model = "gpt-6.1-sol"
+max_calls_per_day = 2
+max_calls_per_cycle = 1
+max_context_records = 8
+timeout_seconds = 180

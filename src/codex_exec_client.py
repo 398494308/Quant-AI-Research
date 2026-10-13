@@ -67,7 +67,7 @@ def _env_flag(name: str, default: bool) -> bool:
 def load_strategy_client_config() -> StrategyClientConfig:
     return StrategyClientConfig(
         codex_bin=os.getenv("CODEX_BIN", "codex").strip() or "codex",
-        model=os.getenv("CODEX_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.4")).strip() or "gpt-5.4",
+        model=os.getenv("CODEX_MODEL", os.getenv("OPENAI_MODEL", "gpt-6.1-sol")).strip() or "gpt-6.1-sol",
         reasoning_effort=os.getenv("CODEX_REASONING_EFFORT", "medium").strip() or "medium",
         approval_policy=os.getenv("CODEX_APPROVAL_POLICY", "never").strip() or "never",
         sandbox=os.getenv("CODEX_SANDBOX", "read-only").strip() or "read-only",
