@@ -35,6 +35,14 @@ class WindowRules:
 
 
 @dataclass(frozen=True)
+class SearchRules:
+    max_candidates: int
+    batch_size: int
+    max_batches_per_run: int
+    spaces: dict[str, dict[str, dict[str, tuple[int | float, ...]]]]
+
+
+@dataclass(frozen=True)
 class ResearchConfig:
     market: str
     goal: str
@@ -42,11 +50,14 @@ class ResearchConfig:
     windows: WindowRules
     decision: DecisionRules
     ai: AiRules
+    search: SearchRules
 
 
 def load_config(path: Path) -> ResearchConfig:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    research, windows, decision, ai = (raw[name] for name in ("research", "windows", "decision", "ai"))
+    research, windows, decision, ai, search = (
+        raw[name] for name in ("research", "windows", "decision", "ai", "search")
+    )
     directions = tuple(str(value).strip() for value in research["directions"])
     if not directions or len(set(directions)) != len(directions) or not all(directions):
         raise ValueError("研究方向必须填写且不能重复")
@@ -76,6 +87,34 @@ def load_config(path: Path) -> ResearchConfig:
     if min(ai_rules.max_calls_per_day, ai_rules.max_calls_per_cycle,
            ai_rules.max_context_records, ai_rules.timeout_seconds) < 1:
         raise ValueError("AI 调用限制必须大于零")
+    if any(isinstance(search[name], bool) or not isinstance(search[name], int)
+           or search[name] < 1 for name in
+           ("max_candidates", "batch_size", "max_batches_per_run")):
+        raise ValueError("搜索预算必须是正整数")
+    if search["batch_size"] > search["max_candidates"]:
+        raise ValueError("每批候选数量不能超过总参数空间上限")
+    spaces = {}
+    for direction in directions:
+        raw_space = search["spaces"].get(direction)
+        if not isinstance(raw_space, dict) or not raw_space:
+            raise ValueError(f"研究方向 {direction} 缺少参数空间")
+        if set(raw_space) - {"strategy", "exit"}:
+            raise ValueError(f"研究方向 {direction} 的参数类别只能是 strategy 或 exit")
+        space = {}
+        for target, axes in raw_space.items():
+            if not isinstance(axes, dict) or not axes:
+                raise ValueError(f"研究方向 {direction} 的参数轴不能为空")
+            space[target] = {}
+            for name, values in axes.items():
+                if (not isinstance(values, list) or not values
+                        or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                               or not math.isfinite(value) for value in values)
+                        or len(set(values)) != len(values)):
+                    raise ValueError(f"参数 {name} 必须是无重复的有限数字列表")
+                space[target][name] = tuple(values)
+        spaces[direction] = space
+    if set(search["spaces"]) != set(directions):
+        raise ValueError("参数空间必须与研究方向一致")
     return ResearchConfig(
         market=str(research["market"]).strip(),
         goal=str(research["goal"]).strip(),
@@ -83,6 +122,9 @@ def load_config(path: Path) -> ResearchConfig:
         windows=window_rules,
         decision=rules,
         ai=ai_rules,
+        search=SearchRules(max_candidates=search["max_candidates"],
+                           batch_size=search["batch_size"],
+                           max_batches_per_run=search["max_batches_per_run"], spaces=spaces),
     )
 
 
@@ -146,6 +188,10 @@ def append_record(path: Path, record: dict[str, Any], config: ResearchConfig) ->
         raise ValueError("请先记录真实基线，再记录候选策略")
     if records and study_key(checked) != study_key(records[-1]) and checked["direction"] != "baseline":
         raise ValueError("数据、评分或成本假设变化后，必须先建立新基线")
+    if records and checked["direction"] != "baseline":
+        active_baseline = next(item for item in reversed(records) if item["direction"] == "baseline")
+        if checked["code_id"] != active_baseline["code_id"]:
+            raise ValueError("策略或回测代码变化后，必须先建立新基线")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as output:
         output.write(json.dumps(checked, ensure_ascii=False, sort_keys=True) + "\n")

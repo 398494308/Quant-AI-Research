@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import statistics
 from bisect import bisect_left
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -34,12 +36,18 @@ def verify_execution_coverage(prepared: dict[str, Any], windows: tuple[tuple[str
     intraday_times = prepared["intraday_timestamps"]
     execution_times = prepared["execution_timestamps"]
     minute_ms = 60_000
+    intraday_interval_ms = 15 * minute_ms
+    if prepared["intraday_interval_ms"] != intraday_interval_ms:
+        raise ValueError("15-minute research data has the wrong interval")
     if not execution_times or prepared["execution_interval_ms"] != minute_ms:
         raise ValueError("one-minute execution data is missing or has the wrong interval")
     for start, end in windows:
         first, last = index_fn(intraday_times, start, end)
         if first >= last:
             raise ValueError(f"missing 15-minute data for {start}–{end}")
+        if any(intraday_times[index] - intraday_times[index - 1] != intraday_interval_ms
+               for index in range(first + 1, last)):
+            raise ValueError(f"15-minute research data has gaps in {start}–{end}")
         window_start = intraday_times[first]
         window_end = intraday_times[last - 1] + prepared["intraday_interval_ms"]
         left = bisect_left(execution_times, window_start)
@@ -52,6 +60,108 @@ def verify_execution_coverage(prepared: dict[str, Any], windows: tuple[tuple[str
             raise ValueError(f"one-minute execution data has gaps in {start}–{end}")
 
 
+@contextmanager
+def active_parameters(strategy, strategy_params: dict, exit_params: dict):
+    """The legacy strategy reads module globals; restore them after each run."""
+    original_strategy = dict(strategy.PARAMS)
+    original_exit = dict(strategy.EXIT_PARAMS)
+    try:
+        strategy.PARAMS.clear()
+        strategy.PARAMS.update(strategy_params)
+        strategy.EXIT_PARAMS.clear()
+        strategy.EXIT_PARAMS.update(exit_params)
+        yield
+    finally:
+        strategy.PARAMS.clear()
+        strategy.PARAMS.update(original_strategy)
+        strategy.EXIT_PARAMS.clear()
+        strategy.EXIT_PARAMS.update(original_exit)
+
+
+class ResearchBacktest:
+    """One data snapshot, one cost model, reusable prepared contexts."""
+
+    COST_FIELDS = ("trading_fee_enabled", "funding_fee_enabled", "execution_use_1m",
+                   "okx_maker_fee_rate", "okx_taker_fee_rate", "slippage_pct")
+
+    def __init__(self, config: ResearchConfig, *, repo_root: Path, intraday_file: Path,
+                 execution_file: Path, funding_file: Path, sentiment_file: Path | None = None):
+        import backtest_macd_aggressive as backtest
+        import strategy_macd_aggressive as strategy
+
+        self.config = config
+        self.backtest = backtest
+        self.strategy = strategy
+        self.intraday_file = intraday_file
+        self.execution_file = execution_file
+        self.funding_file = funding_file
+        self.sentiment_file = sentiment_file
+        paths = {"intraday_15m": intraday_file, "execution_1m": execution_file,
+                 "funding": funding_file}
+        if sentiment_file is not None:
+            paths["sentiment"] = sentiment_file
+        self.data_id = file_fingerprint(paths)
+        self.code_id = source_fingerprint(repo_root)
+        self.strategy_params = dict(strategy.PARAMS)
+        self.exit_params = dict(getattr(strategy, "EXIT_PARAMS", backtest.EXIT_PARAMS))
+        if any(int(self.exit_params.get(name, 0)) != 1 for name in
+               ("trading_fee_enabled", "funding_fee_enabled", "execution_use_1m")):
+            raise ValueError("research requires fees, funding and one-minute execution")
+        if float(self.exit_params.get("slippage_pct", 0)) <= 0:
+            raise ValueError("research requires positive slippage")
+        cost_values = {name: self.exit_params[name] for name in self.COST_FIELDS}
+        self.cost_model_id = hashlib.sha256(
+            json.dumps(cost_values, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        self._prepared: dict[tuple, dict[str, Any]] = {}
+
+    def evaluate(self, strategy_params: dict, exit_params: dict,
+                 windows: tuple[tuple[str, str], ...]) -> list[dict[str, Any]]:
+        if any(exit_params[name] != self.exit_params[name] for name in self.COST_FIELDS):
+            raise ValueError("搜索过程中不得改变手续费、滑点、资金费率或执行精度")
+        context_key = tuple(sorted(strategy_params.items()))
+        with active_parameters(self.strategy, strategy_params, exit_params):
+            if context_key not in self._prepared:
+                prepared = self.backtest.prepare_backtest_context(
+                    strategy_params,
+                    intraday_file=self.intraday_file,
+                    sentiment_file=self.sentiment_file,
+                    execution_file=self.execution_file,
+                    funding_file=self.funding_file,
+                    exit_params=exit_params,
+                )
+                verify_execution_coverage(
+                    prepared,
+                    (self.config.windows.training, *self.config.windows.validation),
+                    self.backtest._beijing_window_indices_from_timestamps,
+                )
+                self._prepared[context_key] = prepared
+            prepared = self._prepared[context_key]
+            results = []
+            for start, end in windows:
+                result = self.backtest.backtest_macd_aggressive(
+                    strategy_func=self.strategy.strategy,
+                    intraday_file=self.intraday_file,
+                    hourly_file=self.intraday_file,
+                    start_date=start,
+                    end_date=end,
+                    strategy_params=strategy_params,
+                    exit_params=exit_params,
+                    sentiment_file=self.sentiment_file,
+                    execution_file=self.execution_file,
+                    funding_file=self.funding_file,
+                    prepared_context=prepared,
+                )
+                if result.get("funding_coverage_mode") != "full":
+                    raise ValueError(f"funding coverage is incomplete for {start}–{end}")
+                metric_names = ("score", "max_drawdown", "return", "fee_drag_pct")
+                if any(name in result and not math.isfinite(float(result[name]))
+                       for name in metric_names):
+                    raise ValueError(f"non-finite backtest result for {start}–{end}")
+                results.append(result)
+            return results
+
+
 def run_baseline(
     config: ResearchConfig,
     *,
@@ -61,67 +171,20 @@ def run_baseline(
     funding_file: Path,
     sentiment_file: Path | None = None,
 ) -> dict[str, Any]:
-    import backtest_macd_aggressive as backtest
-    import strategy_macd_aggressive as strategy
-
-    paths = {"intraday_15m": intraday_file, "execution_1m": execution_file,
-             "funding": funding_file}
-    if sentiment_file is not None:
-        paths["sentiment"] = sentiment_file
-    data_id = file_fingerprint(paths)
-    code_id = source_fingerprint(repo_root)
-    exit_params = dict(getattr(strategy, "EXIT_PARAMS", backtest.EXIT_PARAMS))
-    if any(int(exit_params.get(name, 0)) != 1 for name in
-           ("trading_fee_enabled", "funding_fee_enabled", "execution_use_1m")):
-        raise ValueError("baseline requires fees, funding and one-minute execution")
-    if float(exit_params.get("slippage_pct", 0)) <= 0:
-        raise ValueError("baseline requires positive slippage")
-    cost_fields = ("trading_fee_enabled", "funding_fee_enabled", "execution_use_1m",
-                   "okx_maker_fee_rate", "okx_taker_fee_rate", "slippage_pct")
-    cost_values = {name: exit_params[name] for name in cost_fields}
-    cost_model_id = hashlib.sha256(
-        json.dumps(cost_values, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    prepared = backtest.prepare_backtest_context(
-        strategy.PARAMS,
-        intraday_file=intraday_file,
-        sentiment_file=sentiment_file,
-        execution_file=execution_file,
-        funding_file=funding_file,
-        exit_params=exit_params,
+    runner = ResearchBacktest(
+        config, repo_root=repo_root, intraday_file=intraday_file,
+        execution_file=execution_file, funding_file=funding_file, sentiment_file=sentiment_file,
     )
-    verify_execution_coverage(
-        prepared,
+    training, *validation = runner.evaluate(
+        runner.strategy_params, runner.exit_params,
         (config.windows.training, *config.windows.validation),
-        backtest._beijing_window_indices_from_timestamps,
     )
-
-    def evaluate(start: str, end: str) -> dict[str, Any]:
-        result = backtest.backtest_macd_aggressive(
-            strategy_func=strategy.strategy,
-            intraday_file=intraday_file,
-            hourly_file=intraday_file,
-            start_date=start,
-            end_date=end,
-            strategy_params=strategy.PARAMS,
-            exit_params=exit_params,
-            sentiment_file=sentiment_file,
-            execution_file=execution_file,
-            funding_file=funding_file,
-            prepared_context=prepared,
-        )
-        if result.get("funding_coverage_mode") != "full":
-            raise ValueError(f"funding coverage is incomplete for {start}–{end}")
-        return result
-
-    training = evaluate(*config.windows.training)
-    validation = [evaluate(*block) for block in config.windows.validation]
     return {
-        "id": f"baseline-{data_id[:12]}-{code_id[:12]}",
-        "data_id": data_id,
-        "code_id": code_id,
+        "id": f"baseline-{runner.data_id[:12]}-{runner.code_id[:12]}",
+        "data_id": runner.data_id,
+        "code_id": runner.code_id,
         "score_id": config.windows.score_id,
-        "cost_model_id": cost_model_id,
+        "cost_model_id": runner.cost_model_id,
         "costs_included": True,
         "direction": "baseline",
         "parameters": {},

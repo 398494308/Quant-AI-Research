@@ -2,21 +2,31 @@
 
 `OKX BTC-USDT-SWAP` 激进趋势策略研究仓库。这里的 `SWAP` 指 OKX 的 `USDT` 本位永续合约。
 
-> 重构进行中：以下旧版 v2 研究器与多 Agent 流程保留作历史参考，默认不再启动。当前新入口是 `scripts/research_control.py`；研究数据尚未重新下载，所以暂未运行新一轮真实回测。
+> 新研究框架的基线、有限批量搜索、方向轮换和 Plus 假设入口已接通；以下旧版 v2 多 Agent 流程仅作历史参考，默认不启动。当前新入口是 `scripts/research_control.py`。研究数据尚未重新下载，所以新流程仍未经过真实行情检验。
 
 ## 新研究管理方式
 
-新框架先保留旧策略和回测器作为待复现基线。参数搜索将在本地运行；AI 只在取得一批实验结果后提出下一轮假设。每次 AI 调用都使用新的只读 Codex 会话，并且必须确认机器当前使用 ChatGPT 登录。不会调用 OpenAI API Key 或 DeepSeek。
+新框架先保留旧策略和回测器作为待复现基线。参数搜索在本地运行；AI 只在取得一批实验结果后提出下一轮假设。每次 AI 调用都使用新的只读 Codex 会话，并且必须确认机器当前使用 ChatGPT 登录。不会调用 OpenAI API Key 或 DeepSeek。
 
 固定数据文件到位后，使用 `baseline` 命令传入 15 分钟行情、1 分钟执行行情和资金费率文件，就能按配置中的固定训练与验证窗口复现旧策略。该命令要求手续费、滑点、资金费率和 1 分钟执行数据齐全，自动记录数据及代码指纹；缺文件或资金费率覆盖不足会停止，不生成成绩。具体参数可查看 `.venv/bin/python scripts/research_control.py baseline --help`。
 
-实验账本记录代码版本、数据版本、训练和验证成绩。小幅改善、单一区间改善或明显增加回撤都不能刷新研究基准；连续无实质进展的方向会暂停，下一轮先探索尝试次数较少的方向。详细规则可在 [config/research_control.toml](config/research_control.toml) 调整，初始门槛在取得新数据后还需校准。
+基线建好后，`search` 对指定方向执行一批参数搜索；`auto` 按尝试次数轮换四个方向，单次最多运行配置允许的批次数。每批只用训练期筛选参数，仅训练第一名进入四段按时间排列的验证期；冻结测试期不参与搜索。参数范围、每批数量及运行上限都在 [config/research_control.toml](config/research_control.toml)，初始取值只是待检验范围，不是推荐交易参数。参数空间用尽或方向暂停时停止，不会无限运行，也不会自动调用 AI。
+
+实验账本记录代码版本、数据版本、训练和验证成绩。小幅改善、单一区间改善或明显增加回撤都不能刷新研究基准；连续无实质进展的方向会暂停。旧策略读取内部固定参数，搜索器会在每次回测时同步设置并在结束后恢复，避免“记录变了而信号没变”。
 
 查看当前状态：
 
 ```bash
 .venv/bin/python scripts/research_control.py status
 ```
+
+数据与基线就绪后的本地搜索命令（用实际 CSV 路径替换示例路径）：
+
+```bash
+.venv/bin/python scripts/research_control.py auto --intraday data/okx_15m.csv --execution data/okx_1m.csv --funding data/okx_funding.csv
+```
+
+单方向搜索使用 `search --direction entry`，并传入相同的三个数据路径。每批完整训练排序写入 `research/batches/`，获选参数及验证成绩写入 `research/experiments.jsonl`。该目录不存原始行情。
 
 有真实回测结果后，可以先生成不消耗 AI 用量的研究摘要；明确需要新假设时再调用 Plus 账户：
 
@@ -27,7 +37,7 @@
 
 `--use-ai` 每轮最多调用一次、每天最多两次；次数是本地保护上限，不代表 Plus 额度可以按次数精确换算。AI 建议只保存在 `research/proposals.jsonl`，不会自动修改策略。实验账本格式和保存方式见 [research/README.md](research/README.md)，完整边界见 [docs/research_control_design.md](docs/research_control_design.md)。
 
-当前电脑已确认 Codex CLI 使用 ChatGPT 登录。新数据和基线尚未建立，`propose` 会先停止并说明原因。旧版循环若确需运行，必须显式设置 `MACD_V2_ALLOW_LEGACY=1`，且它不受这套新管理器的调用限额保护。
+当前电脑已确认 Codex CLI 使用 ChatGPT 登录。新数据和基线尚未建立，`search`、`auto` 和 `propose` 都会先停止并说明原因。现有季度验证并不等于完整滚动训练，也不能替代最终样本外和模拟盘验证。旧版循环若确需运行，必须显式设置 `MACD_V2_ALLOW_LEGACY=1`，且它不受这套新管理器的调用限额保护。
 
 这个仓库维护的是一条连续研究主线：同一套策略源码、同一套回测器、同一套研究器，以及一套后续可接 `OKX` 自动交易的实盘外壳。当前这个 clone 还额外挂了一条 `planner-only` 的 DeepSeek 对照实验线，用来验证研究方向生成环节是否更适合切模型。
 

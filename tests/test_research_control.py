@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -24,6 +25,7 @@ from research_control.core import (
     load_ledger,
     next_directions,
 )
+from research_control.search import batch_prefix, candidate_grid, next_search_directions, run_batch
 
 
 class ResearchControlTest(unittest.TestCase):
@@ -90,6 +92,13 @@ class ResearchControlTest(unittest.TestCase):
             append_record(path, changed, self.config)
             self.assertEqual(direction_status(load_ledger(path, self.config), self.config)["leader"]["id"],
                              "changed")
+
+    def test_strategy_code_change_requires_fresh_baseline(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "experiments.jsonl"
+            append_record(path, self.baseline, self.config)
+            with self.assertRaisesRegex(ValueError, "代码变化"):
+                append_record(path, self.record("candidate", "entry", 12.0), self.config)
 
     def test_gross_return_cannot_be_recorded(self):
         gross = self.record("gross", "baseline", 0.8)
@@ -198,6 +207,88 @@ class ResearchControlTest(unittest.TestCase):
         prepared["execution_timestamps"].pop(12)
         with self.assertRaisesRegex(ValueError, "gaps"):
             verify_execution_coverage(prepared, (("a", "b"),), lambda *_: (0, 2))
+        prepared["execution_timestamps"] = [i * 60_000 for i in range(45)]
+        prepared["intraday_timestamps"] = [0, 900_000, 2_700_000]
+        with self.assertRaisesRegex(ValueError, "15-minute research data has gaps"):
+            verify_execution_coverage(prepared, (("a", "b"),), lambda *_: (0, 3))
+
+    def test_search_only_validates_training_winner_and_restores_legacy_globals(self):
+        import strategy_macd_aggressive as strategy
+
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root)
+            paths = [folder / name for name in ("intraday.csv", "execution.csv", "funding.csv")]
+            for path in paths:
+                path.write_text("sample", encoding="utf-8")
+            seen = []
+            original = strategy.PARAMS["breakout_adx_min"]
+
+            def fake_backtest(**kwargs):
+                value = strategy.PARAMS["breakout_adx_min"]
+                self.assertEqual(value, kwargs["strategy_params"]["breakout_adx_min"])
+                seen.append((value, kwargs["start_date"]))
+                return {"score": value, "max_drawdown": 8.0,
+                        "funding_coverage_mode": "full", "trades": 10}
+
+            with mock.patch("backtest_macd_aggressive.prepare_backtest_context", return_value={}):
+                with mock.patch("research_control.baseline.verify_execution_coverage"):
+                    with mock.patch("backtest_macd_aggressive.backtest_macd_aggressive",
+                                    side_effect=fake_backtest):
+                        baseline = run_baseline(
+                            self.config, repo_root=REPO_ROOT, intraday_file=paths[0],
+                            execution_file=paths[1], funding_file=paths[2],
+                        )
+                        seen.clear()
+                        report = run_batch(
+                            self.config, [baseline], direction="entry", repo_root=REPO_ROOT,
+                            intraday_file=paths[0], execution_file=paths[1], funding_file=paths[2],
+                        )
+            self.assertEqual(strategy.PARAMS["breakout_adx_min"], original)
+            self.assertEqual([value for value, _ in seen[:2]], [15.5, 16.5])
+            self.assertEqual(len(seen), 2 + len(self.config.windows.validation))
+            self.assertTrue(all(value == 16.5 for value, _ in seen[2:]))
+            self.assertEqual(report["record"]["parameters"], {"strategy.breakout_adx_min": 16.5})
+            self.assertEqual(report["record"]["validation_score"], 16.5)
+            self.assertFalse(report["meaningful_progress"])
+            with self.assertRaisesRegex(ValueError, "轮换名单"):
+                run_batch(self.config, [baseline, report["record"]], direction="entry",
+                          repo_root=REPO_ROOT, intraday_file=paths[0],
+                          execution_file=paths[1], funding_file=paths[2])
+
+    def test_search_grid_limit_and_cost_fields(self):
+        import strategy_macd_aggressive as strategy
+
+        spaces = dict(self.config.search.spaces)
+        spaces["entry"] = {"strategy": {"breakout_adx_min": (10.0, 11.0, 12.0)}}
+        limited = replace(self.config, search=replace(self.config.search,
+                                                       max_candidates=2, spaces=spaces))
+        with self.assertRaisesRegex(ValueError, "超过上限"):
+            candidate_grid(limited, "entry", strategy.PARAMS, strategy.EXIT_PARAMS)
+        spaces["entry"] = {"exit": {"slippage_pct": (0.01, 0.02)}}
+        guarded = replace(self.config, search=replace(self.config.search,
+                                                       max_candidates=2, spaces=spaces))
+        with self.assertRaisesRegex(ValueError, "不允许参与搜索"):
+            candidate_grid(guarded, "entry", strategy.PARAMS, strategy.EXIT_PARAMS)
+
+    def test_search_rotation_stops_when_all_configured_batches_are_used(self):
+        import strategy_macd_aggressive as strategy
+
+        records = [self.baseline]
+        self.assertEqual(set(next_search_directions(
+            self.config, records, strategy.PARAMS, strategy.EXIT_PARAMS)),
+            set(self.config.directions))
+        for direction, count in (("entry", 3), ("exit", 2), ("risk", 2), ("regime", 2)):
+            prefix = batch_prefix(direction, candidate_grid(
+                self.config, direction, strategy.PARAMS, strategy.EXIT_PARAMS))
+            for index in range(count):
+                records.append(self.record(f"{prefix}{index}", direction, 10.2))
+        self.assertEqual(next_search_directions(
+            self.config, records, strategy.PARAMS, strategy.EXIT_PARAMS), [])
+        spaces = dict(self.config.search.spaces)
+        spaces["entry"] = {"strategy": {"breakout_adx_min": (14.5, 15.5)}}
+        revised = replace(self.config, search=replace(self.config.search, spaces=spaces))
+        self.assertEqual(next_search_directions(
+            revised, records, strategy.PARAMS, strategy.EXIT_PARAMS), ["entry"])
 
 
 if __name__ == "__main__":

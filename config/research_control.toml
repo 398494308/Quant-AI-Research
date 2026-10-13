@@ -20,6 +20,24 @@ min_positive_validation_blocks = 3
 max_drawdown_increase_points = 2.0
 max_attempts_without_progress = 4
 
+[search]
+# 每批仅在训练集穷举；训练分最高的一组参数才进入验证集。
+max_candidates = 32
+batch_size = 2
+max_batches_per_run = 4
+
+[search.spaces.entry.strategy]
+breakout_adx_min = [15.5, 16.5, 17.5, 18.5, 19.5, 20.5]
+
+[search.spaces.exit.exit]
+breakout_stop_atr_mult = [1.4, 1.6, 1.8, 2.0, 2.2]
+
+[search.spaces.risk.exit]
+position_fraction = [0.06, 0.08, 0.10, 0.12, 0.14]
+
+[search.spaces.regime.exit]
+regime_hist_floor = [-70.0, -90.0, -110.0, -130.0, -150.0]
+
 [ai]
 model = "gpt-6.1-sol"
 max_calls_per_day = 2
